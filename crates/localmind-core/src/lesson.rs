@@ -10,7 +10,10 @@ pub struct CandidateLesson {
     pub confidence: Confidence,
     evidence: Vec<EvidenceRef>,
     pub related_files: Vec<String>,
+    pub related_entities: Vec<String>,
+    pub suggested_destination: CandidateDestination,
     pub suggested_action: SuggestedAction,
+    pub validation_status: ValidationStatus,
 }
 
 impl CandidateLesson {
@@ -30,7 +33,10 @@ impl CandidateLesson {
             confidence,
             evidence: Vec::new(),
             related_files: Vec::new(),
+            related_entities: Vec::new(),
+            suggested_destination: CandidateDestination::ProjectMemory,
             suggested_action,
+            validation_status: ValidationStatus::Valid,
         }
     }
 
@@ -49,6 +55,16 @@ impl CandidateLesson {
     pub fn evidence(&self) -> &[EvidenceRef] {
         &self.evidence
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CandidateDestination {
+    ProjectMemory,
+    GlobalMemory,
+    SessionMemory,
+    SkillDraft,
+    Documentation,
+    Ignore,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
@@ -95,4 +111,13 @@ pub enum SuggestedAction {
     UpdateDocumentation,
     KeepForSession,
     Ignore,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ValidationStatus {
+    Valid,
+    LowConfidence,
+    Duplicate,
+    MissingRequiredField,
+    Malformed,
 }

@@ -21,7 +21,10 @@ pub use audit::{AuditEventKind, LearningAuditEvent};
 pub use context::{ContextPack, ContextQuery, ContextSource};
 pub use error::{ContractError, ContractResult};
 pub use evidence::{EvidenceKind, EvidenceRef};
-pub use lesson::{CandidateLesson, Confidence, LessonCategory, SuggestedAction};
+pub use lesson::{
+    CandidateDestination, CandidateLesson, Confidence, LessonCategory, SuggestedAction,
+    ValidationStatus,
+};
 pub use memory::{MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};
 pub use session::{

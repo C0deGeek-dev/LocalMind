@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use localmind_core::{SessionOutcome, SessionRecord, SessionSource};
-use localmind_store::{TranscriptImportFormat, TranscriptImporter};
+use localmind_core::{SessionId, SessionOutcome, SessionRecord, SessionSource};
+use localmind_store::{
+    CloseoutProcessor, DeterministicExtractor, TranscriptImportFormat, TranscriptImporter,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -30,6 +32,14 @@ enum Command {
         /// Input transcript format.
         #[arg(long, value_enum, default_value_t = FormatArg::PlainText)]
         format: FormatArg,
+    },
+    /// Summarize an imported session and extract candidate lessons.
+    Closeout {
+        /// Imported session id to process.
+        session_id: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -96,6 +106,20 @@ fn main() -> Result<()> {
             );
             println!("Metadata: {}", report.metadata_path.display());
             println!("Redactions: {}", report.redactions.len());
+        }
+        Command::Closeout {
+            session_id,
+            project,
+        } => {
+            let report = CloseoutProcessor::closeout_project_session(
+                project,
+                &SessionId::new(session_id),
+                &DeterministicExtractor,
+            )?;
+            println!("Closed out session {}", report.session_id);
+            println!("Summary: {}", report.summary_path.display());
+            println!("Candidates: {}", report.candidates_path.display());
+            println!("Candidate count: {}", report.candidate_count);
         }
     }
 

@@ -2,19 +2,19 @@ use crate::{ProjectConfig, Redaction, Redactor, StoreConfigError};
 use localmind_core::{
     EvidenceKind, EvidenceRef, SessionId, SessionOutcome, SessionRecord, SessionSource,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TranscriptImportFormat {
     PlainText,
     JsonLines,
     Markdown,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ImportedSession {
     pub session: SessionRecord,
     pub format: TranscriptImportFormat,

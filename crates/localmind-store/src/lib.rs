@@ -5,12 +5,17 @@
 //! only establishes the dependency direction.
 
 mod config;
+mod extraction;
 mod import;
 mod markdown;
 mod paths;
 mod redaction;
 
 pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
+pub use extraction::{
+    CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
+    ExtractionOutput, SessionExtractor,
+};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
@@ -45,12 +50,14 @@ pub type StoreRecordSet = (MemoryEntry, ReviewItem, LearningAuditEvent);
 #[cfg(test)]
 mod tests {
     use super::{
-        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig,
+        CloseoutProcessor, DeterministicExtractor, ExtractionInput, ExtractionOutput,
+        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig, SessionExtractor,
         StoreCapabilities, StoreConfigError, TranscriptImportFormat, TranscriptImporter,
     };
     use localmind_core::{
-        Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-        MemoryScope, MemoryStatus, SessionId, SessionSource,
+        CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId,
+        MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, SessionId, SessionSource,
+        SessionSummary, SuggestedAction, ValidationStatus,
     };
     use std::fs;
 
@@ -297,5 +304,176 @@ mod tests {
         assert!(!transcript.contains("C:/Users/David/secrets/config.json"));
         assert!(transcript.contains("[REDACTED:sensitive_path]"));
         Ok(())
+    }
+
+    #[test]
+    fn closeout_persists_summary_and_candidate_lessons() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Fixed failing tests.\nLesson: Prefer deterministic closeout tests.\nTODO: Create a skill for review queues.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let report = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let summary_json = fs::read_to_string(&report.summary_path)?;
+        let candidates_json = fs::read_to_string(&report.candidates_path)?;
+
+        assert!(summary_json.contains("Session session-"));
+        assert!(summary_json.contains("Fixed failing tests."));
+        assert!(candidates_json.contains("Prefer deterministic closeout tests."));
+        assert!(candidates_json.contains("CreateSkillDraft"));
+        Ok(())
+    }
+
+    #[test]
+    fn closeout_deduplicates_candidates() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer fixtures.\nLesson: Prefer fixtures.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let report = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+
+        assert_eq!(report.candidate_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn closeout_rejects_missing_import_artifacts() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+
+        let result = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &SessionId::new("session-missing"),
+            &DeterministicExtractor,
+        );
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn closeout_rejects_low_confidence_extractor_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer fixtures.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let result = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &LowConfidenceExtractor,
+        );
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn closeout_rejects_malformed_extractor_output() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer fixtures.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let result = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &MalformedExtractor,
+        );
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    struct LowConfidenceExtractor;
+
+    impl SessionExtractor for LowConfidenceExtractor {
+        fn extract(
+            &self,
+            input: ExtractionInput,
+        ) -> Result<ExtractionOutput, super::CloseoutError> {
+            let summary = SessionSummary::new(input.session_id.clone(), "title", "body");
+            let lesson = CandidateLesson::new(
+                LessonId::new("lesson-low-confidence"),
+                "Too uncertain to promote.",
+                LessonCategory::Process,
+                Confidence::new(0.1)?,
+                SuggestedAction::PromoteToMemory,
+            );
+
+            Ok(ExtractionOutput {
+                summary,
+                candidates: vec![lesson],
+            })
+        }
+    }
+
+    struct MalformedExtractor;
+
+    impl SessionExtractor for MalformedExtractor {
+        fn extract(
+            &self,
+            input: ExtractionInput,
+        ) -> Result<ExtractionOutput, super::CloseoutError> {
+            let summary = SessionSummary::new(input.session_id.clone(), "title", "body");
+            let mut lesson = CandidateLesson::new(
+                LessonId::new("lesson-malformed"),
+                "Malformed candidate.",
+                LessonCategory::Process,
+                Confidence::new(0.8)?,
+                SuggestedAction::PromoteToMemory,
+            );
+            lesson.validation_status = ValidationStatus::Malformed;
+
+            Ok(ExtractionOutput {
+                summary,
+                candidates: vec![lesson],
+            })
+        }
     }
 }

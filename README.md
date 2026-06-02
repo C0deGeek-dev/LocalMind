@@ -115,6 +115,19 @@ Likely API keys, bearer tokens, password/token assignments, connection-string
 passwords, private keys, and configured sensitive paths are redacted before
 those artifacts are written.
 
+Imported sessions can be closed out into a deterministic summary and candidate
+lesson set:
+
+```powershell
+localmind closeout session-1234 --project .
+```
+
+The first extractor is local and deterministic. It writes `summary.json` and
+`candidates.json` beside the imported transcript, validates candidate confidence
+and malformed output, and deduplicates repeated lesson text. Model-backed
+extraction can be added later behind the same extractor trait without making
+cloud calls the default.
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this
