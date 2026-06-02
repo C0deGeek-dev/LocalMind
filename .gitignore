@@ -1,0 +1,47 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Logs and runtime state
+*.log
+logs/
+tmp/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# .NET
+bin/
+obj/
+TestResults/
+
+# LocalMind local data
+.localmind/
+memory/
+sessions/
+*.sqlite
+*.sqlite3
+*.db
