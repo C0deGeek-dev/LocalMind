@@ -5,6 +5,7 @@
 //! only establishes the dependency direction.
 
 mod config;
+mod context_export;
 mod extraction;
 mod import;
 mod markdown;
@@ -12,8 +13,10 @@ mod memory_persistence;
 mod paths;
 mod redaction;
 mod review_queue;
+mod skill_drafts;
 
 pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
+pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
 pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
     ExtractionOutput, SessionExtractor,
@@ -28,6 +31,7 @@ pub use memory_persistence::{
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use review_queue::{ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary};
+pub use skill_drafts::{SkillDraftError, SkillDraftRecord, SkillDraftStore};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 

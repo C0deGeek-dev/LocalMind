@@ -1,13 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use localmind_core::SkillDraftId;
 use localmind_core::{
     ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionOutcome, SessionRecord,
     SessionSource,
 };
 use localmind_store::{
-    CloseoutProcessor, DeterministicExtractor, MemoryPersistence, ReviewQueue,
-    TranscriptImportFormat, TranscriptImporter,
+    CloseoutProcessor, ContextExportTarget, ContextExporter, DeterministicExtractor,
+    MemoryPersistence, ReviewQueue, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
 };
+use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -67,6 +69,16 @@ enum Command {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
+    /// Export accepted memory and suggested skills as agent-ready context.
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
+    /// Generate and inspect disabled skill suggestions.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -103,6 +115,46 @@ enum ReviewCommand {
         /// Optional review note.
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContextCommand {
+    /// Export a context pack for a target agent.
+    Export {
+        query: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
+        target: ContextTargetArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Generate disabled skill drafts from accepted review items.
+    Generate {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// List generated skill drafts.
+    List {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Inspect one generated skill draft.
+    Inspect {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Export a generated SKILL.md draft to stdout or a path.
+    Export {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -144,6 +196,25 @@ enum FormatArg {
     PlainText,
     JsonLines,
     Markdown,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ContextTargetArg {
+    Generic,
+    ClaudeCode,
+    OpenAiCodex,
+    Unshackled,
+}
+
+impl From<ContextTargetArg> for ContextExportTarget {
+    fn from(value: ContextTargetArg) -> Self {
+        match value {
+            ContextTargetArg::Generic => Self::Generic,
+            ContextTargetArg::ClaudeCode => Self::ClaudeCode,
+            ContextTargetArg::OpenAiCodex => Self::OpenAiCodex,
+            ContextTargetArg::Unshackled => Self::Unshackled,
+        }
+    }
 }
 
 impl From<FormatArg> for TranscriptImportFormat {
@@ -282,6 +353,64 @@ fn main() -> Result<()> {
                 );
             }
         }
+        Command::Context { command } => match command {
+            ContextCommand::Export {
+                query,
+                project,
+                target,
+            } => {
+                let exporter = ContextExporter::open_project(project)?;
+                let export = exporter.export(&query, target.into())?;
+                println!("{}", export.body_markdown);
+            }
+        },
+        Command::Skills { command } => match command {
+            SkillsCommand::Generate { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                let records = store.generate_from_review_queue()?;
+                for record in records {
+                    println!("{}\t{}", record.draft.id, record.draft_path.display());
+                }
+            }
+            SkillsCommand::List { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                for record in store.list()? {
+                    println!(
+                        "{}\t{}\t{}",
+                        record.draft.id, record.draft.name, record.draft.disabled
+                    );
+                }
+            }
+            SkillsCommand::Inspect { draft_id, project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.get(&SkillDraftId::new(draft_id))? {
+                    println!("ID: {}", record.draft.id);
+                    println!("Name: {}", record.draft.name);
+                    println!("Disabled: {}", record.draft.disabled);
+                    println!("Description: {}", record.draft.description);
+                    println!("Path: {}", record.draft_path.display());
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+            SkillsCommand::Export {
+                draft_id,
+                project,
+                output,
+            } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.get(&SkillDraftId::new(draft_id))? {
+                    if let Some(output) = output {
+                        fs::write(&output, &record.draft.body_markdown)?;
+                        println!("{}", output.display());
+                    } else {
+                        println!("{}", record.draft.body_markdown);
+                    }
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+        },
     }
 
     Ok(())

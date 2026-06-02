@@ -16,7 +16,9 @@ mod session;
 mod skill;
 mod summary;
 
-pub use adapter::{HostMappingRequirement, HostSessionMapper};
+pub use adapter::{
+    AgentSessionAdapter, AgentSessionInput, HostMappingRequirement, HostSessionMapper,
+};
 pub use audit::{AuditEventKind, LearningAuditEvent};
 pub use context::{ContextPack, ContextQuery, ContextSource};
 pub use error::{ContractError, ContractResult};
@@ -73,9 +75,11 @@ string_id!(SkillDraftId);
 #[cfg(test)]
 mod tests {
     use super::{
-        CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId,
-        SessionId, SessionOutcome, SessionRecord, SessionSource, SessionSummary, SuggestedAction,
+        AgentSessionAdapter, AgentSessionInput, CandidateLesson, Confidence, EvidenceKind,
+        EvidenceRef, HostSessionMapper, LessonCategory, LessonId, SessionId, SessionOutcome,
+        SessionRecord, SessionSource, SessionSummary, SuggestedAction,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn neutral_session_contract_serializes_without_host_types(
@@ -122,5 +126,30 @@ mod tests {
         );
 
         assert_eq!(summary.session_id.as_str(), "session-1");
+    }
+
+    #[test]
+    fn unshackled_adapter_maps_to_neutral_session_record() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let adapter = AgentSessionAdapter::unshackled();
+        let input = AgentSessionInput {
+            id: "session-1".to_string(),
+            project_root_uri: Some("file:///workspace/project".to_string()),
+            transcript_label: "unshackled session bundle".to_string(),
+            metadata: BTreeMap::from([("host".to_string(), "unshackled".to_string())]),
+        };
+
+        let session = adapter.map_session(&input)?;
+        let project = session.project.as_ref().ok_or("missing project")?;
+        let transcript = session.transcript.as_ref().ok_or("missing transcript")?;
+
+        assert_eq!(session.source, SessionSource::Unshackled);
+        assert_eq!(project.root_uri, "file:///workspace/project");
+        assert_eq!(
+            session.metadata.get("host").map(String::as_str),
+            Some("unshackled")
+        );
+        assert!(transcript.redacted);
+        Ok(())
     }
 }

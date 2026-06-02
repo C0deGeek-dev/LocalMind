@@ -155,6 +155,37 @@ Review decisions also write audit rows through the CLI. The audit log and search
 index live in `.localmind/localmind.sqlite`; the durable accepted memory remains
 readable Markdown below `.localmind/memory/project/`.
 
+## Context Export And Skill Drafts
+
+LocalMind can render accepted memory and disabled skill suggestions as concise
+agent context:
+
+```powershell
+localmind context export "deterministic fixtures" --target open-ai-codex --project .
+localmind context export "release checklist" --target unshackled --project .
+```
+
+Targets are `generic`, `claude-code`, `open-ai-codex`, and `unshackled`. The
+Unshackled target is a native-host fixture surface: Unshackled can map its
+session bundle into LocalMind contracts and render the returned context as
+built-in learning behavior without requiring users to install LocalMind
+separately.
+
+Accepted review items that describe a repeated workflow or candidate skill can
+generate disabled `SKILL.md` drafts under `.localmind/skill-drafts/`:
+
+```powershell
+localmind skills generate --project .
+localmind skills list --project .
+localmind skills inspect skill-lesson-1234 --project .
+localmind skills export skill-lesson-1234 --project .
+```
+
+Generated drafts include a disabled front matter flag, name, description,
+trigger conditions, workflow steps, constraints, verification steps, related
+memories, source agents, and last-reviewed metadata. LocalMind never installs or
+activates generated skills automatically.
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this

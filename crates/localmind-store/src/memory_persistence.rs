@@ -4,7 +4,7 @@ use crate::{
 };
 use localmind_core::{
     AuditEventKind, Confidence, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus,
-    ReviewItemId, ReviewState,
+    ReviewItemId, ReviewState, SkillDraft,
 };
 use rusqlite::{params, Connection};
 use std::fs;
@@ -175,6 +175,38 @@ impl MemoryPersistence {
                 item.state,
                 item.session_id,
                 item.reviewer_action.as_deref().unwrap_or_default()
+            ),
+        )
+    }
+
+    pub fn record_context_export(
+        &self,
+        query: &str,
+        target: &str,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::ContextPackExported,
+            "cli",
+            target,
+            &format!(
+                r#"{{"query":"{}","target":"{}"}}"#,
+                escape_json(query),
+                target
+            ),
+        )
+    }
+
+    pub fn record_skill_draft_created(
+        &self,
+        draft: &SkillDraft,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::SkillDraftCreated,
+            "cli",
+            draft.id.as_str(),
+            &format!(
+                r#"{{"name":"{}","disabled":true}}"#,
+                escape_json(&draft.name)
             ),
         )
     }
@@ -374,6 +406,10 @@ impl MemoryPersistence {
             .map_err(MemoryPersistenceError::Sqlite)?;
         Ok(())
     }
+}
+
+fn escape_json(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[derive(Debug, Error)]
