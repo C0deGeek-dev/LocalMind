@@ -45,3 +45,6 @@ sessions/
 *.sqlite
 *.sqlite3
 *.db
+
+# Personal notes
+LocalMind Unshackled.txt
