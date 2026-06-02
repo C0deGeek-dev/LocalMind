@@ -10,6 +10,7 @@ mod import;
 mod markdown;
 mod paths;
 mod redaction;
+mod review_queue;
 
 pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
 pub use extraction::{
@@ -22,6 +23,7 @@ pub use import::{
 pub use markdown::MarkdownMemoryFormat;
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
+pub use review_queue::{ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 
@@ -51,13 +53,14 @@ pub type StoreRecordSet = (MemoryEntry, ReviewItem, LearningAuditEvent);
 mod tests {
     use super::{
         CloseoutProcessor, DeterministicExtractor, ExtractionInput, ExtractionOutput,
-        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig, SessionExtractor,
-        StoreCapabilities, StoreConfigError, TranscriptImportFormat, TranscriptImporter,
+        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig, ReviewQueue,
+        ReviewQueueError, SessionExtractor, StoreCapabilities, StoreConfigError,
+        TranscriptImportFormat, TranscriptImporter,
     };
     use localmind_core::{
         CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId,
-        MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, SessionId, SessionSource,
-        SessionSummary, SuggestedAction, ValidationStatus,
+        MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewAction, ReviewDecision,
+        SessionId, SessionSource, SessionSummary, SuggestedAction, ValidationStatus,
     };
     use std::fs;
 
@@ -333,6 +336,7 @@ mod tests {
         assert!(summary_json.contains("Fixed failing tests."));
         assert!(candidates_json.contains("Prefer deterministic closeout tests."));
         assert!(candidates_json.contains("CreateSkillDraft"));
+        assert_eq!(report.enqueued_count, 2);
         Ok(())
     }
 
@@ -358,6 +362,144 @@ mod tests {
         )?;
 
         assert_eq!(report.candidate_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn review_queue_migrates_and_starts_empty() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let summary = queue.summary()?;
+
+        assert_eq!(summary.pending, 0);
+        assert!(temp_dir.path().join(".localmind/localmind.sqlite").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn closeout_enqueue_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer queue fixtures.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let first = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let second = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+
+        assert_eq!(first.enqueued_count, 1);
+        assert_eq!(second.enqueued_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn review_decisions_are_idempotent_and_record_details() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer review decisions.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+        CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let item_id = queue.list()?[0].id.clone();
+        let decision = ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::Accept,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: Some("looks right".to_string()),
+            replacement_summary: None,
+            evidence: Vec::new(),
+        };
+
+        let first = queue.decide(decision.clone())?;
+        let second = queue.decide(decision)?;
+
+        assert_eq!(first.state, localmind_core::ReviewState::Accepted);
+        assert_eq!(second.state, localmind_core::ReviewState::Accepted);
+        assert_eq!(second.note.as_deref(), Some("looks right"));
+        Ok(())
+    }
+
+    #[test]
+    fn edit_decision_requires_replacement_text() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer edit validation.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+        CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let item_id = queue.list()?[0].id.clone();
+
+        let result = queue.decide(ReviewDecision {
+            item_id,
+            action: ReviewAction::Edit,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: Some(" ".to_string()),
+            evidence: Vec::new(),
+        });
+
+        assert!(matches!(result, Err(ReviewQueueError::InvalidEdit { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn review_queue_refuses_disabled_projects() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = false\n",
+        )?;
+
+        let result = ReviewQueue::open_project(temp_dir.path());
+
+        assert!(result.is_err());
         Ok(())
     }
 

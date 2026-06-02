@@ -74,5 +74,38 @@ fn closeout_command_writes_summary_and_candidates() -> Result<(), Box<dyn std::e
     let sessions_dir = temp_dir.path().join(".localmind/sessions").join(session_id);
     assert!(sessions_dir.join("summary.json").exists());
     assert!(sessions_dir.join("candidates.json").exists());
+
+    let list_output = Command::cargo_bin("localmind")?
+        .arg("review")
+        .arg("list")
+        .arg("--project")
+        .arg(temp_dir.path())
+        .output()?;
+    assert!(list_output.status.success());
+    let list_stdout = String::from_utf8(list_output.stdout)?;
+    let item_id = list_stdout
+        .lines()
+        .find_map(|line| line.split('\t').next())
+        .ok_or("missing review item id")?;
+
+    let inspect_output = Command::cargo_bin("localmind")?
+        .arg("review")
+        .arg("inspect")
+        .arg(item_id)
+        .arg("--project")
+        .arg(temp_dir.path())
+        .output()?;
+    assert!(inspect_output.status.success());
+
+    let accept_output = Command::cargo_bin("localmind")?
+        .arg("review")
+        .arg("accept")
+        .arg(item_id)
+        .arg("--project")
+        .arg(temp_dir.path())
+        .arg("--reviewer")
+        .arg("test")
+        .output()?;
+    assert!(accept_output.status.success());
     Ok(())
 }

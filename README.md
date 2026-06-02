@@ -128,6 +128,19 @@ and malformed output, and deduplicates repeated lesson text. Model-backed
 extraction can be added later behind the same extractor trait without making
 cloud calls the default.
 
+Candidate lessons are queued in `.localmind/localmind.sqlite` for terminal
+review. Closeout enqueues candidates idempotently; no durable memory write
+happens until a later promotion stage consumes accepted review items.
+
+```powershell
+localmind review list --project .
+localmind review inspect lesson-1234 --project .
+localmind review accept lesson-1234 --project . --reviewer david
+localmind review reject lesson-1234 --project . --note "not durable"
+localmind review edit lesson-1234 "Prefer deterministic fixtures." --project .
+localmind review defer lesson-1234 --project .
+```
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this

@@ -1,4 +1,4 @@
-use crate::{ImportedSession, ProjectConfig, StoreConfigError};
+use crate::{ImportedSession, ProjectConfig, ReviewQueue, ReviewQueueError, StoreConfigError};
 use localmind_core::{
     CandidateDestination, CandidateLesson, Confidence, ContractError, EvidenceKind, EvidenceRef,
     LessonCategory, LessonId, SessionId, SessionSummary, SuggestedAction, ValidationStatus,
@@ -46,6 +46,7 @@ pub struct CloseoutReport {
     pub summary_path: PathBuf,
     pub candidates_path: PathBuf,
     pub candidate_count: usize,
+    pub enqueued_count: usize,
 }
 
 pub struct CloseoutProcessor;
@@ -109,12 +110,15 @@ impl CloseoutProcessor {
                 source,
             }
         })?;
+        let queue = ReviewQueue::open_project(&config.project_root)?;
+        let enqueued_count = queue.enqueue_candidates(session_id, &output.candidates)?;
 
         Ok(CloseoutReport {
             session_id: session_id.clone(),
             summary_path,
             candidates_path,
             candidate_count: output.candidates.len(),
+            enqueued_count,
         })
     }
 }
@@ -283,4 +287,6 @@ pub enum CloseoutError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(transparent)]
+    ReviewQueue(#[from] ReviewQueueError),
 }

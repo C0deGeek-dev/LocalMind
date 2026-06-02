@@ -1,8 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use localmind_core::{SessionId, SessionOutcome, SessionRecord, SessionSource};
+use localmind_core::{
+    ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionOutcome, SessionRecord,
+    SessionSource,
+};
 use localmind_store::{
-    CloseoutProcessor, DeterministicExtractor, TranscriptImportFormat, TranscriptImporter,
+    CloseoutProcessor, DeterministicExtractor, ReviewQueue, TranscriptImportFormat,
+    TranscriptImporter,
 };
 use std::path::PathBuf;
 
@@ -41,6 +45,62 @@ enum Command {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
+    /// Review extracted candidate lessons before promotion.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    /// List review queue items.
+    List {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Inspect one review queue item.
+    Inspect {
+        item_id: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Accept one review queue item.
+    Accept(ReviewDecisionArgs),
+    /// Reject one review queue item.
+    Reject(ReviewDecisionArgs),
+    /// Defer one review queue item.
+    Defer(ReviewDecisionArgs),
+    /// Edit one review queue item before accepting it.
+    Edit {
+        item_id: String,
+        replacement: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct ReviewDecisionArgs {
+    item_id: String,
+    /// Project root containing .localmind.toml.
+    #[arg(long, default_value = ".")]
+    project: PathBuf,
+    /// Reviewer identifier to record.
+    #[arg(long, default_value = "cli")]
+    reviewer: String,
+    /// Optional review note.
+    #[arg(long)]
+    note: Option<String>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -120,9 +180,80 @@ fn main() -> Result<()> {
             println!("Summary: {}", report.summary_path.display());
             println!("Candidates: {}", report.candidates_path.display());
             println!("Candidate count: {}", report.candidate_count);
+            println!("Enqueued: {}", report.enqueued_count);
         }
+        Command::Review { command } => match command {
+            ReviewCommand::List { project } => {
+                let queue = ReviewQueue::open_project(project)?;
+                for item in queue.list()? {
+                    println!(
+                        "{}\t{:?}\t{}\t{}",
+                        item.id,
+                        item.state,
+                        item.session_id,
+                        item.candidate.summary()
+                    );
+                }
+            }
+            ReviewCommand::Inspect { item_id, project } => {
+                let queue = ReviewQueue::open_project(project)?;
+                if let Some(item) = queue.get(&ReviewItemId::new(item_id))? {
+                    println!("ID: {}", item.id);
+                    println!("State: {:?}", item.state);
+                    println!("Session: {}", item.session_id);
+                    println!("Summary: {}", item.candidate.summary());
+                    println!("Category: {:?}", item.candidate.category);
+                    println!("Confidence: {:.3}", item.candidate.confidence.value());
+                    if let Some(replacement) = item.replacement_summary {
+                        println!("Replacement: {replacement}");
+                    }
+                    if let Some(note) = item.note {
+                        println!("Note: {note}");
+                    }
+                } else {
+                    println!("Review item not found");
+                }
+            }
+            ReviewCommand::Accept(args) => apply_review_decision(args, ReviewAction::Accept)?,
+            ReviewCommand::Reject(args) => apply_review_decision(args, ReviewAction::Reject)?,
+            ReviewCommand::Defer(args) => apply_review_decision(args, ReviewAction::MarkTemporary)?,
+            ReviewCommand::Edit {
+                item_id,
+                replacement,
+                project,
+                reviewer,
+                note,
+            } => {
+                let queue = ReviewQueue::open_project(project)?;
+                let item = queue.decide(ReviewDecision {
+                    item_id: ReviewItemId::new(item_id),
+                    action: ReviewAction::Edit,
+                    reviewer,
+                    decided_at: None,
+                    note,
+                    replacement_summary: Some(replacement),
+                    evidence: Vec::new(),
+                })?;
+                println!("{} -> {:?}", item.id, item.state);
+            }
+        },
     }
 
+    Ok(())
+}
+
+fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Result<()> {
+    let queue = ReviewQueue::open_project(args.project)?;
+    let item = queue.decide(ReviewDecision {
+        item_id: ReviewItemId::new(args.item_id),
+        action,
+        reviewer: args.reviewer,
+        decided_at: None,
+        note: args.note,
+        replacement_summary: None,
+        evidence: Vec::new(),
+    })?;
+    println!("{} -> {:?}", item.id, item.state);
     Ok(())
 }
 
