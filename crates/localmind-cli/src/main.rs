@@ -5,8 +5,8 @@ use localmind_core::{
     SessionSource,
 };
 use localmind_store::{
-    CloseoutProcessor, DeterministicExtractor, ReviewQueue, TranscriptImportFormat,
-    TranscriptImporter,
+    CloseoutProcessor, DeterministicExtractor, MemoryPersistence, ReviewQueue,
+    TranscriptImportFormat, TranscriptImporter,
 };
 use std::path::PathBuf;
 
@@ -49,6 +49,23 @@ enum Command {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    /// Promote accepted review items into Markdown memory.
+    Promote {
+        item_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Search accepted memory.
+    Search {
+        query: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Print audit records.
+    Audit {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -224,6 +241,7 @@ fn main() -> Result<()> {
                 reviewer,
                 note,
             } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
                 let queue = ReviewQueue::open_project(project)?;
                 let item = queue.decide(ReviewDecision {
                     item_id: ReviewItemId::new(item_id),
@@ -234,15 +252,43 @@ fn main() -> Result<()> {
                     replacement_summary: Some(replacement),
                     evidence: Vec::new(),
                 })?;
+                persistence.record_review_item_audit(&item)?;
                 println!("{} -> {:?}", item.id, item.state);
             }
         },
+        Command::Promote { item_id, project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            let entry = persistence.promote_review_item(&ReviewItemId::new(item_id))?;
+            println!("Promoted memory {}", entry.id);
+        }
+        Command::Search { query, project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            for result in persistence.search(&query)? {
+                println!(
+                    "{}\t{}\t{}",
+                    result.memory_id,
+                    result.score,
+                    result.path.display()
+                );
+                println!("{}", result.snippet);
+            }
+        }
+        Command::Audit { project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            for record in persistence.audit_records()? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    record.id, record.kind, record.actor, record.subject
+                );
+            }
+        }
     }
 
     Ok(())
 }
 
 fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Result<()> {
+    let persistence = MemoryPersistence::open_project(&args.project)?;
     let queue = ReviewQueue::open_project(args.project)?;
     let item = queue.decide(ReviewDecision {
         item_id: ReviewItemId::new(args.item_id),
@@ -253,6 +299,7 @@ fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Resu
         replacement_summary: None,
         evidence: Vec::new(),
     })?;
+    persistence.record_review_item_audit(&item)?;
     println!("{} -> {:?}", item.id, item.state);
     Ok(())
 }

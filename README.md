@@ -141,6 +141,20 @@ localmind review edit lesson-1234 "Prefer deterministic fixtures." --project .
 localmind review defer lesson-1234 --project .
 ```
 
+Accepted or edited review items can then be promoted into Markdown project
+memory. Promotion writes the memory file, updates the local search index and
+relationship metadata, and records a SQLite audit event:
+
+```powershell
+localmind promote lesson-1234 --project .
+localmind search "deterministic fixtures" --project .
+localmind audit --project .
+```
+
+Review decisions also write audit rows through the CLI. The audit log and search
+index live in `.localmind/localmind.sqlite`; the durable accepted memory remains
+readable Markdown below `.localmind/memory/project/`.
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this

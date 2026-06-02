@@ -107,5 +107,30 @@ fn closeout_command_writes_summary_and_candidates() -> Result<(), Box<dyn std::e
         .arg("test")
         .output()?;
     assert!(accept_output.status.success());
+
+    let promote_output = Command::cargo_bin("localmind")?
+        .arg("promote")
+        .arg(item_id)
+        .arg("--project")
+        .arg(temp_dir.path())
+        .output()?;
+    assert!(promote_output.status.success());
+
+    let search_output = Command::cargo_bin("localmind")?
+        .arg("search")
+        .arg("deterministic fixtures")
+        .arg("--project")
+        .arg(temp_dir.path())
+        .output()?;
+    assert!(search_output.status.success());
+    assert!(String::from_utf8(search_output.stdout)?.contains(item_id));
+
+    let audit_output = Command::cargo_bin("localmind")?
+        .arg("audit")
+        .arg("--project")
+        .arg(temp_dir.path())
+        .output()?;
+    assert!(audit_output.status.success());
+    assert!(String::from_utf8(audit_output.stdout)?.contains("MemoryPromoted"));
     Ok(())
 }

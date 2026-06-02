@@ -8,6 +8,7 @@ mod config;
 mod extraction;
 mod import;
 mod markdown;
+mod memory_persistence;
 mod paths;
 mod redaction;
 mod review_queue;
@@ -21,6 +22,9 @@ pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
 pub use markdown::MarkdownMemoryFormat;
+pub use memory_persistence::{
+    AuditRecord, MemoryPersistence, MemoryPersistenceError, MemorySearchResult,
+};
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use review_queue::{ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary};
@@ -53,14 +57,14 @@ pub type StoreRecordSet = (MemoryEntry, ReviewItem, LearningAuditEvent);
 mod tests {
     use super::{
         CloseoutProcessor, DeterministicExtractor, ExtractionInput, ExtractionOutput,
-        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig, ReviewQueue,
-        ReviewQueueError, SessionExtractor, StoreCapabilities, StoreConfigError,
-        TranscriptImportFormat, TranscriptImporter,
+        MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, MemoryPersistence,
+        ProjectConfig, ReviewQueue, ReviewQueueError, SessionExtractor, StoreCapabilities,
+        StoreConfigError, TranscriptImportFormat, TranscriptImporter,
     };
     use localmind_core::{
         CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId,
         MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewAction, ReviewDecision,
-        SessionId, SessionSource, SessionSummary, SuggestedAction, ValidationStatus,
+        ReviewItemId, SessionId, SessionSource, SessionSummary, SuggestedAction, ValidationStatus,
     };
     use std::fs;
 
@@ -501,6 +505,234 @@ mod tests {
 
         assert!(result.is_err());
         Ok(())
+    }
+
+    #[test]
+    fn accepted_review_item_promotes_to_markdown_memory_and_audit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer review persistence.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        let entry = persistence.promote_review_item(&item_id)?;
+        let records = persistence.audit_records()?;
+        let results = persistence.search("review persistence")?;
+        let relationships = persistence.relationships_for(&entry.id)?;
+
+        assert!(temp_dir
+            .path()
+            .join(format!(".localmind/memory/project/{}.md", entry.id))
+            .exists());
+        assert!(records.iter().any(|record| record.kind == "MemoryPromoted"));
+        assert_eq!(results[0].memory_id, entry.id);
+        assert!(relationships
+            .iter()
+            .any(|(kind, target)| kind == "category" && target == "Process"));
+        assert!(relationships.iter().any(|(kind, _)| kind == "session"));
+        Ok(())
+    }
+
+    #[test]
+    fn edited_review_item_promotes_replacement_text() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer editable memory.")?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        queue.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::Edit,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: Some("Use edited memory body.".to_string()),
+            evidence: Vec::new(),
+        })?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        let entry = persistence.promote_review_item(&item_id)?;
+
+        assert_eq!(entry.body, "Use edited memory body.");
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_promotion_updates_one_search_result() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer one durable memory row.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        let entry = persistence.promote_review_item(&item_id)?;
+        persistence.promote_review_item(&item_id)?;
+        let results = persistence.search("durable memory")?;
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.memory_id == entry.id)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_ranks_keyword_matches_and_filters_misses() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let stronger = accepted_fixture_item(
+            temp_dir.path(),
+            "Use fixture fixture fixture data for deterministic cargo tests.",
+        )?;
+        let weaker = accepted_fixture_item(temp_dir.path(), "Use cargo clippy for lint checks.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        let stronger_entry = persistence.promote_review_item(&stronger)?;
+        let weaker_entry = persistence.promote_review_item(&weaker)?;
+        let ranked = persistence.search("fixture cargo")?;
+        let filtered = persistence.search("missing-term")?;
+
+        assert_eq!(ranked[0].memory_id, stronger_entry.id);
+        assert!(ranked
+            .iter()
+            .any(|result| result.memory_id == weaker_entry.id));
+        assert!(filtered.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn review_actions_write_audit_records_for_supported_states(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: accept audit.\nLesson: reject audit.\nLesson: edit audit.\nLesson: defer audit.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+        CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        let items = queue.list()?;
+        let decisions = [
+            (items[0].id.clone(), ReviewAction::Accept, None),
+            (items[1].id.clone(), ReviewAction::Reject, None),
+            (
+                items[2].id.clone(),
+                ReviewAction::Edit,
+                Some("edited audit body".to_string()),
+            ),
+            (items[3].id.clone(), ReviewAction::MarkTemporary, None),
+        ];
+
+        for (item_id, action, replacement_summary) in decisions {
+            let item = queue.decide(ReviewDecision {
+                item_id,
+                action,
+                reviewer: "test".to_string(),
+                decided_at: None,
+                note: None,
+                replacement_summary,
+                evidence: Vec::new(),
+            })?;
+            persistence.record_review_item_audit(&item)?;
+        }
+
+        let records = persistence.audit_records()?;
+        let decision_records: Vec<_> = records
+            .iter()
+            .filter(|record| record.kind == "ReviewDecisionRecorded")
+            .collect();
+        assert_eq!(decision_records.len(), 4);
+        assert!(decision_records
+            .iter()
+            .any(|record| record.metadata_json.contains(r#""action":"accept""#)));
+        assert!(decision_records
+            .iter()
+            .any(|record| record.metadata_json.contains(r#""action":"reject""#)));
+        assert!(decision_records
+            .iter()
+            .any(|record| record.metadata_json.contains(r#""action":"edit""#)));
+        assert!(decision_records
+            .iter()
+            .any(|record| record.metadata_json.contains(r#""action":"defer""#)));
+        Ok(())
+    }
+
+    #[test]
+    fn unaccepted_review_item_cannot_promote() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "Lesson: Prefer pending reviews.\n",
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+        CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let item_id = queue.list()?[0].id.clone();
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        let result = persistence.promote_review_item(&item_id);
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    fn accepted_fixture_item(
+        project_root: &std::path::Path,
+        lesson_text: &str,
+    ) -> Result<ReviewItemId, Box<dyn std::error::Error>> {
+        fs::write(
+            project_root.join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(project_root)?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            &format!("Lesson: {lesson_text}\n"),
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        )?;
+        CloseoutProcessor::closeout_project_session(
+            project_root,
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+        let queue = ReviewQueue::open_project(project_root)?;
+        let item_id = queue
+            .list()?
+            .into_iter()
+            .find(|item| {
+                item.session_id == import.session_id && item.candidate.summary() == lesson_text
+            })
+            .ok_or("accepted fixture item missing")?
+            .id;
+        queue.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::Accept,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: Some("durable".to_string()),
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })?;
+        Ok(item_id)
     }
 
     #[test]
