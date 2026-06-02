@@ -1,0 +1,38 @@
+[workspace]
+members = [
+    "crates/localmind-cli",
+    "crates/localmind-core",
+    "crates/localmind-mcp",
+    "crates/localmind-review",
+    "crates/localmind-search",
+    "crates/localmind-skills",
+    "crates/localmind-store",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
+repository = "https://github.com/David-c0degeek/localmind"
+homepage = "https://github.com/David-c0degeek/localmind"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "=1.0.95"
+assert_cmd = "=2.0.16"
+clap = { version = "=4.5.23", features = ["derive", "env"] }
+serde = { version = "=1.0.217", features = ["derive"] }
+serde_json = "=1.0.134"
+tempfile = "=3.14.0"
+thiserror = "=2.0.9"
+time = { version = "=0.3.37", features = ["formatting", "parsing", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"

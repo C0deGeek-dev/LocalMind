@@ -14,6 +14,7 @@ Thumbs.db
 logs/
 tmp/
 temp/
+target/
 
 # Python
 __pycache__/

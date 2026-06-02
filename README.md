@@ -6,6 +6,20 @@ The goal is to turn opted-in AI development sessions into reviewed project
 memory, graph-connected knowledge, and reusable skills without sending private
 work to external services by default.
 
+## Architecture Posture
+
+LocalMind is implemented as an extracted, host-neutral learning engine. The core
+contracts live in Rust library crates so host runtimes can embed the same engine
+without calling a separate service.
+
+Unshackled is the first native host: it should bundle LocalMind-backed learning
+as built-in memory, review, context, and skill behavior. LocalMind core never
+depends on Unshackled; Unshackled maps its session bundles, tool events, diffs,
+test results, and recovery events into LocalMind contracts through an adapter.
+
+The standalone `localmind` CLI is the shell around the same engine for generic
+transcripts, Claude Code, OpenAI Codex, and future MCP clients.
+
 ## Repository Role
 
 This repository is the implementation home for the system described in
@@ -29,6 +43,34 @@ Initial MVP target:
 - Keep a SQLite audit log.
 - Support basic search.
 - Suggest `SKILL.md` files for repeated workflows.
+
+Current workspace layout:
+
+- `crates/localmind-core` — neutral session, evidence, lesson, review, memory,
+  context, skill, audit, and host-adapter contracts.
+- `crates/localmind-store` — Markdown memory plus queue/audit/index storage
+  boundary.
+- `crates/localmind-review` — manual review workflow boundary.
+- `crates/localmind-search` — retrieval/search boundary.
+- `crates/localmind-skills` — skill draft generation and maintenance boundary.
+- `crates/localmind-cli` — standalone CLI entry point.
+- `crates/localmind-mcp` — future MCP surface.
+
+## Development
+
+Baseline local commands:
+
+```powershell
+cargo fmt --check
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p localmind-cli -- --help
+```
+
+The MVP remains local-first and opt-in. No cloud dependency, autonomous memory
+write, hidden transcript capture, or host-specific dependency belongs in
+`localmind-core`.
 
 ## Planning
 

@@ -1,0 +1,21 @@
+[package]
+name = "localmind-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "localmind"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+localmind-core = { path = "../localmind-core" }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
