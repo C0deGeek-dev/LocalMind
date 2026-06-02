@@ -92,6 +92,29 @@ serialized as readable Markdown with front matter for scope, category,
 confidence, source session, evidence, related files/entities, and supersession
 metadata.
 
+## Transcript Import
+
+Opted-in projects can import local transcript files manually:
+
+```powershell
+localmind import .\session.txt --project . --source open-ai-codex
+```
+
+Supported first-pass sources are `generic`, `claude-code`, `open-ai-codex`, and
+`unshackled`. Supported first-pass formats are `plain-text`, `json-lines`, and
+`markdown`; all are currently persisted as redacted raw transcript material for
+later summary/extraction stages.
+
+Imports write deterministic, content-derived session folders under
+`.localmind/sessions/<session-id>/`:
+
+- `transcript.redacted.txt`
+- `metadata.json`
+
+Likely API keys, bearer tokens, password/token assignments, connection-string
+passwords, private keys, and configured sensitive paths are redacted before
+those artifacts are written.
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this

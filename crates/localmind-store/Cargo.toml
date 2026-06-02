@@ -10,7 +10,9 @@ workspace = true
 
 [dependencies]
 localmind-core = { path = "../localmind-core" }
+regex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 toml = { workspace = true }

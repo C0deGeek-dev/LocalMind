@@ -5,12 +5,18 @@
 //! only establishes the dependency direction.
 
 mod config;
+mod import;
 mod markdown;
 mod paths;
+mod redaction;
 
 pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
+pub use import::{
+    ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
+};
 pub use markdown::MarkdownMemoryFormat;
 pub use paths::{MemoryPathError, MemoryPathResolver};
+pub use redaction::{Redaction, RedactionReport, Redactor};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 
@@ -40,11 +46,11 @@ pub type StoreRecordSet = (MemoryEntry, ReviewItem, LearningAuditEvent);
 mod tests {
     use super::{
         MarkdownMemoryFormat, MemoryPathError, MemoryPathResolver, ProjectConfig,
-        StoreCapabilities, StoreConfigError,
+        StoreCapabilities, StoreConfigError, TranscriptImportFormat, TranscriptImporter,
     };
     use localmind_core::{
         Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-        MemoryScope, MemoryStatus, SessionId,
+        MemoryScope, MemoryStatus, SessionId, SessionSource,
     };
     use std::fs;
 
@@ -214,5 +220,82 @@ mod tests {
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
         })
+    }
+
+    #[test]
+    fn import_refuses_disabled_projects() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let transcript_path = temp_dir.path().join("transcript.txt");
+        fs::write(&transcript_path, "fixed a bug")?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = false\n",
+        )?;
+
+        let error = TranscriptImporter::import_file(
+            temp_dir.path(),
+            &transcript_path,
+            SessionSource::GenericTranscript,
+            TranscriptImportFormat::PlainText,
+        );
+
+        assert!(error.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn import_writes_only_redacted_transcript() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let transcript_path = temp_dir.path().join("transcript.txt");
+        fs::write(
+            &transcript_path,
+            "token = sk-proj-abcdefghijklmnopqrstuvwxyz123456\npassword=super-secret\n",
+        )?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nexcluded_paths = [\"C:/Users/David/secrets\"]\n",
+        )?;
+
+        let report = TranscriptImporter::import_file(
+            temp_dir.path(),
+            &transcript_path,
+            SessionSource::OpenAiCodex,
+            TranscriptImportFormat::PlainText,
+        )?;
+        let transcript = fs::read_to_string(&report.redacted_transcript_path)?;
+        let metadata = fs::read_to_string(&report.metadata_path)?;
+
+        assert!(!transcript.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!transcript.contains("super-secret"));
+        assert!(transcript.contains("[REDACTED:openai_api_key]"));
+        assert!(transcript.contains("[REDACTED:password_assignment]"));
+        assert!(metadata.contains("OpenAiCodex"));
+        Ok(())
+    }
+
+    #[test]
+    fn import_redacts_configured_sensitive_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let transcript_path = temp_dir.path().join("transcript.txt");
+        fs::write(
+            &transcript_path,
+            "read C:/Users/David/secrets/config.json during debugging",
+        )?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nexcluded_paths = [\"C:/Users/David/secrets/config.json\"]\n",
+        )?;
+
+        let report = TranscriptImporter::import_file(
+            temp_dir.path(),
+            &transcript_path,
+            SessionSource::ClaudeCode,
+            TranscriptImportFormat::PlainText,
+        )?;
+        let transcript = fs::read_to_string(&report.redacted_transcript_path)?;
+
+        assert!(!transcript.contains("C:/Users/David/secrets/config.json"));
+        assert!(transcript.contains("[REDACTED:sensitive_path]"));
+        Ok(())
     }
 }
