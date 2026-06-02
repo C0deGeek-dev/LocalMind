@@ -12,6 +12,8 @@ pub struct MemoryEntry {
     pub source_session: Option<SessionId>,
     pub evidence: Vec<EvidenceRef>,
     pub tags: Vec<String>,
+    pub related_files: Vec<String>,
+    pub related_entities: Vec<String>,
     pub created_at: Option<OffsetDateTime>,
     pub updated_at: Option<OffsetDateTime>,
     pub supersedes: Vec<MemoryEntryId>,
@@ -20,6 +22,7 @@ pub struct MemoryEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
     GlobalUser,
     Project,

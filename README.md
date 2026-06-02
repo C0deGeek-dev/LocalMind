@@ -72,6 +72,26 @@ The MVP remains local-first and opt-in. No cloud dependency, autonomous memory
 write, hidden transcript capture, or host-specific dependency belongs in
 `localmind-core`.
 
+## Project Opt-In
+
+LocalMind refuses project memory writes unless the repository contains an
+enabled `.localmind.toml` file:
+
+```toml
+[learning]
+enabled = true
+local_only = true
+memory_root = ".localmind/memory"
+allowed_scopes = ["project"]
+excluded_paths = ["target/**", ".git/**"]
+```
+
+The default memory root is inside `.localmind/memory`, and write paths are
+validated so accepted memory files stay inside that root. Durable memory is
+serialized as readable Markdown with front matter for scope, category,
+confidence, source session, evidence, related files/entities, and supersession
+metadata.
+
 ## Planning
 
 Before implementation, run the plan template from `c0degeek-ai` against this
