@@ -26,7 +26,7 @@ pub use import::{
 };
 pub use markdown::MarkdownMemoryFormat;
 pub use memory_persistence::{
-    AuditRecord, MemoryPersistence, MemoryPersistenceError, MemorySearchResult,
+    AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryRecord, MemorySearchResult,
 };
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
@@ -349,6 +349,33 @@ mod tests {
     }
 
     #[test]
+    fn closeout_extracts_lessons_after_host_speaker_prefixes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let config = ProjectConfig::discover(temp_dir.path())?;
+        let import = TranscriptImporter::import_text(
+            &config,
+            "user: Lesson: Prefer host-rendered transcript fixtures.\n",
+            SessionSource::Unshackled,
+            TranscriptImportFormat::PlainText,
+        )?;
+
+        let report = CloseoutProcessor::closeout_project_session(
+            temp_dir.path(),
+            &import.session_id,
+            &DeterministicExtractor,
+        )?;
+
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.enqueued_count, 1);
+        Ok(())
+    }
+
+    #[test]
     fn closeout_deduplicates_candidates() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         fs::write(
@@ -533,6 +560,31 @@ mod tests {
             .iter()
             .any(|(kind, target)| kind == "category" && target == "Process"));
         assert!(relationships.iter().any(|(kind, _)| kind == "session"));
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_memory_can_be_listed_and_deleted() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer removable memory.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        let entry = persistence.promote_review_item(&item_id)?;
+
+        let records = persistence.list_memory()?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].memory_id, entry.id);
+
+        assert!(persistence.delete_memory(&entry.id, "test")?);
+        assert!(!persistence.delete_memory(&entry.id, "test")?);
+        assert!(!temp_dir
+            .path()
+            .join(format!(".localmind/memory/project/{}.md", entry.id))
+            .exists());
+        assert!(persistence.search("removable memory")?.is_empty());
+        assert!(persistence
+            .audit_records()?
+            .iter()
+            .any(|record| record.kind == "MemoryDeleted"));
         Ok(())
     }
 

@@ -30,6 +30,16 @@ pub struct MemorySearchResult {
     pub snippet: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryRecord {
+    pub memory_id: MemoryEntryId,
+    pub path: PathBuf,
+    pub scope: String,
+    pub category: String,
+    pub status: String,
+    pub body: String,
+}
+
 pub struct MemoryPersistence {
     config: ProjectConfig,
     connection: Connection,
@@ -211,6 +221,90 @@ impl MemoryPersistence {
         )
     }
 
+    pub fn list_memory(&self) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT memory_id, path, scope, category, status, body
+                FROM memory_index
+                WHERE status = 'active'
+                ORDER BY created_at, memory_id
+                "#,
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(MemoryRecord {
+                    memory_id: MemoryEntryId::new(row.get::<_, String>(0)?),
+                    path: PathBuf::from(row.get::<_, String>(1)?),
+                    scope: row.get(2)?,
+                    category: row.get(3)?,
+                    status: row.get(4)?,
+                    body: row.get(5)?,
+                })
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(records)
+    }
+
+    pub fn delete_memory(
+        &self,
+        memory_id: &MemoryEntryId,
+        actor: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let path = self.memory_path(memory_id)?;
+        let Some(path) = path else {
+            return Ok(false);
+        };
+
+        let memory_root = self.config.memory_root();
+        if !path.starts_with(&memory_root) {
+            return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
+        }
+
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(MemoryPersistenceError::DeleteMemoryFile {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        }
+
+        self.connection
+            .execute(
+                "DELETE FROM memory_relationships WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute(
+                "DELETE FROM memory_fts WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute(
+                "DELETE FROM memory_index WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.write_audit(
+            AuditEventKind::MemoryDeleted,
+            actor,
+            memory_id.as_str(),
+            "{}",
+        )?;
+        Ok(true)
+    }
+
     pub fn search(&self, query: &str) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
         let terms: Vec<String> = query
             .split_whitespace()
@@ -309,6 +403,23 @@ impl MemoryPersistence {
             relationships.push(row.map_err(MemoryPersistenceError::Sqlite)?);
         }
         Ok(relationships)
+    }
+
+    fn memory_path(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Option<PathBuf>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM memory_index WHERE memory_id = ?1 AND status = 'active'")
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        match statement.query_row(params![memory_id.as_str()], |row| {
+            Ok(PathBuf::from(row.get::<_, String>(0)?))
+        }) {
+            Ok(path) => Ok(Some(path)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(MemoryPersistenceError::Sqlite(error)),
+        }
     }
 
     fn index_memory(&self, entry: &MemoryEntry, path: &Path) -> Result<(), MemoryPersistenceError> {
@@ -431,6 +542,13 @@ pub enum MemoryPersistenceError {
     OpenDatabase {
         path: PathBuf,
         source: rusqlite::Error,
+    },
+    #[error("indexed memory path escapes LocalMind memory root: {path:?}")]
+    UnsafeIndexedMemoryPath { path: PathBuf },
+    #[error("failed to delete LocalMind memory file {path:?}: {source}")]
+    DeleteMemoryFile {
+        path: PathBuf,
+        source: std::io::Error,
     },
     #[error("review item does not exist: {item_id}")]
     MissingReviewItem { item_id: ReviewItemId },

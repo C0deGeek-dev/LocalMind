@@ -22,6 +22,7 @@ pub enum AuditEventKind {
     CandidateLessonCreated,
     ReviewDecisionRecorded,
     MemoryPromoted,
+    MemoryDeleted,
     MemorySuperseded,
     SkillDraftCreated,
     ContextPackExported,

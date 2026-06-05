@@ -153,13 +153,9 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
     let mut candidates = Vec::new();
 
     for line in input.transcript.lines().map(str::trim) {
-        let Some(rest) = line
-            .strip_prefix("Lesson:")
-            .or_else(|| line.strip_prefix("lesson:"))
-        else {
+        let Some(summary) = lesson_summary(line) else {
             continue;
         };
-        let summary = rest.trim();
         if summary.is_empty() || !seen.insert(summary.to_ascii_lowercase()) {
             continue;
         }
@@ -200,6 +196,14 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
     }
 
     Ok(candidates)
+}
+
+fn lesson_summary(line: &str) -> Option<&str> {
+    line.strip_prefix("Lesson:")
+        .or_else(|| line.strip_prefix("lesson:"))
+        .or_else(|| line.split_once("Lesson:").map(|(_, rest)| rest))
+        .or_else(|| line.split_once("lesson:").map(|(_, rest)| rest))
+        .map(str::trim)
 }
 
 fn candidate_id(session_id: &SessionId, summary: &str) -> String {
