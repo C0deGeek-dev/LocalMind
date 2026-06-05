@@ -588,6 +588,28 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn indexed_memory_can_be_deleted_through_a_canonical_root(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let aliases = tempfile::tempdir()?;
+        let alias_root = aliases.path().join("project");
+        std::os::unix::fs::symlink(temp_dir.path(), &alias_root)?;
+
+        let item_id = accepted_fixture_item(&alias_root, "Prefer alias-safe deletion.")?;
+        let alias_persistence = MemoryPersistence::open_project(&alias_root)?;
+        let entry = alias_persistence.promote_review_item(&item_id)?;
+
+        let real_persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        assert!(real_persistence.delete_memory(&entry.id, "test")?);
+        assert!(!temp_dir
+            .path()
+            .join(format!(".localmind/memory/project/{}.md", entry.id))
+            .exists());
+        Ok(())
+    }
+
     #[test]
     fn edited_review_item_promotes_replacement_text() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;

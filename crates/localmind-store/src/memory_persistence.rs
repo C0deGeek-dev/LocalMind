@@ -262,8 +262,7 @@ impl MemoryPersistence {
             return Ok(false);
         };
 
-        let memory_root = self.config.memory_root();
-        if !path.starts_with(&memory_root) {
+        if !path_is_under_root(&self.config.memory_root(), &path) {
             return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
         }
 
@@ -521,6 +520,12 @@ impl MemoryPersistence {
 
 fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn path_is_under_root(root: &Path, path: &Path) -> bool {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(root)
 }
 
 #[derive(Debug, Error)]
