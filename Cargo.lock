@@ -336,9 +336,6 @@ dependencies = [
 [[package]]
 name = "localmind-mcp"
 version = "0.1.0"
-dependencies = [
- "localmind-core",
-]
 
 [[package]]
 name = "localmind-review"
