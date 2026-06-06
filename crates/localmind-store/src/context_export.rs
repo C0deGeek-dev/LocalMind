@@ -7,7 +7,7 @@ pub enum ContextExportTarget {
     Generic,
     ClaudeCode,
     OpenAiCodex,
-    Unshackled,
+    LocalPilot,
 }
 
 impl ContextExportTarget {
@@ -17,7 +17,7 @@ impl ContextExportTarget {
             Self::Generic => "generic",
             Self::ClaudeCode => "claude-code",
             Self::OpenAiCodex => "open-ai-codex",
-            Self::Unshackled => "unshackled",
+            Self::LocalPilot => "localpilot",
         }
     }
 
@@ -27,7 +27,7 @@ impl ContextExportTarget {
             Self::Generic => "Generic agent context",
             Self::ClaudeCode => "Claude Code context",
             Self::OpenAiCodex => "OpenAI Codex context",
-            Self::Unshackled => "Unshackled built-in context",
+            Self::LocalPilot => "LocalPilot built-in context",
         }
     }
 }
@@ -93,10 +93,10 @@ impl ContextExporter {
             body.push('\n');
         }
 
-        if matches!(target, ContextExportTarget::Unshackled) {
+        if matches!(target, ContextExportTarget::LocalPilot) {
             body.push_str("## Host Integration\n\n");
             body.push_str(
-                "- Render this as bundled Unshackled learning context; do not require a separate LocalMind install.\n\n",
+                "- Render this as bundled LocalPilot learning context; do not require a separate LocalMind install.\n\n",
             );
         }
 

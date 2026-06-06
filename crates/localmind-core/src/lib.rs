@@ -1,6 +1,6 @@
 //! Host-neutral learning contracts for LocalMind.
 //!
-//! This crate owns the shared domain model. Host runtimes such as Unshackled map
+//! This crate owns the shared domain model. Host runtimes such as LocalPilot map
 //! their native session and tool records into these contracts at the adapter
 //! edge; this crate must not depend on any host-specific type.
 
@@ -86,14 +86,14 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = SessionRecord::new(
             SessionId::new("session-1"),
-            SessionSource::Unshackled,
+            SessionSource::LocalPilot,
             SessionOutcome::Succeeded,
         );
 
         let json = serde_json::to_string(&session)?;
 
-        assert!(json.contains("Unshackled"));
-        assert!(!json.contains("unshackled_store"));
+        assert!(json.contains("LocalPilot"));
+        assert!(!json.contains("localpilot_store"));
         Ok(())
     }
 
@@ -129,25 +129,25 @@ mod tests {
     }
 
     #[test]
-    fn unshackled_adapter_maps_to_neutral_session_record() -> Result<(), Box<dyn std::error::Error>>
+    fn localpilot_adapter_maps_to_neutral_session_record() -> Result<(), Box<dyn std::error::Error>>
     {
-        let adapter = AgentSessionAdapter::unshackled();
+        let adapter = AgentSessionAdapter::localpilot();
         let input = AgentSessionInput {
             id: "session-1".to_string(),
             project_root_uri: Some("file:///workspace/project".to_string()),
-            transcript_label: "unshackled session bundle".to_string(),
-            metadata: BTreeMap::from([("host".to_string(), "unshackled".to_string())]),
+            transcript_label: "localpilot session bundle".to_string(),
+            metadata: BTreeMap::from([("host".to_string(), "localpilot".to_string())]),
         };
 
         let session = adapter.map_session(&input)?;
         let project = session.project.as_ref().ok_or("missing project")?;
         let transcript = session.transcript.as_ref().ok_or("missing transcript")?;
 
-        assert_eq!(session.source, SessionSource::Unshackled);
+        assert_eq!(session.source, SessionSource::LocalPilot);
         assert_eq!(project.root_uri, "file:///workspace/project");
         assert_eq!(
             session.metadata.get("host").map(String::as_str),
-            Some("unshackled")
+            Some("localpilot")
         );
         assert!(transcript.redacted);
         Ok(())

@@ -14,8 +14,8 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
-repository = "https://github.com/David-c0degeek/localmind"
-homepage = "https://github.com/David-c0degeek/localmind"
+repository = "https://github.com/David-c0degeek/LocalMind"
+homepage = "https://github.com/David-c0degeek/LocalMind"
 rust-version = "1.82"
 
 [workspace.dependencies]

@@ -14,15 +14,28 @@ The goal is to turn opted-in AI development sessions into reviewed project
 memory, graph-connected knowledge, and reusable skills without sending private
 work to external services by default.
 
+## LocalX Ecosystem
+
+- [LocalStack](https://github.com/David-c0degeek/LocalStack) is the umbrella
+  ecosystem for the LocalX tools.
+- [LocalBox](https://github.com/David-c0degeek/LocalBox) is the model runtime
+  and launcher for local GGUF models.
+- [LocalMind](https://github.com/David-c0degeek/LocalMind) is this local-first
+  memory and RAG layer.
+- [LocalBench](https://github.com/David-c0degeek/LocalBench) is the benchmarking
+  and evaluation companion for local model/runtime choices.
+- [LocalPilot](https://github.com/David-c0degeek/LocalPilot) is the local CLI
+  coding agent that embeds LocalMind natively.
+
 ## Architecture Posture
 
 LocalMind is implemented as an extracted, host-neutral learning engine. The core
 contracts live in Rust library crates so host runtimes can embed the same engine
 without calling a separate service.
 
-Unshackled is the first native host: it should bundle LocalMind-backed learning
+LocalPilot is the first native host: it should bundle LocalMind-backed learning
 as built-in memory, review, context, and skill behavior. LocalMind core never
-depends on Unshackled; Unshackled maps its session bundles, tool events, diffs,
+depends on LocalPilot; LocalPilot maps its session bundles, tool events, diffs,
 test results, and recovery events into LocalMind contracts through an adapter.
 
 The standalone `localmind` CLI is the shell around the same engine for generic
@@ -109,7 +122,7 @@ localmind import .\session.txt --project . --source open-ai-codex
 ```
 
 Supported first-pass sources are `generic`, `claude-code`, `open-ai-codex`, and
-`unshackled`. Supported first-pass formats are `plain-text`, `json-lines`, and
+`localpilot`. Supported first-pass formats are `plain-text`, `json-lines`, and
 `markdown`; all are currently persisted as redacted raw transcript material for
 later summary/extraction stages.
 
@@ -170,11 +183,11 @@ agent context:
 
 ```powershell
 localmind context export "deterministic fixtures" --target open-ai-codex --project .
-localmind context export "release checklist" --target unshackled --project .
+localmind context export "release checklist" --target localpilot --project .
 ```
 
-Targets are `generic`, `claude-code`, `open-ai-codex`, and `unshackled`. The
-Unshackled target is a native-host fixture surface: Unshackled can map its
+Targets are `generic`, `claude-code`, `open-ai-codex`, and `localpilot`. The
+LocalPilot target is a native-host fixture surface: LocalPilot can map its
 session bundle into LocalMind contracts and render the returned context as
 built-in learning behavior without requiring users to install LocalMind
 separately.

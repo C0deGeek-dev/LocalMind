@@ -46,7 +46,7 @@ pub enum SessionSource {
     GenericTranscript,
     ClaudeCode,
     OpenAiCodex,
-    Unshackled,
+    LocalPilot,
     Other(String),
 }
 

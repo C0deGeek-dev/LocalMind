@@ -136,12 +136,12 @@ fn closeout_command_writes_summary_and_candidates() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn unshackled_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn std::error::Error>> {
+fn localpilot_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = tempfile::tempdir()?;
-    let transcript_path = temp_dir.path().join("unshackled-session.txt");
+    let transcript_path = temp_dir.path().join("localpilot-session.txt");
     fs::write(
         &transcript_path,
-        "Unshackled session bundle.\ntoken = sk-proj-abcdefghijklmnopqrstuvwxyz123456\nLesson: Prefer unshackled context memory.\nWorkflow: Create skill for release checklist.\n",
+        "LocalPilot session bundle.\ntoken = sk-proj-abcdefghijklmnopqrstuvwxyz123456\nLesson: Prefer localpilot context memory.\nWorkflow: Create skill for release checklist.\n",
     )?;
     fs::write(
         temp_dir.path().join(".localmind.toml"),
@@ -154,7 +154,7 @@ fn unshackled_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn st
         .arg("--project")
         .arg(temp_dir.path())
         .arg("--source")
-        .arg("unshackled")
+        .arg("localpilot")
         .output()?;
     assert!(import_output.status.success());
     let import_stdout = String::from_utf8(import_output.stdout)?;
@@ -187,7 +187,7 @@ fn unshackled_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn st
         .output()?;
     assert!(list_output.status.success());
     let list_stdout = String::from_utf8(list_output.stdout)?;
-    let memory_item_id = review_item_id(&list_stdout, "Prefer unshackled context memory")?;
+    let memory_item_id = review_item_id(&list_stdout, "Prefer localpilot context memory")?;
     let skill_item_id = review_item_id(&list_stdout, "Workflow: Create skill")?;
 
     assert!(Command::cargo_bin("localmind")?
@@ -255,15 +255,15 @@ fn unshackled_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn st
     let context_output = Command::cargo_bin("localmind")?
         .arg("context")
         .arg("export")
-        .arg("unshackled context")
+        .arg("localpilot context")
         .arg("--target")
-        .arg("unshackled")
+        .arg("localpilot")
         .arg("--project")
         .arg(temp_dir.path())
         .output()?;
     assert!(context_output.status.success());
     let context = String::from_utf8(context_output.stdout)?;
-    assert!(context.contains("Unshackled built-in context"));
+    assert!(context.contains("LocalPilot built-in context"));
     assert!(context.contains(memory_item_id));
     assert!(context.contains(draft_id));
 

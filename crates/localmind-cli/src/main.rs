@@ -177,7 +177,7 @@ enum SourceArg {
     Generic,
     ClaudeCode,
     OpenAiCodex,
-    Unshackled,
+    LocalPilot,
 }
 
 impl From<SourceArg> for SessionSource {
@@ -186,7 +186,7 @@ impl From<SourceArg> for SessionSource {
             SourceArg::Generic => Self::GenericTranscript,
             SourceArg::ClaudeCode => Self::ClaudeCode,
             SourceArg::OpenAiCodex => Self::OpenAiCodex,
-            SourceArg::Unshackled => Self::Unshackled,
+            SourceArg::LocalPilot => Self::LocalPilot,
         }
     }
 }
@@ -203,7 +203,7 @@ enum ContextTargetArg {
     Generic,
     ClaudeCode,
     OpenAiCodex,
-    Unshackled,
+    LocalPilot,
 }
 
 impl From<ContextTargetArg> for ContextExportTarget {
@@ -212,7 +212,7 @@ impl From<ContextTargetArg> for ContextExportTarget {
             ContextTargetArg::Generic => Self::Generic,
             ContextTargetArg::ClaudeCode => Self::ClaudeCode,
             ContextTargetArg::OpenAiCodex => Self::OpenAiCodex,
-            ContextTargetArg::Unshackled => Self::Unshackled,
+            ContextTargetArg::LocalPilot => Self::LocalPilot,
         }
     }
 }
@@ -443,7 +443,7 @@ impl SessionSourceLabel for SessionRecord {
             SessionSource::GenericTranscript => "generic transcript",
             SessionSource::ClaudeCode => "claude code",
             SessionSource::OpenAiCodex => "openai codex",
-            SessionSource::Unshackled => "unshackled",
+            SessionSource::LocalPilot => "localpilot",
             SessionSource::Other(_) => "custom host",
         }
     }

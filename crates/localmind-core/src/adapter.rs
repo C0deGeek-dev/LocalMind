@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 /// Maps a host-owned session representation into the neutral LocalMind contract.
 ///
-/// Implementations live in host adapter crates. For example, Unshackled may
+/// Implementations live in host adapter crates. For example, LocalPilot may
 /// implement this trait for its exported session bundle type, but this crate
 /// must not import or name that type directly.
 pub trait HostSessionMapper<HostSession> {
@@ -50,9 +50,9 @@ impl AgentSessionAdapter {
     }
 
     #[must_use]
-    pub fn unshackled() -> Self {
+    pub fn localpilot() -> Self {
         Self {
-            source: SessionSource::Unshackled,
+            source: SessionSource::LocalPilot,
         }
     }
 }
