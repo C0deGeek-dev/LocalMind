@@ -21,7 +21,8 @@ work to external services by default.
 - [LocalBox](https://github.com/C0deGeek-dev/LocalBox) is the model runtime
   and launcher for local GGUF models.
 - [LocalMind](https://github.com/C0deGeek-dev/LocalMind) is this local-first
-  memory and RAG layer.
+  learning engine for reviewed project memory, graph-connected knowledge,
+  reusable skills, and agent context.
 - [LocalBench](https://github.com/C0deGeek-dev/LocalBench) is the benchmarking
   and evaluation companion for local model/runtime choices.
 - [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) is the local CLI
