@@ -16,15 +16,15 @@ work to external services by default.
 
 ## LocalX Ecosystem
 
-- [LocalStack](https://github.com/David-c0degeek/LocalStack) is the umbrella
+- [LocalStack](https://github.com/C0deGeek-dev/LocalStack) is the umbrella
   ecosystem for the LocalX tools.
-- [LocalBox](https://github.com/David-c0degeek/LocalBox) is the model runtime
+- [LocalBox](https://github.com/C0deGeek-dev/LocalBox) is the model runtime
   and launcher for local GGUF models.
-- [LocalMind](https://github.com/David-c0degeek/LocalMind) is this local-first
+- [LocalMind](https://github.com/C0deGeek-dev/LocalMind) is this local-first
   memory and RAG layer.
-- [LocalBench](https://github.com/David-c0degeek/LocalBench) is the benchmarking
+- [LocalBench](https://github.com/C0deGeek-dev/LocalBench) is the benchmarking
   and evaluation companion for local model/runtime choices.
-- [LocalPilot](https://github.com/David-c0degeek/LocalPilot) is the local CLI
+- [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) is the local CLI
   coding agent that embeds LocalMind natively.
 
 ## Architecture Posture
