@@ -57,34 +57,9 @@ impl ReviewQueue {
     }
 
     pub fn migrate(&self) -> Result<(), ReviewQueueError> {
-        self.connection
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS review_items (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    candidate_json TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reviewer_action TEXT,
-                    reviewer TEXT,
-                    note TEXT,
-                    replacement_summary TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_review_items_state
-                    ON review_items(state);
-                CREATE INDEX IF NOT EXISTS idx_review_items_session
-                    ON review_items(session_id);
-                "#,
-            )
-            .map_err(ReviewQueueError::Sqlite)?;
+        crate::schema::migrate(&self.connection).map_err(ReviewQueueError::Schema)?;
+        // Human-readable ledger row alongside PRAGMA user_version (kept for
+        // databases and tools that already read schema_migrations).
         let applied_at = now_string();
         self.connection
             .execute(
@@ -348,6 +323,8 @@ fn now_string() -> String {
 pub enum ReviewQueueError {
     #[error(transparent)]
     Config(#[from] StoreConfigError),
+    #[error(transparent)]
+    Schema(#[from] crate::schema::SchemaError),
     #[error("failed to create LocalMind state directory {path:?}: {source}")]
     CreateStateDir {
         path: PathBuf,

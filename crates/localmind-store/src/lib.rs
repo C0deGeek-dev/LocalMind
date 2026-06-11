@@ -14,6 +14,7 @@ mod memory_persistence;
 mod paths;
 mod redaction;
 mod review_queue;
+mod schema;
 mod skill_drafts;
 
 pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
@@ -35,6 +36,7 @@ pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use review_queue::{
     ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary, REVIEW_DB_FILE_NAME,
 };
+pub use schema::SchemaError;
 pub use skill_drafts::{SkillDraftError, SkillDraftRecord, SkillDraftStore};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
@@ -589,6 +591,37 @@ mod tests {
             .audit_records()?
             .iter()
             .any(|record| record.kind == "MemoryDeleted"));
+        Ok(())
+    }
+
+    #[test]
+    fn search_tolerates_fts_operator_syntax_in_user_queries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer operator-safe search.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        persistence.promote_review_item(&item_id)?;
+
+        // Each of these is FTS5 syntax when unescaped; all must behave as
+        // plain text (no error, term-based matching).
+        for hostile in [
+            "operator-safe AND OR NOT",
+            "\"operator-safe",
+            "(search",
+            "NEAR(search, 2)",
+            "search*",
+            "-search",
+        ] {
+            let results = persistence.search(hostile)?;
+            assert!(
+                results
+                    .iter()
+                    .all(|result| result.score >= 1 && !result.snippet.is_empty()),
+                "hostile query {hostile:?} produced a malformed result"
+            );
+        }
+
+        assert!(persistence.search("   ")?.is_empty());
         Ok(())
     }
 

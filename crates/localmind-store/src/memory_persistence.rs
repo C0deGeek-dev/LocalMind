@@ -70,42 +70,7 @@ impl MemoryPersistence {
     }
 
     pub fn migrate(&self) -> Result<(), MemoryPersistenceError> {
-        self.connection
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS audit_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    happened_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS memory_index (
-                    memory_id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    body TEXT NOT NULL,
-                    source_session TEXT,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
-                    USING fts5(memory_id UNINDEXED, body);
-
-                CREATE TABLE IF NOT EXISTS memory_relationships (
-                    memory_id TEXT NOT NULL,
-                    relation_kind TEXT NOT NULL,
-                    target TEXT NOT NULL,
-                    PRIMARY KEY(memory_id, relation_kind, target)
-                );
-                "#,
-            )
-            .map_err(MemoryPersistenceError::Sqlite)?;
-        Ok(())
+        crate::schema::migrate(&self.connection).map_err(MemoryPersistenceError::Schema)
     }
 
     pub fn promote_review_item(
@@ -338,53 +303,54 @@ impl MemoryPersistence {
         Ok(true)
     }
 
+    /// Searches active memory through the FTS5 index (`memory_fts MATCH` with
+    /// bm25 ranking). Whitespace-separated query terms are OR-ed as quoted
+    /// prefix phrases, so FTS5 operators in user input are inert text, not
+    /// syntax. Higher `score` is a better match.
     pub fn search(&self, query: &str) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(|term| term.to_ascii_lowercase())
-            .filter(|term| !term.is_empty())
-            .collect();
+        let Some(match_expression) = fts_match_expression(query) else {
+            return Ok(Vec::new());
+        };
         let mut statement = self
             .connection
             .prepare(
                 r#"
-                SELECT memory_id, path, body, created_at
-                FROM memory_index
-                WHERE status = 'active'
+                SELECT m.memory_id, m.path, m.body, m.created_at, bm25(memory_fts) AS rank
+                FROM memory_fts
+                JOIN memory_index m ON m.memory_id = memory_fts.memory_id
+                WHERE memory_fts MATCH ?1 AND m.status = 'active'
+                ORDER BY rank, m.memory_id
                 "#,
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params![match_expression], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (memory_id, path, body, created_at) =
+            let (memory_id, path, body, created_at, rank) =
                 row.map_err(MemoryPersistenceError::Sqlite)?;
-            let body_lower = body.to_ascii_lowercase();
-            let score = terms
-                .iter()
-                .map(|term| body_lower.matches(term).count() as i64)
-                .sum::<i64>();
-            if score > 0 {
-                results.push(MemorySearchResult {
-                    memory_id: MemoryEntryId::new(memory_id),
-                    path: PathBuf::from(path),
-                    score,
-                    snippet: body.chars().take(160).collect(),
-                    created_at,
-                });
-            }
+            // bm25 returns a more-negative value for better matches; expose a
+            // positive bigger-is-better integer to keep the result contract.
+            #[allow(clippy::cast_possible_truncation)] // bounded: bm25 magnitudes are small
+            let score = (-rank * 100.0).round() as i64;
+            results.push(MemorySearchResult {
+                memory_id: MemoryEntryId::new(memory_id),
+                path: PathBuf::from(path),
+                score: score.max(1),
+                snippet: body.chars().take(160).collect(),
+                created_at,
+            });
         }
-        results.sort_by_key(|result| std::cmp::Reverse(result.score));
         Ok(results)
     }
 
@@ -582,6 +548,22 @@ impl MemoryPersistence {
     }
 }
 
+/// Turns free-text user input into an FTS5 MATCH expression: each
+/// whitespace-separated term becomes a quoted prefix phrase (`"term"*`),
+/// OR-ed together. Quoting neutralizes FTS5 query syntax (`OR`, `-`, `NEAR`,
+/// parentheses) in user input; embedded double quotes are doubled per FTS5
+/// string rules. Returns `None` for an empty query.
+fn fts_match_expression(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    Some(terms.join(" OR "))
+}
+
 fn path_is_under_root(root: &Path, path: &Path) -> bool {
     let root = canonicalize_lenient(root);
     let path = canonicalize_lenient(path);
@@ -638,6 +620,8 @@ pub enum MemoryPersistenceError {
         item_id: ReviewItemId,
         state: String,
     },
+    #[error(transparent)]
+    Schema(#[from] crate::schema::SchemaError),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
