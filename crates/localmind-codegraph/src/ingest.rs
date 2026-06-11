@@ -99,7 +99,7 @@ impl Ingester {
     }
 }
 
-fn repository_node(boundary: &IngestBoundary) -> Result<GraphNode, CodeGraphError> {
+pub(crate) fn repository_node(boundary: &IngestBoundary) -> Result<GraphNode, CodeGraphError> {
     let name = boundary
         .root()
         .file_name()

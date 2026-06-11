@@ -258,6 +258,170 @@ impl GraphStore {
             .transpose()
     }
 
+    /// Active file nodes as `(relative path, content hash)` pairs — the
+    /// stored side of incremental change detection.
+    pub fn active_file_hashes(&self) -> Result<Vec<(String, String)>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT qualified_name, content_hash FROM graph_nodes
+                 WHERE kind = 'file' AND superseded_at IS NULL
+                 ORDER BY qualified_name",
+            )
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut hashes = Vec::new();
+        for row in rows {
+            hashes.push(row.map_err(GraphStoreError::Sqlite)?);
+        }
+        Ok(hashes)
+    }
+
+    /// Supersedes every active node located in `path` (including the file
+    /// node itself) and every active edge touching those nodes. Rows stay in
+    /// place; provenance survives. Returns the superseded edge ids so a
+    /// reindex can revive the ones whose endpoints come back unchanged.
+    pub fn supersede_path(&self, path: &str) -> Result<Vec<GraphEdgeId>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM graph_nodes
+                 WHERE (path = ?1 OR (kind = 'file' AND qualified_name = ?1))
+                     AND superseded_at IS NULL",
+            )
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map(params![path], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(GraphNodeId::new(row.map_err(GraphStoreError::Sqlite)?));
+        }
+        drop(statement);
+
+        let mut superseded_edges = Vec::new();
+        for id in &ids {
+            self.supersede_node(id)?;
+            superseded_edges.extend(self.supersede_edges_touching(id)?);
+        }
+        Ok(superseded_edges)
+    }
+
+    /// Supersedes every active edge with `id` as either endpoint; returns the
+    /// affected edge ids.
+    pub fn supersede_edges_touching(
+        &self,
+        id: &GraphNodeId,
+    ) -> Result<Vec<GraphEdgeId>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, edge_json FROM graph_edges
+                 WHERE (from_id = ?1 OR to_id = ?1) AND superseded_at IS NULL",
+            )
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map(params![id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut edges = Vec::new();
+        for row in rows {
+            edges.push(row.map_err(GraphStoreError::Sqlite)?);
+        }
+        drop(statement);
+
+        let stamp_time = OffsetDateTime::now_utc();
+        let stamp = stamp_time.to_string();
+        let mut affected = Vec::new();
+        for (edge_id, edge_json) in edges {
+            let mut edge: GraphEdge =
+                serde_json::from_str(&edge_json).map_err(GraphStoreError::Deserialize)?;
+            edge.superseded_at = Some(stamp_time);
+            let updated = serde_json::to_string(&edge).map_err(GraphStoreError::Serialize)?;
+            self.connection
+                .execute(
+                    "UPDATE graph_edges SET superseded_at = ?1, edge_json = ?2 WHERE id = ?3",
+                    params![stamp, updated, edge_id],
+                )
+                .map_err(GraphStoreError::Sqlite)?;
+            affected.push(GraphEdgeId::new(edge_id));
+        }
+        Ok(affected)
+    }
+
+    /// Revives a superseded edge when its endpoints are valid again: node
+    /// endpoints must be active nodes; memory endpoints are accepted as-is
+    /// (memory lifecycle is owned elsewhere). Returns whether it revived.
+    /// This is how knowledge anchored to an unchanged symbol survives a
+    /// reindex of the file around it.
+    pub fn revive_edge_if_anchored(&self, id: &GraphEdgeId) -> Result<bool, GraphStoreError> {
+        let Some(edge) = self.edge(id)? else {
+            return Ok(false);
+        };
+        if edge.superseded_at.is_none() {
+            return Ok(true);
+        }
+        for endpoint in [&edge.from, &edge.to] {
+            if let GraphEndpoint::Node(node_id) = endpoint {
+                let active = self
+                    .node(node_id)?
+                    .map(|node| node.superseded_at.is_none())
+                    .unwrap_or(false);
+                if !active {
+                    return Ok(false);
+                }
+            }
+        }
+        let mut revived = edge;
+        revived.superseded_at = None;
+        self.upsert_edge(&revived)?;
+        Ok(true)
+    }
+
+    /// Active (non-superseded) edges, ordered by id — the comparison view for
+    /// reindex equivalence.
+    pub fn active_edge_ids(&self) -> Result<Vec<String>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM graph_edges WHERE superseded_at IS NULL ORDER BY id")
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(GraphStoreError::Sqlite)?);
+        }
+        Ok(ids)
+    }
+
+    /// Active nodes as `(id, content hash)` ordered by id — the comparison
+    /// view for reindex equivalence.
+    pub fn active_node_summaries(&self) -> Result<Vec<(String, String)>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, content_hash FROM graph_nodes
+                 WHERE superseded_at IS NULL ORDER BY id",
+            )
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(row.map_err(GraphStoreError::Sqlite)?);
+        }
+        Ok(summaries)
+    }
+
     /// Marks a node superseded instead of deleting it, so anchored knowledge
     /// and provenance survive reindexes.
     pub fn supersede_node(&self, id: &GraphNodeId) -> Result<(), GraphStoreError> {

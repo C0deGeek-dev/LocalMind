@@ -5,152 +5,256 @@
 //! files; an exact, unambiguous match keeps full confidence, anything fuzzier
 //! is tagged heuristic with reduced confidence, and ambiguity is dropped
 //! rather than asserted — a wrong edge costs more than a missing one.
+//!
+//! Resolution runs against a [`ResolutionContext`], which can be built from a
+//! full parse (initial ingest) or from the stored graph plus retained doc
+//! texts (incremental reindex), so changed files resolve against the active
+//! graph without reparsing the unchanged ones.
 
 use crate::parse::ParsedFile;
 use crate::CodeGraphError;
 use localmind_core::{
-    Confidence, EdgeDerivation, EdgeKind, EvidenceKind, EvidenceRef, GraphEdge, GraphNode, NodeKind,
+    stable_node_id, Confidence, EdgeDerivation, EdgeKind, EvidenceKind, EvidenceRef, GraphEdge,
+    GraphNodeId, NodeKind,
 };
+use localmind_store::GraphStore;
+use std::collections::BTreeMap;
 
 const EXACT_CONFIDENCE: f32 = 1.0;
 const RESOLVED_IMPORT_CONFIDENCE: f32 = 0.9;
 const HEURISTIC_CONFIDENCE: f32 = 0.6;
 
+/// A named item the resolver can target, wherever it came from.
+#[derive(Clone, Debug)]
+struct TargetRef {
+    name: String,
+    file: String,
+    id: GraphNodeId,
+}
+
+/// A documentation (non-Rust) file the resolver can link items to.
+#[derive(Clone, Debug)]
+struct DocRef {
+    relative: String,
+    id: GraphNodeId,
+    text: String,
+}
+
+/// The active graph as the resolver sees it: functions for call matching,
+/// files for import matching, all items for doc-mention matching, and doc
+/// texts for the mention scan.
+pub struct ResolutionContext {
+    functions: Vec<TargetRef>,
+    files: Vec<(String, GraphNodeId)>,
+    items: Vec<TargetRef>,
+    docs: Vec<DocRef>,
+}
+
+impl ResolutionContext {
+    /// Context for a full ingest: everything comes from the parse output.
+    #[must_use]
+    pub fn from_parsed(files: &[ParsedFile]) -> Self {
+        let mut context = Self {
+            functions: Vec::new(),
+            files: Vec::new(),
+            items: Vec::new(),
+            docs: Vec::new(),
+        };
+        for file in files {
+            context
+                .files
+                .push((file.file.relative.clone(), file.file_node.id.clone()));
+            if !file.file.relative.ends_with(".rs") {
+                context.docs.push(DocRef {
+                    relative: file.file.relative.clone(),
+                    id: file.file_node.id.clone(),
+                    text: file.text.clone(),
+                });
+            }
+            for item in &file.items {
+                let target = TargetRef {
+                    name: item.name.clone(),
+                    file: file.file.relative.clone(),
+                    id: item.id.clone(),
+                };
+                if item.kind == NodeKind::Function {
+                    context.functions.push(target.clone());
+                }
+                context.items.push(target);
+            }
+        }
+        context
+    }
+
+    /// Context for an incremental reindex: targets come from the active
+    /// stored graph; doc texts are supplied by the caller (the store keeps no
+    /// file bodies). Files being reindexed in the same run should be layered
+    /// on top with [`ResolutionContext::admit_parsed`].
+    pub fn from_store(
+        store: &GraphStore,
+        doc_texts: &[(String, String)],
+    ) -> Result<Self, CodeGraphError> {
+        let mut context = Self {
+            functions: Vec::new(),
+            files: Vec::new(),
+            items: Vec::new(),
+            docs: Vec::new(),
+        };
+        for file in store.nodes_by_kind(NodeKind::File)? {
+            context
+                .files
+                .push((file.qualified_name.clone(), file.id.clone()));
+        }
+        for kind in [
+            NodeKind::Function,
+            NodeKind::Type,
+            NodeKind::Module,
+            NodeKind::Test,
+        ] {
+            for node in store.nodes_by_kind(kind)? {
+                let Some(location) = node.location.as_ref() else {
+                    continue;
+                };
+                let target = TargetRef {
+                    name: node.name.clone(),
+                    file: location.path.clone(),
+                    id: node.id.clone(),
+                };
+                if kind == NodeKind::Function {
+                    context.functions.push(target.clone());
+                }
+                context.items.push(target);
+            }
+        }
+        for (relative, text) in doc_texts {
+            context.docs.push(DocRef {
+                relative: relative.clone(),
+                id: stable_node_id(NodeKind::File, relative),
+                text: text.clone(),
+            });
+        }
+        Ok(context)
+    }
+
+    /// Replaces everything the context knows about a file with the fresh
+    /// parse — used when a reindex run resolves files it just reparsed.
+    pub fn admit_parsed(&mut self, file: &ParsedFile) {
+        let relative = &file.file.relative;
+        self.functions.retain(|target| &target.file != relative);
+        self.items.retain(|target| &target.file != relative);
+        self.files.retain(|(path, _)| path != relative);
+        self.docs.retain(|doc| &doc.relative != relative);
+
+        self.files
+            .push((relative.clone(), file.file_node.id.clone()));
+        if !relative.ends_with(".rs") {
+            self.docs.push(DocRef {
+                relative: relative.clone(),
+                id: file.file_node.id.clone(),
+                text: file.text.clone(),
+            });
+        }
+        for item in &file.items {
+            let target = TargetRef {
+                name: item.name.clone(),
+                file: relative.clone(),
+                id: item.id.clone(),
+            };
+            if item.kind == NodeKind::Function {
+                self.functions.push(target.clone());
+            }
+            self.items.push(target);
+        }
+    }
+}
+
+/// Resolves all edges for a full set of parsed files, deduplicated by stable
+/// edge id.
 pub fn resolve_edges(files: &[ParsedFile]) -> Result<Vec<GraphEdge>, CodeGraphError> {
+    let context = ResolutionContext::from_parsed(files);
+    let mut edges: BTreeMap<String, GraphEdge> = BTreeMap::new();
+    for file in files {
+        for edge in resolve_file_edges(file, &context)? {
+            edges.insert(edge.id.as_str().to_string(), edge);
+        }
+    }
+    Ok(edges.into_values().collect())
+}
+
+/// Resolves the edges contributed by one file against the given context:
+/// containment, test coverage from this file's tests, imports from this
+/// file's `use` declarations, and doc mentions in both directions.
+pub fn resolve_file_edges(
+    file: &ParsedFile,
+    context: &ResolutionContext,
+) -> Result<Vec<GraphEdge>, CodeGraphError> {
     let mut edges = Vec::new();
-    containment_edges(files, &mut edges)?;
-    test_edges(files, &mut edges)?;
-    use_edges(files, &mut edges)?;
-    documentation_edges(files, &mut edges)?;
+    containment_edges(file, &mut edges)?;
+    test_edges(file, context, &mut edges)?;
+    use_edges(file, context, &mut edges)?;
+    documentation_edges(file, context, &mut edges)?;
     Ok(edges)
 }
 
 /// `file —implemented_by→ item` for every item extracted from the file.
-fn containment_edges(
-    files: &[ParsedFile],
+fn containment_edges(file: &ParsedFile, edges: &mut Vec<GraphEdge>) -> Result<(), CodeGraphError> {
+    for item in &file.items {
+        edges.push(GraphEdge::structural(
+            EdgeKind::ImplementedBy,
+            file.file_node.id.clone(),
+            item.id.clone(),
+            EdgeDerivation::Parsed,
+            Confidence::new(EXACT_CONFIDENCE)?,
+            item.provenance.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// `function —tested_by→ test` for calls made from this file's test bodies.
+/// A same-file call is parsed fact; a unique cross-file name match is a
+/// heuristic; an ambiguous name resolves to nothing.
+fn test_edges(
+    file: &ParsedFile,
+    context: &ResolutionContext,
     edges: &mut Vec<GraphEdge>,
 ) -> Result<(), CodeGraphError> {
-    for file in files {
-        for item in &file.items {
-            edges.push(GraphEdge::structural(
-                EdgeKind::ImplementedBy,
-                file.file_node.id.clone(),
-                item.id.clone(),
-                EdgeDerivation::Parsed,
-                Confidence::new(EXACT_CONFIDENCE)?,
-                item.provenance.clone(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// `function —tested_by→ test` for calls made from test bodies. A same-file
-/// call is parsed fact; a unique cross-file name match is a heuristic;
-/// an ambiguous name resolves to nothing.
-fn test_edges(files: &[ParsedFile], edges: &mut Vec<GraphEdge>) -> Result<(), CodeGraphError> {
-    let functions: Vec<(&ParsedFile, &GraphNode)> = files
-        .iter()
-        .flat_map(|file| {
-            file.items
+    for test in file.items.iter().filter(|item| item.kind == NodeKind::Test) {
+        for call in file
+            .calls
+            .iter()
+            .filter(|call| call.caller == test.qualified_name)
+        {
+            let same_file: Vec<&TargetRef> = context
+                .functions
                 .iter()
-                .filter(|item| item.kind == NodeKind::Function)
-                .map(move |item| (file, item))
-        })
-        .collect();
-
-    for file in files {
-        for test in file.items.iter().filter(|item| item.kind == NodeKind::Test) {
-            for call in file
-                .calls
-                .iter()
-                .filter(|call| call.caller == test.qualified_name)
-            {
-                let same_file: Vec<&GraphNode> = functions
-                    .iter()
-                    .filter(|(owner, function)| {
-                        owner.file.relative == file.file.relative && function.name == call.callee
-                    })
-                    .map(|(_, function)| *function)
-                    .collect();
-                let (target, derivation, confidence) = if let [target] = same_file.as_slice() {
-                    (*target, EdgeDerivation::Parsed, EXACT_CONFIDENCE)
-                } else {
-                    let elsewhere: Vec<&GraphNode> = functions
-                        .iter()
-                        .filter(|(_, function)| function.name == call.callee)
-                        .map(|(_, function)| *function)
-                        .collect();
-                    match elsewhere.as_slice() {
-                        [target] => (*target, EdgeDerivation::Heuristic, HEURISTIC_CONFIDENCE),
-                        _ => continue,
-                    }
-                };
-
-                edges.push(GraphEdge::structural(
-                    EdgeKind::TestedBy,
-                    target.id.clone(),
-                    test.id.clone(),
-                    derivation,
-                    Confidence::new(confidence)?,
-                    EvidenceRef::new(
-                        EvidenceKind::CodeParse,
-                        format!("{}:{}", file.file.relative, call.line),
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// `file —uses→ file` from `use` declarations. A path segment equal to
-/// exactly one file stem resolves; a unique prefix relationship is tagged
-/// heuristic; anything ambiguous is dropped.
-fn use_edges(files: &[ParsedFile], edges: &mut Vec<GraphEdge>) -> Result<(), CodeGraphError> {
-    for file in files {
-        for use_path in &file.uses {
-            let segments: Vec<&str> = use_path
-                .path
-                .split("::")
-                .map(|segment| segment.trim().trim_end_matches(';'))
-                .filter(|segment| {
-                    !segment.is_empty() && !matches!(*segment, "crate" | "super" | "self")
+                .filter(|function| {
+                    function.file == file.file.relative && function.name == call.callee
                 })
                 .collect();
-
-            let mut exact = Vec::new();
-            let mut prefix = Vec::new();
-            for candidate in files {
-                if candidate.file.relative == file.file.relative {
-                    continue;
-                }
-                let stem = module_stem(&candidate.file.relative);
-                if segments.iter().any(|segment| *segment == stem) {
-                    exact.push(candidate);
-                } else if segments
+            let (target, derivation, confidence) = if let [target] = same_file.as_slice() {
+                (*target, EdgeDerivation::Parsed, EXACT_CONFIDENCE)
+            } else {
+                let elsewhere: Vec<&TargetRef> = context
+                    .functions
                     .iter()
-                    .any(|segment| segment.starts_with(&stem) || stem.starts_with(segment))
-                {
-                    prefix.push(candidate);
+                    .filter(|function| function.name == call.callee)
+                    .collect();
+                match elsewhere.as_slice() {
+                    [target] => (*target, EdgeDerivation::Heuristic, HEURISTIC_CONFIDENCE),
+                    _ => continue,
                 }
-            }
-
-            let (target, derivation, confidence) = match (exact.as_slice(), prefix.as_slice()) {
-                ([target], _) => (*target, EdgeDerivation::Parsed, RESOLVED_IMPORT_CONFIDENCE),
-                ([], [target]) => (*target, EdgeDerivation::Heuristic, HEURISTIC_CONFIDENCE),
-                _ => continue,
             };
 
             edges.push(GraphEdge::structural(
-                EdgeKind::Uses,
-                file.file_node.id.clone(),
-                target.file_node.id.clone(),
+                EdgeKind::TestedBy,
+                target.id.clone(),
+                test.id.clone(),
                 derivation,
                 Confidence::new(confidence)?,
                 EvidenceRef::new(
                     EvidenceKind::CodeParse,
-                    format!("{}:{}", file.file.relative, use_path.line),
+                    format!("{}:{}", file.file.relative, call.line),
                 ),
             ));
         }
@@ -158,39 +262,117 @@ fn use_edges(files: &[ParsedFile], edges: &mut Vec<GraphEdge>) -> Result<(), Cod
     Ok(())
 }
 
-/// `item —documented_in→ doc file` when a non-Rust file mentions the item's
-/// name in backticks. Doc mentions are always a heuristic.
-fn documentation_edges(
-    files: &[ParsedFile],
+/// `file —uses→ file` from this file's `use` declarations. A path segment
+/// equal to exactly one file stem resolves; a unique prefix relationship is
+/// tagged heuristic; anything ambiguous is dropped.
+fn use_edges(
+    file: &ParsedFile,
+    context: &ResolutionContext,
     edges: &mut Vec<GraphEdge>,
 ) -> Result<(), CodeGraphError> {
-    let docs: Vec<&ParsedFile> = files
-        .iter()
-        .filter(|file| !file.file.relative.ends_with(".rs"))
-        .collect();
-    if docs.is_empty() {
-        return Ok(());
-    }
+    for use_path in &file.uses {
+        let segments: Vec<&str> = use_path
+            .path
+            .split("::")
+            .map(|segment| segment.trim().trim_end_matches(';'))
+            .filter(|segment| {
+                !segment.is_empty() && !matches!(*segment, "crate" | "super" | "self")
+            })
+            .collect();
 
-    for file in files {
-        for item in &file.items {
-            let mention = format!("`{}`", item.name);
-            for doc in &docs {
-                if doc.text.contains(&mention) {
-                    edges.push(GraphEdge::structural(
-                        EdgeKind::DocumentedIn,
-                        item.id.clone(),
-                        doc.file_node.id.clone(),
-                        EdgeDerivation::Heuristic,
-                        Confidence::new(HEURISTIC_CONFIDENCE)?,
-                        EvidenceRef::new(
-                            EvidenceKind::CodeParse,
-                            format!("{} mentions {}", doc.file.relative, mention),
-                        ),
-                    ));
-                }
+        let mut exact = Vec::new();
+        let mut prefix = Vec::new();
+        for (relative, id) in &context.files {
+            if relative == &file.file.relative {
+                continue;
+            }
+            let stem = module_stem(relative);
+            if segments.iter().any(|segment| *segment == stem) {
+                exact.push(id);
+            } else if segments
+                .iter()
+                .any(|segment| segment.starts_with(&stem) || stem.starts_with(segment))
+            {
+                prefix.push(id);
             }
         }
+
+        let (target, derivation, confidence) = match (exact.as_slice(), prefix.as_slice()) {
+            ([target], _) => (
+                (*target).clone(),
+                EdgeDerivation::Parsed,
+                RESOLVED_IMPORT_CONFIDENCE,
+            ),
+            ([], [target]) => (
+                (*target).clone(),
+                EdgeDerivation::Heuristic,
+                HEURISTIC_CONFIDENCE,
+            ),
+            _ => continue,
+        };
+
+        edges.push(GraphEdge::structural(
+            EdgeKind::Uses,
+            file.file_node.id.clone(),
+            target,
+            derivation,
+            Confidence::new(confidence)?,
+            EvidenceRef::new(
+                EvidenceKind::CodeParse,
+                format!("{}:{}", file.file.relative, use_path.line),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `item —documented_in→ doc file` when a non-Rust file mentions the item's
+/// name in backticks. Doc mentions are always a heuristic. Runs in both
+/// directions: this file's items against all docs, and — when this file is
+/// itself a doc — every known item against this doc.
+fn documentation_edges(
+    file: &ParsedFile,
+    context: &ResolutionContext,
+    edges: &mut Vec<GraphEdge>,
+) -> Result<(), CodeGraphError> {
+    for item in &file.items {
+        for doc in &context.docs {
+            mention_edge(&item.name, &item.id, doc, edges)?;
+        }
+    }
+
+    if !file.file.relative.ends_with(".rs") {
+        let doc = DocRef {
+            relative: file.file.relative.clone(),
+            id: file.file_node.id.clone(),
+            text: file.text.clone(),
+        };
+        for item in &context.items {
+            mention_edge(&item.name, &item.id, &doc, edges)?;
+        }
+    }
+    Ok(())
+}
+
+fn mention_edge(
+    name: &str,
+    id: &GraphNodeId,
+    doc: &DocRef,
+    edges: &mut Vec<GraphEdge>,
+) -> Result<(), CodeGraphError> {
+    let mention = format!("`{name}`");
+    if doc.text.contains(&mention) {
+        edges.push(GraphEdge::structural(
+            EdgeKind::DocumentedIn,
+            id.clone(),
+            doc.id.clone(),
+            EdgeDerivation::Heuristic,
+            Confidence::new(HEURISTIC_CONFIDENCE)?,
+            EvidenceRef::new(
+                EvidenceKind::CodeParse,
+                format!("{} mentions {mention}", doc.relative),
+            ),
+        ));
     }
     Ok(())
 }
@@ -341,7 +523,8 @@ pub fn distance_scale() -> f64 {
     #[test]
     fn ambiguous_names_resolve_to_nothing() -> Result<(), Box<dyn std::error::Error>> {
         let mut files = fixture();
-        // A second `norm` in another file makes the cross-file call ambiguous.
+        // A second `distance_scale` elsewhere makes the cross-file call
+        // ambiguous, so it must produce no edge at all.
         files.push(parse(
             "src/other.rs",
             "pub fn distance_scale() -> f64 { 2.0 }\n",
@@ -364,8 +547,9 @@ pub fn distance_scale() -> f64 {
         assert!(documented
             .iter()
             .all(|edge| edge.derivation == EdgeDerivation::Heuristic));
-        // Both the `norm` function and the `Point` type are mentioned.
-        assert!(documented.len() >= 2);
+        // Both the `norm` function and the `Point` type are mentioned, and
+        // the two scan directions must not double-count them.
+        assert_eq!(documented.len(), 2);
         Ok(())
     }
 }

@@ -9,12 +9,14 @@
 mod boundary;
 mod ingest;
 mod parse;
+mod reindex;
 mod resolve;
 
 pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
 pub use ingest::{IngestReport, Ingester};
 pub use parse::{CallSite, ParsedFile, RustParser, UsePath};
-pub use resolve::resolve_edges;
+pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};
+pub use resolve::{resolve_edges, resolve_file_edges, ResolutionContext};
 
 use std::path::PathBuf;
 use thiserror::Error;
