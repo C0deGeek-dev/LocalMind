@@ -44,6 +44,8 @@ pub enum EvidenceKind {
     FileDiff,
     TestOutput,
     Commit,
+    /// A source span or import read deterministically from a syntax tree.
+    CodeParse,
     RecoveryEvent,
     UserCorrection,
     ManualNote,
