@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.82"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt nextest binary; install-action does not build from source, so
+      # the pinned 1.82 toolchain does not constrain the runner version.
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # nextest does not run doctests, so run those separately.
+      - run: cargo nextest run --workspace
+      - run: cargo test --doc --workspace
+      - run: cargo check --workspace

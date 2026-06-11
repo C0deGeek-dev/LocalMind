@@ -8,6 +8,8 @@
 ```                                                                                        
 # LocalMind
 
+[![ci](https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg)](https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml)
+
 LocalMind is a local-first learning layer for AI-assisted development.
 
 The goal is to turn opted-in AI development sessions into reviewed project
