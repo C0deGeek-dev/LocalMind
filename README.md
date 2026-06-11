@@ -54,6 +54,21 @@ repository for prompts, planning templates, review checklists, and `SKILL.md`
 files. LocalMind should consume, generate, and operationalize those kinds of
 assets, not turn the workflow asset repository into an application codebase.
 
+## Documentation
+
+- `vision.md` — the product vision, including the **Implementation Status**
+  table mapping each component to what actually exists in code today.
+- `docs/on-disk-contract.md` — the on-disk contract (config, directory
+  layout, Markdown memory format, database schema, versioning) for host
+  authors.
+- `CHANGELOG.md` — notable changes; release tags mark contract-relevant
+  snapshots.
+
+Note on extraction: the current extractor is deterministic — explicit
+`Lesson:` markers plus heuristics for failure→resolution pairs, repeated
+commands, and user corrections. There is no model in the loop yet; the
+`SessionExtractor` trait is the seam where an LLM-backed extractor lands.
+
 ## Starting Point
 
 Initial MVP target:

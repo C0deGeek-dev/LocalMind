@@ -1,0 +1,21 @@
+user: The exporter is writing empty parquet files again, can you look at the row group settings?
+assistant: Reading exporter/src/writer.rs to check how row groups are flushed.
+tool: $ cargo test -p exporter
+tool: test writer::flushes_row_groups ... FAILED
+tool: error: assertion failed: row_groups > 0, exporter/src/writer.rs:88
+assistant: The buffer is cleared before flush when the batch is exactly at capacity. Moving the flush ahead of the clear.
+tool: $ cargo test -p exporter
+tool: test writer::flushes_row_groups ... ok
+assistant: All exporter tests are passing now. The fix was ordering flush before clear at the capacity boundary.
+user: actually, please always run the integration suite too before declaring exporter work done, the unit tests miss the schema drift cases
+assistant: Understood, running the integration suite as well.
+tool: $ cargo test -p exporter --test integration
+tool: test result: ok. 14 passed
+user: Lesson: exporter changes need the integration suite, unit tests alone miss schema drift.
+assistant: Recorded. I'll also note the flush-before-clear pattern.
+user: no, don't add a comment for that, the test pins it already
+assistant: Agreed, the regression test is the durable artifact.
+tool: $ cargo fmt --check
+tool: $ cargo clippy -p exporter -- -D warnings
+tool: $ cargo fmt --check
+assistant: Formatting and lints are clean. This validate-before-handoff workflow could be a reusable checklist.

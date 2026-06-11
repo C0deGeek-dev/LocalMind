@@ -15,6 +15,42 @@ The goal is to make a local AI environment that becomes better at helping with t
 
 By default, learning is turned off. The user must explicitly opt in per workspace, project, session, or category of memory.
 
+## Implementation Status
+
+Honest map from vision component to what exists in code today. "Implemented"
+means tested and usable; "scaffolded" means the boundary exists but the
+behavior does not; "absent" means not started.
+
+| Component (section) | Status | Owning crate |
+|---|---|---|
+| Session capture — manual transcript import (§1) | implemented | `localmind-store` (`TranscriptImporter`), `localmind-cli` |
+| Redaction before storage (§1, §12) | implemented — pattern table + entropy backstop, corpus-tested | `localmind-store` |
+| Lesson extraction (§2) | heuristic — deterministic extractor over explicit markers, tool-failure→resolution pairs, and user corrections; no model involved | `localmind-store` (`extraction.rs`) |
+| Review queue — manual mode (§3) | implemented | `localmind-store` (`ReviewQueue`); `localmind-review` is the future home (see topology note) |
+| Review queue — assisted/trusted/automatic modes (§3) | absent | — |
+| Memory store: Markdown memory, SQLite index/audit (§4) | implemented — transactional, schema-versioned | `localmind-store` |
+| Graph knowledge layer — code-structure graph (§5) | implemented — ingester, incremental reindex, memory-to-code join | `localmind-codegraph`, `localmind-store` (`GraphStore`) |
+| Retrieval — keyword + graph (§6) | implemented — FTS5/bm25 plus graph-aware ranking; no vector search | `localmind-search`, `localmind-store` |
+| Retrieval — semantic/vector (§6) | absent | — |
+| Skill generation (§7) | scaffolded — disabled draft records only | `localmind-skills` (boundary), `localmind-store` (`SkillDraftStore`) |
+| Skill maintenance (§8) | absent | — |
+| Research and distillation (§9, §10 stages 5+) | absent | — |
+| MCP surface (§13) | implemented — graph query tools | `localmind-mcp` |
+| Hosts | standalone CLI; LocalPilot embeds via its adapter crate | `localmind-cli`; adapter lives in the host |
+
+**Topology note.** `localmind-review` and `localmind-skills` stay as thin
+boundary crates even while the behavior lives elsewhere: they pin the
+dependency direction so review modes and skill generation grow behind stable
+seams instead of accreting into the store. `localmind-review` takes over the
+queue surface when assisted mode lands; `localmind-skills` becomes real only
+after extraction produces candidates worth drafting from — a skills pipeline
+on top of a placeholder extractor would be theater.
+
+**Extraction acceptance bar.** The extractor graduates from "heuristic" only
+when, on the bundled fixture transcripts, it produces at least 3 reviewable
+candidates per realistic session fixture with a reviewer rejection rate at or
+below 50% — measured through the review queue, not eyeballed.
+
 ## Vision
 
 Most AI coding assistants are stateless or only lightly personalized. They forget important discoveries, repeat previous mistakes, and lack durable understanding of a project’s history.
