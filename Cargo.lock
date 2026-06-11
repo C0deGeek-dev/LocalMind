@@ -349,6 +349,14 @@ dependencies = [
 [[package]]
 name = "localmind-mcp"
 version = "0.1.0"
+dependencies = [
+ "localmind-core",
+ "localmind-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "localmind-review"

@@ -552,6 +552,51 @@ impl GraphStore {
         collect_nodes(rows)
     }
 
+    /// Active nodes whose qualified name or plain name equals `symbol`.
+    pub fn find_symbol(&self, symbol: &str) -> Result<Vec<GraphNode>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT node_json FROM graph_nodes
+                 WHERE (qualified_name = ?1 OR name = ?1) AND superseded_at IS NULL
+                 ORDER BY qualified_name",
+            )
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map(params![symbol], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        collect_nodes(rows)
+    }
+
+    /// All active edges, ordered by id — the export view.
+    pub fn active_edges(&self) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT edge_json FROM graph_edges WHERE superseded_at IS NULL ORDER BY id")
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut edges = Vec::new();
+        for row in rows {
+            let json = row.map_err(GraphStoreError::Sqlite)?;
+            edges.push(serde_json::from_str(&json).map_err(GraphStoreError::Deserialize)?);
+        }
+        Ok(edges)
+    }
+
+    /// All active nodes, ordered by id — the export view.
+    pub fn active_nodes(&self) -> Result<Vec<GraphNode>, GraphStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT node_json FROM graph_nodes WHERE superseded_at IS NULL ORDER BY id")
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        collect_nodes(rows)
+    }
+
     /// Active knowledge anchors pointing at `node`: the memory ids anchored
     /// to it, with each anchor's edge. This is the graph→memory direction of
     /// the join.

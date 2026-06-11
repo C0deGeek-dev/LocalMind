@@ -1,7 +1,16 @@
-//! Future MCP surface for LocalMind.
+//! MCP surface for LocalMind.
 //!
-//! The first MVP is CLI-first. This crate exists so MCP-specific protocol code
-//! has a home without pulling transport concerns into `localmind-core`.
+//! Transport-agnostic protocol shapes. The graph module defines the code-graph
+//! query tools (names, request/response contracts, and a dispatcher over the
+//! project store); a host MCP server mounts them by name.
+
+mod graph;
+
+pub use graph::{
+    handle, tool_names, AnchoredKnowledge, GraphToolError, GraphToolRequest, GraphToolResponse,
+    SymbolSummary, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE,
+    TOOL_SYMBOL_NEIGHBORHOOD,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpSurface {
