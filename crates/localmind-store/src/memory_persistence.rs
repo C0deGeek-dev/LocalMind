@@ -28,6 +28,8 @@ pub struct MemorySearchResult {
     pub path: PathBuf,
     pub score: i64,
     pub snippet: String,
+    /// Index timestamp of the entry, as stored (RFC-ish text).
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,8 +147,7 @@ impl MemoryPersistence {
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
         };
-        let path = MemoryPathResolver::write_memory_file(&self.config, &entry)?;
-        self.index_memory(&entry, &path)?;
+        self.persist_memory_entry(&entry)?;
         self.write_audit(
             AuditEventKind::MemoryPromoted,
             item.reviewer.as_deref().unwrap_or("unknown"),
@@ -157,6 +158,18 @@ impl MemoryPersistence {
             ),
         )?;
         Ok(entry)
+    }
+
+    /// Persists an accepted memory entry: the Markdown file plus its search
+    /// index row. Review-queue promotion goes through here; hosts accepting
+    /// memory through their own review surfaces may use it directly.
+    pub fn persist_memory_entry(
+        &self,
+        entry: &MemoryEntry,
+    ) -> Result<PathBuf, MemoryPersistenceError> {
+        let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
+        self.index_memory(entry, &path)?;
+        Ok(path)
     }
 
     pub fn record_review_audit(&self) -> Result<usize, MemoryPersistenceError> {
@@ -314,7 +327,7 @@ impl MemoryPersistence {
             .connection
             .prepare(
                 r#"
-                SELECT memory_id, path, body
+                SELECT memory_id, path, body, created_at
                 FROM memory_index
                 WHERE status = 'active'
                 "#,
@@ -326,13 +339,15 @@ impl MemoryPersistence {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (memory_id, path, body) = row.map_err(MemoryPersistenceError::Sqlite)?;
+            let (memory_id, path, body, created_at) =
+                row.map_err(MemoryPersistenceError::Sqlite)?;
             let body_lower = body.to_ascii_lowercase();
             let score = terms
                 .iter()
@@ -344,6 +359,7 @@ impl MemoryPersistence {
                     path: PathBuf::from(path),
                     score,
                     snippet: body.chars().take(160).collect(),
+                    created_at,
                 });
             }
         }

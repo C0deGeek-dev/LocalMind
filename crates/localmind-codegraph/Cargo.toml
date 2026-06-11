@@ -12,6 +12,7 @@ workspace = true
 localmind-core = { path = "../localmind-core" }
 localmind-store = { path = "../localmind-store" }
 thiserror = { workspace = true }
+time = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
 

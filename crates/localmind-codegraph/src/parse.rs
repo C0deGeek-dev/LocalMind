@@ -10,6 +10,7 @@ use localmind_core::{
     content_fingerprint, Confidence, EvidenceKind, EvidenceRef, GraphNode, NodeKind,
     SourceLocation, TypeShape,
 };
+use time::OffsetDateTime;
 use tree_sitter::Node;
 
 /// A call observed inside an item body; the resolver matches it to a target.
@@ -95,7 +96,7 @@ fn file_graph_node(file: &AdmittedFile, text: &str) -> Result<GraphNode, CodeGra
         .unwrap_or(file.relative.as_str())
         .to_string();
     let line_count = text.lines().count() as u64;
-    Ok(GraphNode::new(
+    let mut node = GraphNode::new(
         NodeKind::File,
         name,
         file.relative.clone(),
@@ -109,7 +110,11 @@ fn file_graph_node(file: &AdmittedFile, text: &str) -> Result<GraphNode, CodeGra
         byte_end: text.len() as u64,
         line_start: 1,
         line_end: line_count.max(1),
-    }))
+    });
+    // Stamped at parse time: an unchanged file keeps its old stamp through
+    // hash-gated reindexing, so this doubles as the recency signal.
+    node.created_at = Some(OffsetDateTime::now_utc());
+    Ok(node)
 }
 
 fn collect_items(
@@ -236,6 +241,7 @@ fn item_node(
     if let Some(shape) = shape {
         graph_node = graph_node.with_type_shape(shape);
     }
+    graph_node.created_at = Some(OffsetDateTime::now_utc());
     Ok(graph_node)
 }
 

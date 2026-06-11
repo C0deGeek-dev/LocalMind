@@ -552,6 +552,47 @@ impl GraphStore {
         collect_nodes(rows)
     }
 
+    /// Active knowledge anchors pointing at `node`: the memory ids anchored
+    /// to it, with each anchor's edge. This is the graph→memory direction of
+    /// the join.
+    pub fn memories_anchored_to(
+        &self,
+        node: &GraphNodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        self.anchor_edges("to_id", node.as_str())
+    }
+
+    /// Active anchors owned by a memory entry: the code nodes it is anchored
+    /// to. This is the memory→graph direction of the join.
+    pub fn anchors_of_memory(
+        &self,
+        memory_id: &localmind_core::MemoryEntryId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        self.anchor_edges("from_id", memory_id.as_str())
+    }
+
+    fn anchor_edges(&self, column: &str, value: &str) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        // `column` is one of two fixed identifiers, never user input.
+        let sql = format!(
+            "SELECT edge_json FROM graph_edges
+             WHERE {column} = ?1 AND kind = 'anchored_to' AND superseded_at IS NULL
+             ORDER BY id"
+        );
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(GraphStoreError::Sqlite)?;
+        let rows = statement
+            .query_map(params![value], |row| row.get::<_, String>(0))
+            .map_err(GraphStoreError::Sqlite)?;
+        let mut edges = Vec::new();
+        for row in rows {
+            let json = row.map_err(GraphStoreError::Sqlite)?;
+            edges.push(serde_json::from_str(&json).map_err(GraphStoreError::Deserialize)?);
+        }
+        Ok(edges)
+    }
+
     /// Test nodes attached to `target` via `tested_by` edges.
     pub fn tests_of(&self, target: &GraphNodeId) -> Result<Vec<GraphNode>, GraphStoreError> {
         self.outgoing(target, localmind_core::EdgeKind::TestedBy)

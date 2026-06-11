@@ -10,3 +10,10 @@ workspace = true
 
 [dependencies]
 localmind-core = { path = "../localmind-core" }
+localmind-store = { path = "../localmind-store" }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+localmind-codegraph = { path = "../localmind-codegraph" }
+tempfile = { workspace = true }

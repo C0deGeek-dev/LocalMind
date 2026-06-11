@@ -331,6 +331,7 @@ dependencies = [
  "localmind-store",
  "tempfile",
  "thiserror",
+ "time",
  "tree-sitter",
  "tree-sitter-rust",
 ]
@@ -360,7 +361,12 @@ dependencies = [
 name = "localmind-search"
 version = "0.1.0"
 dependencies = [
+ "localmind-codegraph",
  "localmind-core",
+ "localmind-store",
+ "tempfile",
+ "thiserror",
+ "time",
 ]
 
 [[package]]
