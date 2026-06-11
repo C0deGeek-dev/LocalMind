@@ -360,7 +360,7 @@ mod tests {
         let import = TranscriptImporter::import_text(
             &config,
             "user: Lesson: Prefer host-rendered transcript fixtures.\n",
-            SessionSource::Unshackled,
+            SessionSource::LocalPilot,
             TranscriptImportFormat::PlainText,
         )?;
 

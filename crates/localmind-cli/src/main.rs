@@ -177,6 +177,8 @@ enum SourceArg {
     Generic,
     ClaudeCode,
     OpenAiCodex,
+    /// The product name is one word, so the flag value is too.
+    #[value(name = "localpilot")]
     LocalPilot,
 }
 
@@ -203,6 +205,8 @@ enum ContextTargetArg {
     Generic,
     ClaudeCode,
     OpenAiCodex,
+    /// The product name is one word, so the flag value is too.
+    #[value(name = "localpilot")]
     LocalPilot,
 }
 
