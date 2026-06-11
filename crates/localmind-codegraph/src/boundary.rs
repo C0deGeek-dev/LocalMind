@@ -66,15 +66,17 @@ impl IngestBoundary {
                 })?;
         let relative = forward_slashes(relative);
 
-        let normalized_absolute = forward_slashes(&absolute);
+        // Exclusions match the repo-relative path only: the project owns its
+        // `excluded_paths` relative to its own root, and matching against the
+        // absolute path would let unrelated host directories collide (macOS
+        // temp dirs live under `/private`, which a project excluding
+        // `private` must not reject).
         for pattern in &self.excluded {
             if pattern.is_empty() {
                 continue;
             }
             let normalized_pattern = pattern.replace('\\', "/");
-            if relative.contains(&normalized_pattern)
-                || normalized_absolute.contains(&normalized_pattern)
-            {
+            if relative.contains(&normalized_pattern) {
                 return Err(BoundaryRejection::Excluded {
                     path: candidate.to_path_buf(),
                     pattern: pattern.clone(),
