@@ -147,28 +147,47 @@ impl MemoryPersistence {
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
         };
-        self.persist_memory_entry(&entry)?;
-        self.write_audit(
+        // The Markdown file is written first; the single transaction that
+        // indexes it and records the audit row is the point of truth. A crash
+        // after the file write leaves an unindexed file that the next
+        // promotion overwrites — never a half-indexed entry.
+        let path = MemoryPathResolver::write_memory_file(&self.config, &entry)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::index_memory_with(&tx, &entry, &path)?;
+        Self::write_audit_with(
+            &tx,
             AuditEventKind::MemoryPromoted,
             item.reviewer.as_deref().unwrap_or("unknown"),
             entry.id.as_str(),
-            &format!(
-                r#"{{"review_item":"{}","session":"{}"}}"#,
-                item.id, item.session_id
-            ),
+            &serde_json::json!({
+                "review_item": item.id.to_string(),
+                "session": item.session_id.to_string(),
+            }),
         )?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         Ok(entry)
     }
 
     /// Persists an accepted memory entry: the Markdown file plus its search
     /// index row. Review-queue promotion goes through here; hosts accepting
     /// memory through their own review surfaces may use it directly.
+    ///
+    /// The index, FTS, and relationship rows commit in one transaction after
+    /// the file write, so the database never sees a partially indexed entry.
     pub fn persist_memory_entry(
         &self,
         entry: &MemoryEntry,
     ) -> Result<PathBuf, MemoryPersistenceError> {
         let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
-        self.index_memory(entry, &path)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::index_memory_with(&tx, entry, &path)?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         Ok(path)
     }
 
@@ -193,12 +212,11 @@ impl MemoryPersistence {
             AuditEventKind::ReviewDecisionRecorded,
             item.reviewer.as_deref().unwrap_or("unknown"),
             item.id.as_str(),
-            &format!(
-                r#"{{"state":"{:?}","session":"{}","action":"{}"}}"#,
-                item.state,
-                item.session_id,
-                item.reviewer_action.as_deref().unwrap_or_default()
-            ),
+            &serde_json::json!({
+                "state": format!("{:?}", item.state),
+                "session": item.session_id.to_string(),
+                "action": item.reviewer_action.as_deref().unwrap_or_default(),
+            }),
         )
     }
 
@@ -211,11 +229,7 @@ impl MemoryPersistence {
             AuditEventKind::ContextPackExported,
             "cli",
             target,
-            &format!(
-                r#"{{"query":"{}","target":"{}"}}"#,
-                escape_json(query),
-                target
-            ),
+            &serde_json::json!({ "query": query, "target": target }),
         )
     }
 
@@ -227,10 +241,7 @@ impl MemoryPersistence {
             AuditEventKind::SkillDraftCreated,
             "cli",
             draft.id.as_str(),
-            &format!(
-                r#"{{"name":"{}","disabled":true}}"#,
-                escape_json(&draft.name)
-            ),
+            &serde_json::json!({ "name": draft.name, "disabled": true }),
         )
     }
 
@@ -279,6 +290,11 @@ impl MemoryPersistence {
             return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
         }
 
+        // The file goes first: a crash between the file removal and the
+        // transaction below leaves a stale index row pointing at a missing
+        // file, and re-running the delete heals it (missing files are
+        // tolerated). The reverse order would leave the body on disk with no
+        // index row left to find it by.
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -290,30 +306,35 @@ impl MemoryPersistence {
             }
         }
 
-        self.connection
-            .execute(
-                "DELETE FROM memory_relationships WHERE memory_id = ?1",
-                params![memory_id.as_str()],
-            )
+        // Relationships, FTS, index, and the audit row commit atomically: no
+        // crash point can leave the database referencing half a memory.
+        let tx = self
+            .connection
+            .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
-        self.connection
-            .execute(
-                "DELETE FROM memory_fts WHERE memory_id = ?1",
-                params![memory_id.as_str()],
-            )
-            .map_err(MemoryPersistenceError::Sqlite)?;
-        self.connection
-            .execute(
-                "DELETE FROM memory_index WHERE memory_id = ?1",
-                params![memory_id.as_str()],
-            )
-            .map_err(MemoryPersistenceError::Sqlite)?;
-        self.write_audit(
+        tx.execute(
+            "DELETE FROM memory_relationships WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM memory_fts WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM memory_index WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::write_audit_with(
+            &tx,
             AuditEventKind::MemoryDeleted,
             actor,
             memory_id.as_str(),
-            "{}",
+            &serde_json::json!({}),
         )?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         Ok(true)
     }
 
@@ -437,8 +458,15 @@ impl MemoryPersistence {
         }
     }
 
-    fn index_memory(&self, entry: &MemoryEntry, path: &Path) -> Result<(), MemoryPersistenceError> {
-        self.connection
+    /// Writes the index, FTS, and relationship rows for `entry` on the given
+    /// connection. Callers run this inside a transaction so the rows appear
+    /// atomically.
+    fn index_memory_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+        path: &Path,
+    ) -> Result<(), MemoryPersistenceError> {
+        connection
             .execute(
                 r#"
                 INSERT INTO memory_index
@@ -466,43 +494,51 @@ impl MemoryPersistence {
                 ],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
-        self.connection
+        connection
             .execute(
                 "DELETE FROM memory_fts WHERE memory_id = ?1",
                 params![entry.id.as_str()],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
-        self.connection
+        connection
             .execute(
                 "INSERT INTO memory_fts(memory_id, body) VALUES(?1, ?2)",
                 params![entry.id.as_str(), entry.body.as_str()],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
-        self.record_relationships(entry)?;
+        Self::record_relationships_with(connection, entry)?;
         Ok(())
     }
 
-    fn record_relationships(&self, entry: &MemoryEntry) -> Result<(), MemoryPersistenceError> {
-        self.relationship(entry, "category", &format!("{:?}", entry.category))?;
+    fn record_relationships_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        Self::relationship_with(
+            connection,
+            entry,
+            "category",
+            &format!("{:?}", entry.category),
+        )?;
         if let Some(session_id) = &entry.source_session {
-            self.relationship(entry, "session", session_id.as_str())?;
+            Self::relationship_with(connection, entry, "session", session_id.as_str())?;
         }
         for file in &entry.related_files {
-            self.relationship(entry, "file", file)?;
+            Self::relationship_with(connection, entry, "file", file)?;
         }
         for entity in &entry.related_entities {
-            self.relationship(entry, "entity", entity)?;
+            Self::relationship_with(connection, entry, "entity", entity)?;
         }
         Ok(())
     }
 
-    fn relationship(
-        &self,
+    fn relationship_with(
+        connection: &Connection,
         entry: &MemoryEntry,
         kind: &str,
         target: &str,
     ) -> Result<(), MemoryPersistenceError> {
-        self.connection
+        connection
             .execute(
                 "INSERT OR IGNORE INTO memory_relationships(memory_id, relation_kind, target) VALUES(?1, ?2, ?3)",
                 params![entry.id.as_str(), kind, target],
@@ -516,16 +552,28 @@ impl MemoryPersistence {
         kind: AuditEventKind,
         actor: &str,
         subject: &str,
-        metadata_json: &str,
+        metadata: &serde_json::Value,
     ) -> Result<(), MemoryPersistenceError> {
-        self.connection
+        Self::write_audit_with(&self.connection, kind, actor, subject, metadata)
+    }
+
+    /// Inserts one audit row on the given connection. Metadata is a
+    /// `serde_json::Value` so callers cannot hand-build malformed JSON.
+    fn write_audit_with(
+        connection: &Connection,
+        kind: AuditEventKind,
+        actor: &str,
+        subject: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryPersistenceError> {
+        connection
             .execute(
                 "INSERT INTO audit_events(kind, actor, subject, metadata_json, happened_at) VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![
                     format!("{kind:?}"),
                     actor,
                     subject,
-                    metadata_json,
+                    metadata.to_string(),
                     OffsetDateTime::now_utc().to_string()
                 ],
             )
@@ -534,14 +582,26 @@ impl MemoryPersistence {
     }
 }
 
-fn escape_json(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+fn path_is_under_root(root: &Path, path: &Path) -> bool {
+    let root = canonicalize_lenient(root);
+    let path = canonicalize_lenient(path);
+    path.starts_with(root)
 }
 
-fn path_is_under_root(root: &Path, path: &Path) -> bool {
-    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    path.starts_with(root)
+/// Canonicalizes a path that may no longer exist: a deleted memory file must
+/// still compare correctly against its canonicalized root (on Windows,
+/// `canonicalize` adds a `\\?\` prefix that a raw fallback path lacks), so
+/// fall back to canonicalizing the parent and re-joining the file name.
+fn canonicalize_lenient(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(parent) = fs::canonicalize(parent) {
+            return parent.join(name);
+        }
+    }
+    path.to_path_buf()
 }
 
 #[derive(Debug, Error)]

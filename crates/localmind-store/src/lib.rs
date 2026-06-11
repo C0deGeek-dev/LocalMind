@@ -592,6 +592,54 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn delete_heals_when_the_memory_file_is_already_gone() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer healable deletion.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        let entry = persistence.promote_review_item(&item_id)?;
+
+        // Simulate a crash that removed the file but never reached the
+        // database statements: the retry must still clean every table.
+        fs::remove_file(
+            temp_dir
+                .path()
+                .join(format!(".localmind/memory/project/{}.md", entry.id)),
+        )?;
+
+        assert!(persistence.delete_memory(&entry.id, "test")?);
+        assert!(persistence.list_memory()?.is_empty());
+        assert!(persistence.search("healable deletion")?.is_empty());
+        assert!(persistence.relationships_for(&entry.id)?.is_empty());
+        assert!(persistence
+            .audit_records()?
+            .iter()
+            .any(|record| record.kind == "MemoryDeleted"));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_metadata_is_valid_json_even_for_hostile_input(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item_id = accepted_fixture_item(temp_dir.path(), "Prefer parseable audit rows.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        persistence.promote_review_item(&item_id)?;
+
+        let hostile = "quote\" backslash\\ newline\n {\"json\": [1]} end";
+        persistence.record_context_export(hostile, "target\"with\\quotes")?;
+
+        for record in persistence.audit_records()? {
+            let parsed: serde_json::Value = serde_json::from_str(&record.metadata_json)
+                .map_err(|e| format!("unparseable metadata {:?}: {e}", record.metadata_json))?;
+            if record.kind == "ContextPackExported" {
+                assert_eq!(parsed["query"], hostile);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn indexed_memory_can_be_deleted_through_a_canonical_root(
