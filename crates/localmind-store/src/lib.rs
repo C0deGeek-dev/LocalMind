@@ -7,6 +7,7 @@
 mod config;
 mod context_export;
 mod extraction;
+mod graph_store;
 mod import;
 mod markdown;
 mod memory_persistence;
@@ -21,6 +22,7 @@ pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
     ExtractionOutput, SessionExtractor,
 };
+pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
@@ -30,7 +32,9 @@ pub use memory_persistence::{
 };
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
-pub use review_queue::{ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary};
+pub use review_queue::{
+    ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary, REVIEW_DB_FILE_NAME,
+};
 pub use skill_drafts::{SkillDraftError, SkillDraftRecord, SkillDraftStore};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};

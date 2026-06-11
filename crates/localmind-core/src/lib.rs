@@ -9,6 +9,7 @@ mod audit;
 mod context;
 mod error;
 mod evidence;
+mod graph;
 mod lesson;
 mod memory;
 mod review;
@@ -23,6 +24,10 @@ pub use audit::{AuditEventKind, LearningAuditEvent};
 pub use context::{ContextPack, ContextQuery, ContextSource};
 pub use error::{ContractError, ContractResult};
 pub use evidence::{EvidenceKind, EvidenceRef};
+pub use graph::{
+    content_fingerprint, stable_edge_id, stable_node_id, EdgeDerivation, EdgeKind, GraphEdge,
+    GraphEndpoint, GraphNode, NodeKind, SourceLocation, TypeShape,
+};
 pub use lesson::{
     CandidateDestination, CandidateLesson, Confidence, LessonCategory, SuggestedAction,
     ValidationStatus,
@@ -66,6 +71,8 @@ macro_rules! string_id {
 
 string_id!(AuditEventId);
 string_id!(EvidenceId);
+string_id!(GraphEdgeId);
+string_id!(GraphNodeId);
 string_id!(LessonId);
 string_id!(MemoryEntryId);
 string_id!(ReviewItemId);
