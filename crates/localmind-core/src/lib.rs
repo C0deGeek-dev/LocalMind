@@ -10,6 +10,7 @@ mod context;
 mod error;
 mod evidence;
 mod graph;
+mod inference;
 mod lesson;
 mod memory;
 mod review;
@@ -28,9 +29,10 @@ pub use graph::{
     content_fingerprint, stable_edge_id, stable_node_id, EdgeDerivation, EdgeKind, GraphEdge,
     GraphEndpoint, GraphNode, NodeKind, SourceLocation, TypeShape,
 };
+pub use inference::{InferenceFeatureSettings, InferenceSettings};
 pub use lesson::{
-    CandidateDestination, CandidateLesson, Confidence, LessonCategory, SuggestedAction,
-    ValidationStatus,
+    CandidateDestination, CandidateLesson, Confidence, LessonCategory, ReviewAnnotation,
+    SuggestedAction, ValidationStatus,
 };
 pub use memory::{MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};

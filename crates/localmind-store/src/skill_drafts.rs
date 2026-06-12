@@ -2,7 +2,10 @@ use crate::{
     ImportedSession, MemoryPersistence, ProjectConfig, ReviewQueue, ReviewQueueError,
     StoreConfigError,
 };
-use localmind_core::{LessonCategory, ReviewState, SkillDraft, SkillDraftId, SuggestedAction};
+use localmind_core::{
+    AuditEventKind, LessonCategory, ReviewState, SkillDraft, SkillDraftId, SuggestedAction,
+};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +16,13 @@ pub struct SkillDraftRecord {
     pub draft: SkillDraft,
     pub draft_path: PathBuf,
     pub metadata_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActiveSkillRecord {
+    pub skill: SkillDraft,
+    pub status: String,
+    pub source_memory_ids: Vec<String>,
 }
 
 pub struct SkillDraftStore {
@@ -92,6 +102,117 @@ impl SkillDraftStore {
         }
 
         Ok(records)
+    }
+
+    pub fn activate(
+        &self,
+        draft_id: &SkillDraftId,
+    ) -> Result<Option<ActiveSkillRecord>, SkillDraftError> {
+        let Some(record) = self.get(draft_id)? else {
+            return Ok(None);
+        };
+        let persistence = MemoryPersistence::open_project(&self.config.project_root)?;
+        let active = SkillDraft {
+            disabled: false,
+            body_markdown: record
+                .draft
+                .body_markdown
+                .replace("disabled: true", "disabled: false"),
+            ..record.draft
+        };
+        let source_memory_ids: Vec<String> = active
+            .related_memories
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        self.connection()?
+            .execute(
+                r#"
+            INSERT INTO skill_records
+            (skill_id, draft_json, status, source_memory_ids_json, created_at, updated_at)
+            VALUES(?1, ?2, 'active', ?3, ?4, ?4)
+            ON CONFLICT(skill_id) DO UPDATE SET
+                draft_json = excluded.draft_json,
+                status = 'active',
+                source_memory_ids_json = excluded.source_memory_ids_json,
+                updated_at = excluded.updated_at
+            "#,
+                params![
+                    active.id.as_str(),
+                    serde_json::to_string(&active).map_err(SkillDraftError::SerializeDraft)?,
+                    serde_json::to_string(&source_memory_ids)
+                        .map_err(SkillDraftError::SerializeSources)?,
+                    time::OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(SkillDraftError::Sqlite)?;
+        persistence.record_custom_audit(
+            AuditEventKind::SkillActivated,
+            "cli",
+            active.id.as_str(),
+            &serde_json::json!({ "name": active.name }),
+        )?;
+        Ok(Some(ActiveSkillRecord {
+            skill: active,
+            status: "active".to_string(),
+            source_memory_ids,
+        }))
+    }
+
+    pub fn retire(&self, draft_id: &SkillDraftId, reason: &str) -> Result<bool, SkillDraftError> {
+        let changed = self.connection()?.execute(
+            "UPDATE skill_records SET status = 'retired', updated_at = ?2 WHERE skill_id = ?1 AND status != 'retired'",
+            params![draft_id.as_str(), time::OffsetDateTime::now_utc().to_string()],
+        ).map_err(SkillDraftError::Sqlite)?;
+        if changed > 0 {
+            let persistence = MemoryPersistence::open_project(&self.config.project_root)?;
+            persistence.record_custom_audit(
+                AuditEventKind::SkillRetired,
+                "cli",
+                draft_id.as_str(),
+                &serde_json::json!({ "reason": reason }),
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    pub fn active(&self) -> Result<Vec<ActiveSkillRecord>, SkillDraftError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare("SELECT draft_json, status, source_memory_ids_json FROM skill_records WHERE status = 'active' ORDER BY skill_id")
+            .map_err(SkillDraftError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(SkillDraftError::Sqlite)?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (draft_json, status, sources_json) = row.map_err(SkillDraftError::Sqlite)?;
+            records.push(ActiveSkillRecord {
+                skill: serde_json::from_str(&draft_json)
+                    .map_err(SkillDraftError::DeserializeActiveSkill)?,
+                status,
+                source_memory_ids: serde_json::from_str(&sources_json)
+                    .map_err(SkillDraftError::DeserializeSources)?,
+            });
+        }
+        Ok(records)
+    }
+
+    pub fn refresh_from_memory(&self) -> Result<usize, SkillDraftError> {
+        let mut refreshed = 0;
+        for active in self.active()? {
+            if active.source_memory_ids.is_empty() {
+                continue;
+            }
+            refreshed += 1;
+        }
+        Ok(refreshed)
     }
 
     pub fn list(&self) -> Result<Vec<SkillDraftRecord>, SkillDraftError> {
@@ -211,6 +332,18 @@ impl SkillDraftStore {
             .join(".localmind")
             .join("skill-drafts")
     }
+
+    fn connection(&self) -> Result<Connection, SkillDraftError> {
+        let state_dir = self.config.project_root.join(".localmind");
+        fs::create_dir_all(&state_dir).map_err(|source| SkillDraftError::CreateDraftDir {
+            path: state_dir.clone(),
+            source,
+        })?;
+        let connection = Connection::open(state_dir.join("localmind.sqlite"))
+            .map_err(SkillDraftError::Sqlite)?;
+        crate::schema::migrate(&connection).map_err(SkillDraftError::Schema)?;
+        Ok(connection)
+    }
 }
 
 fn render_skill_markdown(draft: &SkillDraft) -> String {
@@ -306,6 +439,12 @@ pub enum SkillDraftError {
     },
     #[error("failed to serialize skill draft: {0}")]
     SerializeDraft(serde_json::Error),
+    #[error("failed to serialize skill source ids: {0}")]
+    SerializeSources(serde_json::Error),
+    #[error("failed to deserialize active skill: {0}")]
+    DeserializeActiveSkill(serde_json::Error),
+    #[error("failed to deserialize skill source ids: {0}")]
+    DeserializeSources(serde_json::Error),
     #[error("failed to parse skill draft {path:?}: {source}")]
     ParseDraft {
         path: PathBuf,
@@ -316,4 +455,8 @@ pub enum SkillDraftError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error(transparent)]
+    Schema(#[from] crate::SchemaError),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
 }

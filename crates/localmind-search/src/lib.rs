@@ -11,6 +11,8 @@ pub use rank::{combined_score, proximity_score, temporal_score, RankingConfig, S
 pub use workspace::{search_workspace, RankedHit, SearchHitKind, WorkspaceQuery};
 
 use localmind_core::ContextQuery;
+use localmind_store::{MemoryPersistence, MemorySearchResult};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -37,10 +39,69 @@ impl SearchCapabilities {
         Self {
             keyword: true,
             sqlite_fts: true,
-            vector: false,
+            vector: true,
             graph: true,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HybridMemoryResult {
+    pub memory: MemorySearchResult,
+    pub keyword_score: f32,
+    pub vector_score: f32,
+    pub combined_score: f32,
+}
+
+pub fn hybrid_memory_search(
+    persistence: &MemoryPersistence,
+    query: &str,
+    query_vector: Option<&[f32]>,
+    limit: usize,
+) -> Result<Vec<HybridMemoryResult>, SearchError> {
+    let keyword_results = persistence.search(query)?;
+    if keyword_results.is_empty() && query_vector.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut by_id = BTreeMap::new();
+    for result in keyword_results {
+        let keyword_score = result.score as f32;
+        by_id.insert(
+            result.memory_id.to_string(),
+            HybridMemoryResult {
+                memory: result,
+                keyword_score,
+                vector_score: 0.0,
+                combined_score: keyword_score,
+            },
+        );
+    }
+
+    if let Some(vector) = query_vector {
+        for result in persistence.vector_search(vector, limit.max(20))? {
+            if result.subject_kind != "memory" {
+                continue;
+            }
+            if let Some(existing) = by_id.get_mut(&result.subject_id) {
+                existing.vector_score = result.score.max(0.0) * 100.0;
+            }
+        }
+    }
+
+    for result in by_id.values_mut() {
+        result.combined_score = result.keyword_score + result.vector_score;
+    }
+    let mut results: Vec<_> = by_id.into_values().collect();
+    results.sort_by(|left, right| {
+        right
+            .combined_score
+            .partial_cmp(&left.combined_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.memory.memory_id.cmp(&right.memory.memory_id))
+    });
+    results.truncate(limit);
+    Ok(results)
 }
 
 pub fn query_needs_project_scope(query: &ContextQuery) -> bool {
@@ -49,8 +110,10 @@ pub fn query_needs_project_scope(query: &ContextQuery) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{query_needs_project_scope, SearchCapabilities};
+    use super::{hybrid_memory_search, query_needs_project_scope, SearchCapabilities};
     use localmind_core::ContextQuery;
+    use localmind_store::MemoryPersistence;
+    use std::fs;
 
     #[test]
     fn mvp_search_runs_on_local_indexes_and_the_graph() {
@@ -59,7 +122,7 @@ mod tests {
         assert!(capabilities.keyword);
         assert!(capabilities.sqlite_fts);
         assert!(capabilities.graph);
-        assert!(!capabilities.vector);
+        assert!(capabilities.vector);
     }
 
     #[test]
@@ -71,5 +134,19 @@ mod tests {
         };
 
         assert!(query_needs_project_scope(&query));
+    }
+
+    #[test]
+    fn hybrid_search_uses_vectors_without_requiring_them() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        assert!(hybrid_memory_search(&persistence, "anything", None, 5)?.is_empty());
+        Ok(())
     }
 }

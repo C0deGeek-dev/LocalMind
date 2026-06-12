@@ -5,11 +5,15 @@
 //! project store); a host MCP server mounts them by name.
 
 mod graph;
+mod skills;
 
 pub use graph::{
     handle, tool_names, AnchoredKnowledge, GraphToolError, GraphToolRequest, GraphToolResponse,
     SymbolSummary, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE,
     TOOL_SYMBOL_NEIGHBORHOOD,
+};
+pub use skills::{
+    list_active_skills, ActiveSkillSummary, SkillToolError, TOOL_SKILL_FETCH, TOOL_SKILL_LIST,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

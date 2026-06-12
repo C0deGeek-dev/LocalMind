@@ -170,6 +170,28 @@ impl ReviewQueue {
             .map_err(ReviewQueueError::Sqlite)
     }
 
+    pub fn replace_candidate(
+        &self,
+        item_id: &ReviewItemId,
+        candidate: &CandidateLesson,
+    ) -> Result<(), ReviewQueueError> {
+        let candidate_json =
+            serde_json::to_string(candidate).map_err(ReviewQueueError::SerializeCandidate)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE review_items SET candidate_json = ?2, updated_at = ?3 WHERE id = ?1",
+                params![item_id.as_str(), candidate_json, now_string()],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        if changed == 0 {
+            return Err(ReviewQueueError::MissingItem {
+                item_id: item_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn decide(&self, decision: ReviewDecision) -> Result<ReviewQueueItem, ReviewQueueError> {
         let state = state_for_action(&decision.action);
         if matches!(decision.action, ReviewAction::Edit)

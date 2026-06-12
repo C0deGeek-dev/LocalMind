@@ -13,10 +13,32 @@ Learning is off until this file exists at the project root:
 enabled = true                       # required; false refuses all writes
 memory_root = ".localmind/memory"    # optional; must stay inside the project
 allowed_scopes = ["project"]         # optional; scopes hosts may write
+
+[inference]
+chat_base_url = "http://127.0.0.1:8080"      # optional local OpenAI-compatible endpoint
+chat_model = "local-chat-model"              # required if chat endpoint is used
+embedding_base_url = "http://127.0.0.1:8080" # optional; falls back to chat_base_url
+embedding_model = "local-embedding-model"    # required if embeddings are used
+api_key_env = "LOCALMIND_API_KEY"            # optional env-var name only
+timeout_secs = 120                           # optional; must be > 0
+
+[inference.features]
+extraction = true
+review = true
+embeddings = true
+skills = true
+research = true
+
+[review]
+mode = "manual"              # manual, assisted, trusted, or automatic
+trusted_threshold = 0.82     # trusted auto-accept threshold
 ```
 
 A missing file, `enabled = false`, malformed TOML, or a `memory_root` that
 escapes the project root are all hard, typed errors — never silent fallbacks.
+When `[inference]` is absent, model-backed extraction, embeddings, review
+annotation, skill writing, research, and distillation are disabled and the
+deterministic paths remain active.
 
 ## Directory layout
 
@@ -27,6 +49,9 @@ escapes the project root are all hard, typed errors — never silent fallbacks.
     localmind.sqlite          # single shared database (schema below)
     memory/
       project/<memory-id>.md  # one Markdown file per accepted memory
+    skill-drafts/
+      <skill-id>/SKILL.md      # generated skill draft Markdown
+      <skill-id>/draft.json    # serialized SkillDraft
     sessions/
       <session-id>/
         metadata.json             # ImportedSession record
@@ -63,8 +88,8 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **1**); every component steps the schema on open and refuses
-databases newer than it understands. Version 1 tables:
+(currently **2**); every component steps the schema on open and refuses
+databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
 |---|---|---|
@@ -74,12 +99,19 @@ databases newer than it understands. Version 1 tables:
 | `memory_index(memory_id, path, scope, category, body, source_session, status, created_at)` | search index over accepted memory | `status = 'active'` rows are live |
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |
 | `memory_relationships(memory_id, relation_kind, target)` | typed relations | kinds: `category`, `session`, `file`, `entity` |
+| `vector_index(subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)` | rebuildable semantic index | f32 little-endian BLOBs; exact cosine in Rust |
+| `distilled_records(id, kind, title, body, source_memory_ids_json, status, created_at, updated_at)` | distillation/research candidates | derived, review-routed; not source of truth |
+| `skill_records(skill_id, draft_json, status, source_memory_ids_json, created_at, updated_at)` | active/retired skill lifecycle | activation and retirement are audited |
 | `graph_nodes`, `graph_edges`, `graph_meta` | code-structure graph | payload format versioned separately via `graph_meta.format_version` (`GRAPH_FORMAT_VERSION`, currently 1) |
 
 Write-consistency contract: multi-statement writes (promote, persist,
 delete) commit atomically; the Markdown file write precedes the indexing
 transaction, and deletion removes the file before the database rows so an
 interrupted delete heals on retry.
+`vector_index`, relationships, FTS, and memory index rows are all derived from
+Markdown memory or graph state and may be rebuilt. Inference audit rows record
+feature, endpoint kind, model id, and token counts when available; raw prompt
+or response content is never written to `audit_events`.
 
 ## Versioning
 

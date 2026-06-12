@@ -13,15 +13,20 @@ mod markdown;
 mod memory_persistence;
 mod paths;
 mod redaction;
+mod research;
+mod review_modes;
 mod review_queue;
 mod schema;
 mod skill_drafts;
 
-pub use config::{LearningConfig, LocalMindConfig, ProjectConfig, StoreConfigError};
+pub use config::{
+    LearningConfig, LocalMindConfig, ProjectConfig, ReviewConfig, ReviewModeConfig,
+    StoreConfigError,
+};
 pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
 pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
-    ExtractionOutput, SessionExtractor,
+    ExtractionOutput, ModelBackedExtractor, SessionExtractor,
 };
 pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
@@ -30,14 +35,17 @@ pub use import::{
 pub use markdown::MarkdownMemoryFormat;
 pub use memory_persistence::{
     AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryRecord, MemorySearchResult,
+    VectorSearchResult,
 };
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};
+pub use research::{BatchInsightError, BatchInsightPipeline, BatchInsightReport};
+pub use review_modes::{ReviewModeError, ReviewModeProcessor, ReviewModeReport};
 pub use review_queue::{
     ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary, REVIEW_DB_FILE_NAME,
 };
 pub use schema::SchemaError;
-pub use skill_drafts::{SkillDraftError, SkillDraftRecord, SkillDraftStore};
+pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 

@@ -6,8 +6,8 @@ use localmind_core::{
     SessionSource,
 };
 use localmind_store::{
-    CloseoutProcessor, ContextExportTarget, ContextExporter, DeterministicExtractor,
-    MemoryPersistence, ReviewQueue, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
+    CloseoutProcessor, ContextExportTarget, ContextExporter, MemoryPersistence, ReviewQueue,
+    SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -58,6 +58,11 @@ enum Command {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
+    /// Apply configured non-manual review mode to pending items.
+    ReviewMode {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
     /// Search accepted memory.
     Search {
         query: String,
@@ -78,6 +83,11 @@ enum Command {
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
+    },
+    /// Run batch distillation or research passes.
+    Insights {
+        #[command(subcommand)]
+        command: InsightCommand,
     },
 }
 
@@ -155,6 +165,40 @@ enum SkillsCommand {
         project: PathBuf,
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    /// Activate a reviewed skill draft for host consumption.
+    Activate {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// List active host-consumable skills.
+    Active {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Retire an active skill without deleting its provenance.
+    Retire {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, default_value = "retired by user")]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InsightCommand {
+    /// Distill accepted memories into higher-level review candidates.
+    Distill {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Research one topic against accepted memories and the code graph.
+    Research {
+        topic: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -263,10 +307,9 @@ fn main() -> Result<()> {
             session_id,
             project,
         } => {
-            let report = CloseoutProcessor::closeout_project_session(
+            let report = CloseoutProcessor::closeout_project_session_with_configured_inference(
                 project,
                 &SessionId::new(session_id),
-                &DeterministicExtractor,
             )?;
             println!("Closed out session {}", report.session_id);
             println!("Summary: {}", report.summary_path.display());
@@ -335,6 +378,13 @@ fn main() -> Result<()> {
             let persistence = MemoryPersistence::open_project(project)?;
             let entry = persistence.promote_review_item(&ReviewItemId::new(item_id))?;
             println!("Promoted memory {}", entry.id);
+        }
+        Command::ReviewMode { project } => {
+            let report = localmind_store::ReviewModeProcessor::apply_project(project)?;
+            println!(
+                "Annotated: {} Accepted: {} Manual: {}",
+                report.annotated, report.accepted, report.manual
+            );
         }
         Command::Search { query, project } => {
             let persistence = MemoryPersistence::open_project(project)?;
@@ -413,6 +463,44 @@ fn main() -> Result<()> {
                 } else {
                     println!("Skill draft not found");
                 }
+            }
+            SkillsCommand::Activate { draft_id, project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.activate(&SkillDraftId::new(draft_id))? {
+                    println!("{}\t{}", record.skill.id, record.status);
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+            SkillsCommand::Active { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                for record in store.active()? {
+                    println!("{}\t{}", record.skill.id, record.skill.name);
+                }
+            }
+            SkillsCommand::Retire {
+                draft_id,
+                project,
+                reason,
+            } => {
+                let store = SkillDraftStore::open_project(project)?;
+                println!("{}", store.retire(&SkillDraftId::new(draft_id), &reason)?);
+            }
+        },
+        Command::Insights { command } => match command {
+            InsightCommand::Distill { project } => {
+                let report = localmind_store::BatchInsightPipeline::distill(project)?;
+                println!(
+                    "Enqueued: {} Accepted by mode: {}",
+                    report.enqueued, report.accepted_by_mode
+                );
+            }
+            InsightCommand::Research { topic, project } => {
+                let report = localmind_store::BatchInsightPipeline::research(project, &topic)?;
+                println!(
+                    "Enqueued: {} Accepted by mode: {}",
+                    report.enqueued, report.accepted_by_mode
+                );
             }
         },
     }

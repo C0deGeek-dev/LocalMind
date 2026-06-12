@@ -25,5 +25,12 @@ pub enum AuditEventKind {
     MemoryDeleted,
     MemorySuperseded,
     SkillDraftCreated,
+    InferenceCallCompleted,
+    VectorIndexUpdated,
+    ReviewModeApplied,
+    SkillActivated,
+    SkillRetired,
+    DistillationCreated,
+    ResearchInsightCreated,
     ContextPackExported,
 }

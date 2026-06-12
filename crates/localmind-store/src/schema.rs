@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 1;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 2;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -39,6 +39,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
         .map_err(SchemaError::Sqlite)?;
     if current < 1 {
         apply_v1(&tx)?;
+    }
+    if current < 2 {
+        apply_v2(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -104,6 +107,48 @@ fn apply_v1(connection: &Connection) -> Result<(), SchemaError> {
                 relation_kind TEXT NOT NULL,
                 target TEXT NOT NULL,
                 PRIMARY KEY(memory_id, relation_kind, target)
+            );
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
+fn apply_v2(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS vector_index (
+                subject_kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector_blob BLOB NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(subject_kind, subject_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_vector_index_kind
+                ON vector_index(subject_kind);
+
+            CREATE TABLE IF NOT EXISTS distilled_records (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                source_memory_ids_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS skill_records (
+                skill_id TEXT PRIMARY KEY,
+                draft_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_memory_ids_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
             );
             "#,
         )

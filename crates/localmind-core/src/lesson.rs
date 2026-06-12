@@ -14,6 +14,8 @@ pub struct CandidateLesson {
     pub suggested_destination: CandidateDestination,
     pub suggested_action: SuggestedAction,
     pub validation_status: ValidationStatus,
+    #[serde(default)]
+    pub review_annotation: Option<ReviewAnnotation>,
 }
 
 impl CandidateLesson {
@@ -37,6 +39,7 @@ impl CandidateLesson {
             suggested_destination: CandidateDestination::ProjectMemory,
             suggested_action,
             validation_status: ValidationStatus::Valid,
+            review_annotation: None,
         }
     }
 
@@ -55,6 +58,14 @@ impl CandidateLesson {
     pub fn evidence(&self) -> &[EvidenceRef] {
         &self.evidence
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ReviewAnnotation {
+    pub score: Confidence,
+    pub duplicate_of: Option<String>,
+    pub conflict: bool,
+    pub notes: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -3,6 +3,8 @@ use localmind_core::{
     CandidateDestination, CandidateLesson, Confidence, ContractError, EvidenceKind, EvidenceRef,
     LessonCategory, LessonId, SessionId, SessionSummary, SuggestedAction, ValidationStatus,
 };
+use localmind_inference::{ChatEndpoint, ChatMessage, InferenceCapability, InferenceError};
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -37,6 +39,43 @@ impl SessionExtractor for DeterministicExtractor {
             summary,
             candidates,
         })
+    }
+}
+
+pub struct ModelBackedExtractor<'a> {
+    chat: Option<&'a ChatEndpoint>,
+    fallback: DeterministicExtractor,
+}
+
+impl<'a> ModelBackedExtractor<'a> {
+    #[must_use]
+    pub fn new(capability: &'a InferenceCapability) -> Self {
+        Self {
+            chat: capability.chat(),
+            fallback: DeterministicExtractor,
+        }
+    }
+}
+
+impl SessionExtractor for ModelBackedExtractor<'_> {
+    fn extract(&self, input: ExtractionInput) -> Result<ExtractionOutput, CloseoutError> {
+        let Some(chat) = self.chat else {
+            return self.fallback.extract(input);
+        };
+        let prompt = format!(
+            "Extract durable LocalMind session memory as compact JSON. Return only JSON with fields summary_title, summary_body, key_points, and candidates. Each candidate needs summary, category, confidence, action. Transcript:\n{}",
+            input.transcript
+        );
+        let completion = match chat.complete(&[
+            ChatMessage::system("You extract local development lessons. Return valid JSON only."),
+            ChatMessage::user(prompt),
+        ]) {
+            Ok(completion) => completion,
+            Err(_source) => return self.fallback.extract(input),
+        };
+        let parsed: ModelExtraction =
+            serde_json::from_str(&completion.content).map_err(CloseoutError::ModelOutput)?;
+        parsed.into_output(input)
     }
 }
 
@@ -121,6 +160,108 @@ impl CloseoutProcessor {
             enqueued_count,
         })
     }
+
+    pub fn closeout_project_session_with_configured_inference(
+        project_root: impl AsRef<Path>,
+        session_id: &SessionId,
+    ) -> Result<CloseoutReport, CloseoutError> {
+        let config =
+            ProjectConfig::discover(project_root.as_ref()).map_err(CloseoutError::Config)?;
+        let capability = InferenceCapability::from_settings(config.config.inference.as_ref())
+            .map_err(CloseoutError::Inference)?;
+        let extractor = ModelBackedExtractor::new(&capability);
+        Self::closeout_project_session(project_root, session_id, &extractor)
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelExtraction {
+    summary_title: String,
+    summary_body: String,
+    #[serde(default)]
+    key_points: Vec<String>,
+    #[serde(default)]
+    candidates: Vec<ModelCandidate>,
+}
+
+#[derive(Deserialize)]
+struct ModelCandidate {
+    summary: String,
+    #[serde(default = "default_model_category")]
+    category: String,
+    #[serde(default = "default_model_confidence")]
+    confidence: f32,
+    #[serde(default = "default_model_action")]
+    action: String,
+}
+
+impl ModelExtraction {
+    fn into_output(self, input: ExtractionInput) -> Result<ExtractionOutput, CloseoutError> {
+        let mut summary = SessionSummary::new(
+            input.session_id.clone(),
+            self.summary_title,
+            self.summary_body,
+        );
+        summary.key_points = self.key_points;
+        summary.evidence.push(input.transcript_evidence.clone());
+
+        let mut candidates = Vec::new();
+        for candidate in self.candidates {
+            let category = match candidate.category.as_str() {
+                "user_preference" => LessonCategory::UserPreference,
+                "project_convention" => LessonCategory::ProjectConvention,
+                "architecture_rule" => LessonCategory::ArchitectureRule,
+                "code_pattern" => LessonCategory::CodePattern,
+                "debugging_recipe" => LessonCategory::DebuggingRecipe,
+                "tooling_note" => LessonCategory::ToolingNote,
+                "testing_strategy" => LessonCategory::TestingStrategy,
+                "deployment_rule" => LessonCategory::DeploymentRule,
+                "anti_pattern" => LessonCategory::AntiPattern,
+                "security_warning" => LessonCategory::SecurityWarning,
+                "documentation_update" => LessonCategory::DocumentationUpdate,
+                "candidate_skill" => LessonCategory::CandidateSkill,
+                "process" => LessonCategory::Process,
+                other => LessonCategory::Other(other.to_string()),
+            };
+            let action = match candidate.action.as_str() {
+                "create_skill_draft" => SuggestedAction::CreateSkillDraft,
+                "update_skill_draft" => SuggestedAction::UpdateSkillDraft,
+                "update_documentation" => SuggestedAction::UpdateDocumentation,
+                "keep_for_session" => SuggestedAction::KeepForSession,
+                "ignore" => SuggestedAction::Ignore,
+                _ => SuggestedAction::PromoteToMemory,
+            };
+            let mut lesson = CandidateLesson::new(
+                LessonId::new(candidate_id(&input.session_id, &candidate.summary)),
+                candidate.summary,
+                category,
+                Confidence::new(candidate.confidence)?,
+                action,
+            )
+            .with_evidence(input.transcript_evidence.clone());
+            if matches!(lesson.suggested_action, SuggestedAction::CreateSkillDraft) {
+                lesson.suggested_destination = CandidateDestination::SkillDraft;
+            }
+            candidates.push(lesson);
+        }
+
+        Ok(ExtractionOutput {
+            summary,
+            candidates,
+        })
+    }
+}
+
+fn default_model_category() -> String {
+    "process".to_string()
+}
+
+fn default_model_confidence() -> f32 {
+    0.7
+}
+
+fn default_model_action() -> String {
+    "promote_to_memory".to_string()
 }
 
 fn summarize_transcript(input: &ExtractionInput) -> SessionSummary {
@@ -502,6 +643,10 @@ pub enum CloseoutError {
     InvalidCandidate { reason: String },
     #[error(transparent)]
     Contract(#[from] ContractError),
+    #[error(transparent)]
+    Inference(#[from] InferenceError),
+    #[error("model extraction output was not valid LocalMind JSON: {0}")]
+    ModelOutput(serde_json::Error),
     #[error("failed to serialize session summary: {source}")]
     SerializeSummary { source: serde_json::Error },
     #[error("failed to serialize candidate lessons: {source}")]

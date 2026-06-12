@@ -1,4 +1,4 @@
-use localmind_core::MemoryScope;
+use localmind_core::{InferenceSettings, MemoryScope};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,10 +6,14 @@ use thiserror::Error;
 
 pub const CONFIG_FILE_NAME: &str = ".localmind.toml";
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct LocalMindConfig {
     #[serde(default)]
     pub learning: LearningConfig,
+    #[serde(default)]
+    pub inference: Option<InferenceSettings>,
+    #[serde(default)]
+    pub review: ReviewConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -38,6 +42,33 @@ impl Default for LearningConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ReviewConfig {
+    #[serde(default)]
+    pub mode: ReviewModeConfig,
+    #[serde(default = "default_trusted_threshold")]
+    pub trusted_threshold: f32,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            mode: ReviewModeConfig::Manual,
+            trusted_threshold: default_trusted_threshold(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewModeConfig {
+    #[default]
+    Manual,
+    Assisted,
+    Trusted,
+    Automatic,
+}
+
 fn default_local_only() -> bool {
     true
 }
@@ -50,7 +81,11 @@ fn default_allowed_scopes() -> Vec<MemoryScope> {
     vec![MemoryScope::Project]
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+fn default_trusted_threshold() -> f32 {
+    0.82
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectConfig {
     pub project_root: PathBuf,
     pub config_path: PathBuf,
@@ -123,6 +158,33 @@ impl ProjectConfig {
             });
         }
 
+        if let Some(inference) = &self.config.inference {
+            validate_inference_endpoint(
+                &self.config_path,
+                inference.chat_base_url.as_deref(),
+                inference.chat_model.as_deref(),
+                "chat_model",
+            )?;
+            validate_inference_endpoint(
+                &self.config_path,
+                inference.embedding_base_url(),
+                inference.embedding_model.as_deref(),
+                "embedding_model",
+            )?;
+            if inference.timeout_secs == 0 {
+                return Err(StoreConfigError::InvalidInferenceTimeout {
+                    path: self.config_path.clone(),
+                });
+            }
+        }
+
+        if !(0.0..=1.0).contains(&self.config.review.trusted_threshold) {
+            return Err(StoreConfigError::InvalidReviewThreshold {
+                path: self.config_path.clone(),
+                value: self.config.review.trusted_threshold,
+            });
+        }
+
         Ok(())
     }
 
@@ -135,6 +197,29 @@ impl ProjectConfig {
     pub fn allows_scope(&self, scope: &MemoryScope) -> bool {
         self.config.learning.allowed_scopes.contains(scope)
     }
+}
+
+fn validate_inference_endpoint(
+    path: &Path,
+    endpoint: Option<&str>,
+    model: Option<&str>,
+    model_field: &'static str,
+) -> Result<(), StoreConfigError> {
+    if let Some(endpoint) = endpoint {
+        if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+            return Err(StoreConfigError::InvalidInferenceEndpoint {
+                path: path.to_path_buf(),
+                endpoint: endpoint.to_string(),
+            });
+        }
+    }
+    if model.is_some() && endpoint.is_none() {
+        return Err(StoreConfigError::InferenceModelWithoutEndpoint {
+            path: path.to_path_buf(),
+            model_field,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -156,4 +241,15 @@ pub enum StoreConfigError {
     UnsafeMemoryRoot { path: PathBuf, memory_root: PathBuf },
     #[error("LocalMind config must allow at least one memory scope: {path:?}")]
     NoAllowedScopes { path: PathBuf },
+    #[error("invalid inference endpoint {endpoint:?} in {path:?}; endpoint must be http(s)")]
+    InvalidInferenceEndpoint { path: PathBuf, endpoint: String },
+    #[error("{model_field} is configured without an inference endpoint in {path:?}")]
+    InferenceModelWithoutEndpoint {
+        path: PathBuf,
+        model_field: &'static str,
+    },
+    #[error("inference timeout must be greater than zero in {path:?}")]
+    InvalidInferenceTimeout { path: PathBuf },
+    #[error("review trusted_threshold must be between 0.0 and 1.0 in {path:?}, got {value}")]
+    InvalidReviewThreshold { path: PathBuf, value: f32 },
 }

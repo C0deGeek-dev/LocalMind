@@ -1,5 +1,5 @@
 [package]
-name = "localmind-store"
+name = "localmind-inference"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -10,14 +10,9 @@ workspace = true
 
 [dependencies]
 localmind-core = { path = "../localmind-core" }
-localmind-inference = { path = "../localmind-inference" }
-regex = { workspace = true }
-rusqlite = { workspace = true }
+idna_adapter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
-toml = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+ureq = { workspace = true }
+url = { workspace = true }

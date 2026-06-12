@@ -3,10 +3,11 @@ use crate::{
     StoreConfigError,
 };
 use localmind_core::{
-    AuditEventKind, Confidence, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus,
-    ReviewItemId, ReviewState, SkillDraft,
+    content_fingerprint, AuditEventKind, Confidence, MemoryEntry, MemoryEntryId, MemoryScope,
+    MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
 };
-use rusqlite::{params, Connection};
+use localmind_inference::{InferenceCapability, InferenceError, TokenUsage};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -30,6 +31,13 @@ pub struct MemorySearchResult {
     pub snippet: String,
     /// Index timestamp of the entry, as stored (RFC-ish text).
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSearchResult {
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub score: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +141,7 @@ impl MemoryPersistence {
             }),
         )?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
+        self.embed_memory_if_configured(&entry)?;
         Ok(entry)
     }
 
@@ -153,6 +162,7 @@ impl MemoryPersistence {
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::index_memory_with(&tx, entry, &path)?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
+        self.embed_memory_if_configured(entry)?;
         Ok(path)
     }
 
@@ -207,6 +217,28 @@ impl MemoryPersistence {
             "cli",
             draft.id.as_str(),
             &serde_json::json!({ "name": draft.name, "disabled": true }),
+        )
+    }
+
+    pub fn record_inference_call(
+        &self,
+        feature: &str,
+        endpoint_kind: &str,
+        model: &str,
+        usage: Option<&TokenUsage>,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::InferenceCallCompleted,
+            "localmind",
+            feature,
+            &serde_json::json!({
+                "feature": feature,
+                "endpoint_kind": endpoint_kind,
+                "model": model,
+                "prompt_tokens": usage.and_then(|value| value.prompt_tokens),
+                "completion_tokens": usage.and_then(|value| value.completion_tokens),
+                "total_tokens": usage.and_then(|value| value.total_tokens),
+            }),
         )
     }
 
@@ -292,6 +324,11 @@ impl MemoryPersistence {
             params![memory_id.as_str()],
         )
         .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM vector_index WHERE subject_kind = 'memory' AND subject_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
         Self::write_audit_with(
             &tx,
             AuditEventKind::MemoryDeleted,
@@ -301,6 +338,121 @@ impl MemoryPersistence {
         )?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         Ok(true)
+    }
+
+    pub fn upsert_memory_embedding(
+        &self,
+        memory_id: &MemoryEntryId,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
+        if vector.is_empty() {
+            return Err(MemoryPersistenceError::InvalidVector {
+                detail: "vector must not be empty".to_string(),
+            });
+        }
+        let existing: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT source_fingerprint FROM vector_index WHERE subject_kind = 'memory' AND subject_id = ?1",
+                params![memory_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        if existing.as_deref() == Some(source_fingerprint) {
+            return Ok(false);
+        }
+
+        let blob = encode_vector(vector);
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO vector_index
+                (subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)
+                VALUES('memory', ?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
+                    source_fingerprint = excluded.source_fingerprint,
+                    model = excluded.model,
+                    dimensions = excluded.dimensions,
+                    vector_blob = excluded.vector_blob,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    memory_id.as_str(),
+                    source_fingerprint,
+                    model,
+                    i64::try_from(vector.len()).map_err(|_| MemoryPersistenceError::InvalidVector {
+                        detail: "vector has too many dimensions".to_string(),
+                    })?,
+                    blob,
+                    OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.write_audit(
+            AuditEventKind::VectorIndexUpdated,
+            "localmind",
+            memory_id.as_str(),
+            &serde_json::json!({
+                "subject_kind": "memory",
+                "model": model,
+                "dimensions": vector.len(),
+            }),
+        )?;
+        Ok(true)
+    }
+
+    pub fn vector_search(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchResult>, MemoryPersistenceError> {
+        if query_vector.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT subject_kind, subject_id, dimensions, vector_blob FROM vector_index ORDER BY subject_kind, subject_id",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (subject_kind, subject_id, dimensions, blob) =
+                row.map_err(MemoryPersistenceError::Sqlite)?;
+            let vector = decode_vector(&blob)?;
+            if usize::try_from(dimensions).ok() != Some(vector.len())
+                || vector.len() != query_vector.len()
+            {
+                continue;
+            }
+            scored.push(VectorSearchResult {
+                subject_kind,
+                subject_id,
+                score: cosine_similarity(query_vector, &vector),
+            });
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     /// Searches active memory through the FTS5 index (`memory_fts MATCH` with
@@ -523,6 +675,40 @@ impl MemoryPersistence {
         Self::write_audit_with(&self.connection, kind, actor, subject, metadata)
     }
 
+    fn embed_memory_if_configured(
+        &self,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(());
+        };
+        let vectors = endpoint.embed(std::slice::from_ref(&entry.body))?;
+        let Some(vector) = vectors.first() else {
+            return Err(MemoryPersistenceError::InvalidVector {
+                detail: "embedding endpoint returned no vectors".to_string(),
+            });
+        };
+        self.record_inference_call("embeddings", "embedding", endpoint.model(), None)?;
+        self.upsert_memory_embedding(
+            &entry.id,
+            &content_fingerprint(entry.body.as_str()),
+            endpoint.model(),
+            vector,
+        )?;
+        Ok(())
+    }
+
+    pub fn record_custom_audit(
+        &self,
+        kind: AuditEventKind,
+        actor: &str,
+        subject: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(kind, actor, subject, metadata)
+    }
+
     /// Inserts one audit row on the given connection. Metadata is a
     /// `serde_json::Value` so callers cannot hand-build malformed JSON.
     fn write_audit_with(
@@ -586,6 +772,41 @@ fn canonicalize_lenient(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
+fn decode_vector(blob: &[u8]) -> Result<Vec<f32>, MemoryPersistenceError> {
+    let chunks = blob.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(MemoryPersistenceError::InvalidVector {
+            detail: "vector blob length is not divisible by four".to_string(),
+        });
+    }
+    Ok(chunks
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (left, right) in left.iter().zip(right) {
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    dot / (left_norm.sqrt() * right_norm.sqrt())
+}
+
 #[derive(Debug, Error)]
 pub enum MemoryPersistenceError {
     #[error(transparent)]
@@ -596,6 +817,8 @@ pub enum MemoryPersistenceError {
     MemoryPath(#[from] crate::MemoryPathError),
     #[error(transparent)]
     Contract(#[from] localmind_core::ContractError),
+    #[error(transparent)]
+    Inference(#[from] InferenceError),
     #[error("failed to create LocalMind state directory {path:?}: {source}")]
     CreateStateDir {
         path: PathBuf,
@@ -622,6 +845,8 @@ pub enum MemoryPersistenceError {
     },
     #[error(transparent)]
     Schema(#[from] crate::schema::SchemaError),
+    #[error("invalid vector index data: {detail}")]
+    InvalidVector { detail: String },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }

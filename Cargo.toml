@@ -3,6 +3,7 @@ members = [
     "crates/localmind-cli",
     "crates/localmind-codegraph",
     "crates/localmind-core",
+    "crates/localmind-inference",
     "crates/localmind-mcp",
     "crates/localmind-review",
     "crates/localmind-search",
@@ -33,6 +34,9 @@ time = { version = "=0.3.37", features = ["formatting", "parsing", "serde"] }
 toml = "=0.8.23"
 tree-sitter = "=0.26.9"
 tree-sitter-rust = "=0.24.2"
+ureq = { version = "=2.12.1", default-features = false }
+url = "=2.5.4"
+idna_adapter = "=1.2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
