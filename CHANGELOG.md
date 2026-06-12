@@ -3,7 +3,7 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
-## v0.2.0-beta.1 - 2026-06-12
+## v0.3.0-beta.1 - 2026-06-12
 
 Coordinated LocalX beta release.
 
