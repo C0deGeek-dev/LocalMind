@@ -97,15 +97,19 @@ Current workspace layout:
 
 ## Development
 
-Baseline local commands:
+The local gate mirrors CI (`rust-toolchain.toml` pins the same toolchain CI
+uses, so local clippy matches the CI clippy contract):
 
 ```powershell
 cargo fmt --check
-cargo check --workspace
-cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo check --workspace
 cargo run -p localmind-cli -- --help
 ```
+
+Aliases for the CI steps live in `.cargo/config.toml`: `cargo ci-fmt`,
+`cargo ci-lint`, `cargo ci-test` (nextest, as in CI), `cargo ci-doctest`.
 
 The MVP remains local-first and opt-in. No cloud dependency, autonomous memory
 write, hidden transcript capture, or host-specific dependency belongs in
