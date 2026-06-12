@@ -16,8 +16,13 @@ use time::OffsetDateTime;
 
 #[derive(Clone, Debug)]
 pub enum SearchHitKind {
-    Code(GraphNode),
-    Memory { id: MemoryEntryId, snippet: String },
+    /// Boxed: a graph node is an order of magnitude larger than the memory
+    /// variant, and hit lists move by value through ranking and sorting.
+    Code(Box<GraphNode>),
+    Memory {
+        id: MemoryEntryId,
+        snippet: String,
+    },
 }
 
 /// One ranked result with its signal breakdown, so a caller (and the user)
@@ -105,7 +110,7 @@ pub fn search_workspace(
             let score = combined_score(structural, temporal, intent, config.weights);
             if score > 0.0 {
                 hits.push(RankedHit {
-                    kind: SearchHitKind::Code(node),
+                    kind: SearchHitKind::Code(Box::new(node)),
                     score,
                     structural,
                     temporal,
