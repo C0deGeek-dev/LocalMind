@@ -3,6 +3,19 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
+## v0.2.0-beta.1 - 2026-06-12
+
+Coordinated LocalX beta release.
+
+- Added opt-in local OpenAI-compatible inference for chat completions and
+  embeddings, with deterministic behavior when inference is not configured.
+- Added schema-versioned vector storage and hybrid memory retrieval.
+- Added model-backed extraction, review annotations, and manual/assisted/
+  trusted/automatic review modes.
+- Added active skill lifecycle records and MCP host surface.
+- Added batch research and distillation jobs that route through the review
+  pipeline.
+
 ## v0.1.0 — 2026-06-12
 
 First tagged snapshot of the host-neutral learning engine.
