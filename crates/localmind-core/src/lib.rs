@@ -41,7 +41,7 @@ pub use session::{
     SessionRecord, SessionSource, TestRun, ToolEvent,
 };
 pub use skill::SkillDraft;
-pub use summary::SessionSummary;
+pub use summary::{DigestSection, DigestSectionKind, SessionSummary};
 
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};

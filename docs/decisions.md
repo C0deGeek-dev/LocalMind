@@ -4,6 +4,22 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0005 — Summaries and extraction candidates are evidence-grounded
+
+- **Date**: 2026-06-14
+- **Status**: accepted
+
+LocalMind session summaries use shared digest sections for progress,
+decisions, next steps, relevant command/failure outcomes, risks, and stale or
+superseded facts. Candidate lessons must carry evidence before they can enter
+the review queue. Candidate quality is represented as confidence, validation
+status, and review annotation signals such as conflict notes.
+
+Model-backed extraction remains optional and strict-schema. If inference is not
+configured or the model output is malformed, LocalMind falls back to the
+deterministic extractor. Extracted candidates are review items; they do not
+write accepted memory directly.
+
 ## D-LM-0001 — Code-structure graph is built natively on tree-sitter
 
 - **Date**: 2026-06-11

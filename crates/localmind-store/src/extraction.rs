@@ -1,7 +1,8 @@
 use crate::{ImportedSession, ProjectConfig, ReviewQueue, ReviewQueueError, StoreConfigError};
 use localmind_core::{
-    CandidateDestination, CandidateLesson, Confidence, ContractError, EvidenceKind, EvidenceRef,
-    LessonCategory, LessonId, SessionId, SessionSummary, SuggestedAction, ValidationStatus,
+    CandidateDestination, CandidateLesson, Confidence, ContractError, DigestSection,
+    DigestSectionKind, EvidenceKind, EvidenceRef, LessonCategory, LessonId, ReviewAnnotation,
+    SessionId, SessionSummary, SuggestedAction, ValidationStatus,
 };
 use localmind_inference::{ChatEndpoint, ChatMessage, InferenceCapability, InferenceError};
 use serde::Deserialize;
@@ -123,7 +124,11 @@ impl CloseoutProcessor {
             }
         })?;
 
-        let evidence = EvidenceRef::new(EvidenceKind::Transcript, "redacted transcript").redacted();
+        let mut evidence =
+            EvidenceRef::new(EvidenceKind::Transcript, "redacted transcript").redacted();
+        evidence
+            .metadata
+            .insert("range".to_string(), "full_transcript".to_string());
         let input = ExtractionInput {
             session_id: imported.session.id,
             transcript,
@@ -203,6 +208,7 @@ impl ModelExtraction {
             self.summary_body,
         );
         summary.key_points = self.key_points;
+        summary.digest_sections = digest_sections_from_points(&summary.key_points);
         summary.evidence.push(input.transcript_evidence.clone());
 
         let mut candidates = Vec::new();
@@ -242,6 +248,7 @@ impl ModelExtraction {
             if matches!(lesson.suggested_action, SuggestedAction::CreateSkillDraft) {
                 lesson.suggested_destination = CandidateDestination::SkillDraft;
             }
+            annotate_candidate(&mut lesson)?;
             candidates.push(lesson);
         }
 
@@ -285,8 +292,77 @@ fn summarize_transcript(input: &ExtractionInput) -> SessionSummary {
         .take(5)
         .map(ToString::to_string)
         .collect();
+    summary.digest_sections = digest_sections_for_lines(&lines_for_digest(&input.transcript));
+    summary.unresolved_risks = summary
+        .key_points
+        .iter()
+        .filter(|point| {
+            let lower = point.to_ascii_lowercase();
+            lower.contains("blocked") || lower.contains("risk") || lower.contains("failed")
+        })
+        .cloned()
+        .collect();
+    summary.stale_or_superseded = summary
+        .key_points
+        .iter()
+        .filter(|point| {
+            let lower = point.to_ascii_lowercase();
+            lower.contains("stale") || lower.contains("superseded") || lower.contains("instead")
+        })
+        .cloned()
+        .collect();
     summary.evidence.push(input.transcript_evidence.clone());
     summary
+}
+
+fn lines_for_digest(transcript: &str) -> Vec<&str> {
+    transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn digest_sections_from_points(points: &[String]) -> Vec<DigestSection> {
+    let borrowed: Vec<&str> = points.iter().map(String::as_str).collect();
+    digest_sections_for_lines(&borrowed)
+}
+
+fn digest_sections_for_lines(lines: &[&str]) -> Vec<DigestSection> {
+    let mut progress = Vec::new();
+    let mut decisions = Vec::new();
+    let mut commands = Vec::new();
+    let mut risks = Vec::new();
+    let mut next_steps = Vec::new();
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("fixed") || lower.contains("implemented") || lower.contains("passed") {
+            progress.push(truncate_fragment(strip_speaker(line)));
+        }
+        if lower.contains("decided") || lower.contains("prefer") || lower.contains("instead") {
+            decisions.push(truncate_fragment(strip_speaker(line)));
+        }
+        if command_text(line).is_some() || lower.contains("failed") || lower.contains("error") {
+            commands.push(truncate_fragment(strip_speaker(line)));
+        }
+        if lower.contains("blocked") || lower.contains("risk") {
+            risks.push(truncate_fragment(strip_speaker(line)));
+        }
+        if lower.contains("next") || lower.contains("todo") || lower.contains("pending") {
+            next_steps.push(truncate_fragment(strip_speaker(line)));
+        }
+    }
+    [
+        (DigestSectionKind::Progress, progress),
+        (DigestSectionKind::Decisions, decisions),
+        (DigestSectionKind::CommandOutcomes, commands),
+        (DigestSectionKind::Risks, risks),
+        (DigestSectionKind::NextSteps, next_steps),
+    ]
+    .into_iter()
+    .filter(|(_, items)| !items.is_empty())
+    .map(|(kind, items)| DigestSection::new(kind, items.into_iter().take(5).collect()))
+    .collect()
 }
 
 /// Most candidates a single heuristic family may contribute per session,
@@ -317,6 +393,7 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::ProjectMemory;
+        annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
     }
 
@@ -341,6 +418,7 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::SkillDraft;
+        annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
     }
 
@@ -361,6 +439,7 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::ProjectMemory;
+        annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
     }
 
@@ -381,6 +460,7 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::SkillDraft;
+        annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
     }
 
@@ -401,10 +481,106 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::ProjectMemory;
+        annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
     }
 
+    suggest_memory_updates(&mut candidates);
     Ok(candidates)
+}
+
+fn annotate_candidate(candidate: &mut CandidateLesson) -> Result<(), CloseoutError> {
+    let summary = candidate.summary().to_ascii_lowercase();
+    let conflict = summary.contains("instead")
+        || summary.contains("do not")
+        || summary.contains("don't")
+        || summary.contains("wrong");
+    candidate.review_annotation = Some(ReviewAnnotation {
+        score: Confidence::new(candidate.confidence.value())?,
+        duplicate_of: None,
+        conflict,
+        notes: if conflict {
+            "candidate contains a correction or conflict signal".to_string()
+        } else {
+            "source-grounded deterministic extraction".to_string()
+        },
+    });
+    // Refine a memory-bound candidate into a concrete update suggestion. These
+    // are review suggestions only — the reviewer enacts them; extraction never
+    // writes accepted memory. Skill/doc/session candidates keep their action.
+    if matches!(candidate.suggested_action, SuggestedAction::PromoteToMemory) {
+        if conflict {
+            candidate.suggested_action = SuggestedAction::SupersedeExisting;
+        } else if bundles_multiple_facts(&summary) {
+            candidate.suggested_action = SuggestedAction::Split;
+        }
+    }
+    if candidate.evidence().is_empty() {
+        candidate.validation_status = ValidationStatus::MissingRequiredField;
+    } else if candidate.confidence.value() < 0.6 {
+        candidate.validation_status = ValidationStatus::LowConfidence;
+    }
+    Ok(())
+}
+
+/// A summary "bundles" several lessons when it stitches multiple distinct claims
+/// together — a semicolon list or two or more conjunctions. Such candidates are
+/// better split before promotion than stored as one blurry memory.
+fn bundles_multiple_facts(summary: &str) -> bool {
+    summary.contains("; ") || summary.matches(" and ").count() >= 2
+}
+
+/// Suggest merge/ignore actions for near-duplicate candidates. A later candidate
+/// whose summary is contained in (or contains) an earlier one is annotated as a
+/// duplicate of that earlier candidate and routed to a merge (when it carries
+/// its own evidence) or ignore suggestion — never a direct memory write. Exact
+/// duplicates are already collapsed upstream, so this catches the near misses.
+fn suggest_memory_updates(candidates: &mut [CandidateLesson]) {
+    for index in 0..candidates.len() {
+        let summary = normalize_summary(candidates[index].summary());
+        let mut duplicate_of = None;
+        for earlier in &candidates[..index] {
+            if near_duplicate(&summary, &normalize_summary(earlier.summary())) {
+                duplicate_of = Some(earlier.id.as_str().to_string());
+                break;
+            }
+        }
+        let Some(target) = duplicate_of else {
+            continue;
+        };
+        let adds_evidence = !candidates[index].evidence().is_empty();
+        let candidate = &mut candidates[index];
+        if let Some(annotation) = candidate.review_annotation.as_mut() {
+            annotation.duplicate_of = Some(target.clone());
+            annotation.notes = format!("near-duplicate of {target}");
+        }
+        candidate.suggested_action = if adds_evidence {
+            SuggestedAction::MergeIntoExisting
+        } else {
+            SuggestedAction::Ignore
+        };
+        if !adds_evidence {
+            candidate.validation_status = ValidationStatus::Duplicate;
+        }
+    }
+}
+
+fn normalize_summary(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Two summaries are near-duplicates when one meaningfully contains the other
+/// (a short restatement of the same fact), not merely sharing a word.
+fn near_duplicate(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    shorter.len() >= 12 && longer.contains(shorter)
 }
 
 /// How many lines after a failure line a resolution may appear and still be
@@ -601,6 +777,12 @@ fn validate_candidates(candidates: &[CandidateLesson]) -> Result<(), CloseoutErr
         if !seen.insert(candidate.summary().to_ascii_lowercase()) {
             return Err(CloseoutError::InvalidCandidate {
                 reason: "duplicate candidate summary".to_string(),
+            });
+        }
+
+        if candidate.evidence().is_empty() {
+            return Err(CloseoutError::InvalidCandidate {
+                reason: "candidate evidence is required".to_string(),
             });
         }
 

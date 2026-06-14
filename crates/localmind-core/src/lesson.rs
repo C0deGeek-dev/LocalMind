@@ -122,6 +122,16 @@ pub enum SuggestedAction {
     UpdateDocumentation,
     KeepForSession,
     Ignore,
+    /// Merge this candidate's evidence into an existing related memory rather
+    /// than creating a near-duplicate. The reviewer selects the target memory;
+    /// this is a suggestion only, never a direct write.
+    MergeIntoExisting,
+    /// Replace prior accepted guidance that this candidate corrects or makes
+    /// stale. The reviewer selects the target memory to supersede.
+    SupersedeExisting,
+    /// This candidate bundles multiple distinct facts; the reviewer should split
+    /// it into separate memories before promotion.
+    Split,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
