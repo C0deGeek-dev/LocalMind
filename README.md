@@ -42,7 +42,10 @@ depends on LocalPilot; LocalPilot maps its session bundles, tool events, diffs,
 test results, and recovery events into LocalMind contracts through an adapter.
 
 The standalone `localmind` CLI is the shell around the same engine for generic
-transcripts, Claude Code, OpenAI Codex, and future MCP clients.
+transcripts, Claude Code, OpenAI Codex, and MCP clients. The MCP query and
+active-skill contracts are **implemented** in `localmind-mcp`; what remains
+future is a standalone MCP *server host* that exposes them as a long-running
+process.
 
 ## Repository Role
 
@@ -93,7 +96,8 @@ Current workspace layout:
 - `crates/localmind-search` — retrieval/search boundary.
 - `crates/localmind-skills` — skill draft generation and maintenance boundary.
 - `crates/localmind-cli` — standalone CLI entry point.
-- `crates/localmind-mcp` — future MCP surface.
+- `crates/localmind-mcp` — MCP surface: graph-query tools and active-skill
+  listing/fetch contracts (implemented); a standalone server host is future.
 
 ## Development
 

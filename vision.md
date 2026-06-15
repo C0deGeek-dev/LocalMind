@@ -25,8 +25,8 @@ behavior does not; "absent" means not started.
 |---|---|---|
 | Session capture — manual transcript import (§1) | implemented | `localmind-store` (`TranscriptImporter`), `localmind-cli` |
 | Redaction before storage (§1, §12) | implemented — pattern table + entropy backstop, corpus-tested | `localmind-store` |
-| Inference foundation | implemented — opt-in local OpenAI-compatible chat and embedding endpoints; unset config keeps deterministic behavior | `localmind-core`, `localmind-inference`, `localmind-store` |
-| Lesson extraction (§2) | implemented — model-backed extractor when configured, deterministic fallback otherwise | `localmind-store` (`extraction.rs`), `localmind-inference` |
+| Inference foundation | implemented (engine) — opt-in local OpenAI-compatible chat and embedding endpoints; unset config keeps deterministic behavior. **Engine-complete; the LocalPilot host does not yet select the configured path** (see note below) | `localmind-core`, `localmind-inference`, `localmind-store` |
+| Lesson extraction (§2) | implemented (engine) — model-backed extractor when configured, deterministic fallback otherwise. **Engine-complete; not yet selected by the LocalPilot host, and extraction quality is not yet measured** (see note below) | `localmind-store` (`extraction.rs`), `localmind-inference` |
 | Review queue — manual mode (§3) | implemented | `localmind-store` (`ReviewQueue`); `localmind-review` is the future home (see topology note) |
 | Review queue — assisted/trusted/automatic modes (§3) | implemented — project config selects mode; assisted annotates, trusted/automatic audit auto-accepts and route conflicts to manual | `localmind-store` (`ReviewModeProcessor`) |
 | Memory store: Markdown memory, SQLite index/audit (§4) | implemented — transactional, schema-versioned | `localmind-store` |
@@ -38,6 +38,16 @@ behavior does not; "absent" means not started.
 | Research and distillation (§9, §10 stages 5+) | implemented — opt-in model-backed batch jobs that emit review candidates through active mode | `localmind-store` (`BatchInsightPipeline`) |
 | MCP surface (§13) | implemented — graph query tools and active-skill listing/fetch contracts | `localmind-mcp` |
 | Hosts | standalone CLI; LocalPilot embeds via its adapter crate | `localmind-cli`; adapter lives in the host |
+
+**Host-integration note.** "Implemented (engine)" above means the behaviour is
+tested and usable *through the LocalMind engine / `localmind` CLI*. Two honest
+caveats apply to the inference and lesson-extraction rows: (1) the embedding
+LocalPilot host currently drives the **deterministic** extractor only — it does
+not yet select the configured model-backed path — so a LocalPilot user does not
+yet benefit from `[inference]`; and (2) extraction *quality* (precision of the
+candidates, usefulness of promoted memory) is **not yet measured** by any eval.
+Both are being addressed; until then, do not read "implemented" as "the primary
+host produces high-quality learning today."
 
 **Topology note.** `localmind-review` and `localmind-skills` stay as thin
 boundary crates while storage-backed behavior lives in `localmind-store`: they
@@ -557,6 +567,15 @@ The user should be able to say:
 * “Show proposed memory changes before applying.”
 
 ## 13. Possible Architecture
+
+> **Superseded (2026-06-15).** This section is an early *exploration* of shapes
+> LocalMind might take (standalone service, REST/gRPC API, web UI, workspace
+> watcher, plugin system). The chosen and implemented architecture is the
+> **embedded learning engine + standalone `localmind` CLI** described in the
+> Implementation Status table above: hosts (LocalPilot) embed the engine through
+> an adapter; there is no LocalMind service, REST/gRPC API, web UI, or workspace
+> watcher, and none is planned. The text is kept for historical context only —
+> do not treat it as a roadmap.
 
 ### Frontend
 
