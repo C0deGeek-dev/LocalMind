@@ -3,6 +3,24 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
+## v0.3.0-beta.2 - 2026-06-15
+
+Coordinated LocalX beta release. Makes the learning loop produce usable results.
+
+- Hardened the deterministic extractor: candidates pass a prose-admission gate
+  (no bare file paths, code/markup, or punctuation fragments), and each heuristic
+  family is tightened and capped. Stops the review queue flooding with noise.
+- Batch distillation and research now emit strict-JSON, schema-validated
+  candidates; non-JSON model output is rejected, not stored.
+- Replaced the naive review-mode conflict/duplicate detection (top-1 keyword hit;
+  literal "contradict") with token-overlap similarity and a real
+  corrective-contradiction check.
+- Added a golden-session memory-quality evaluation (extraction precision/recall,
+  retrieval recall@k) with a regression threshold, exposed as `localmind eval`.
+- Recorded engine decision `D-LM-0006`.
+- Docs: vision Implementation-Status table discloses host-unwired/quality-
+  unmeasured; section 13 marked superseded; README MCP wording corrected.
+
 ## v0.3.0-beta.1 - 2026-06-12
 
 Coordinated LocalX beta release.
