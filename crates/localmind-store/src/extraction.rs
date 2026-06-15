@@ -774,8 +774,9 @@ fn alpha_word_count(text: &str) -> usize {
 /// Lighter gate for *author-declared* lessons (explicit `Lesson:` markers). The
 /// author already decided the line is worth keeping, so a short statement is
 /// fine — but it must still be prose, not a bare file path, a code/markup line,
-/// or a punctuation/sub-token fragment.
-fn is_admissible_text(text: &str) -> bool {
+/// or a punctuation/sub-token fragment. Shared with distillation, which applies
+/// the same admission bar to model-produced insights.
+pub(crate) fn is_admissible_text(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() || looks_like_path(trimmed) || looks_like_code_or_markup(trimmed) {
         return false;
