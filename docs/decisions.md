@@ -4,6 +4,28 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0006 — Candidates pass a prose-admission gate; batch insights are strict-JSON
+
+- **Date**: 2026-06-15
+- **Status**: accepted
+
+Refines D-LM-0005. Every deterministic-extractor candidate must pass a single
+prose-admission gate before it can enter the review queue: it must read like a
+human-written lesson, not a bare file path, a code/markup line, or a
+punctuation/sub-token fragment. Author-declared markers (`Lesson:`) take a
+lighter gate than the weaker heuristics (skill/workflow proposals require an
+explicit intent phrase and are capped; failure→resolution requires a genuine
+failure *report* on both sides). This is what stops dumped file content from
+flooding the review queue.
+
+Batch distillation and research return a strict-JSON envelope, not free text. A
+non-JSON or wrong-shape reply is rejected outright and nothing is stored;
+individually malformed insights are dropped. Distilled insights meet the same
+admission bar as extracted lessons.
+
+Both keep extraction/distillation review-routed and noise-resistant; quality is
+measured by the golden-session evaluation rather than assumed.
+
 ## D-LM-0005 — Summaries and extraction candidates are evidence-grounded
 
 - **Date**: 2026-06-14
