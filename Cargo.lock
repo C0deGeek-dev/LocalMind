@@ -491,6 +491,7 @@ dependencies = [
  "clap",
  "localmind-core",
  "localmind-store",
+ "serde_json",
  "tempfile",
 ]
 

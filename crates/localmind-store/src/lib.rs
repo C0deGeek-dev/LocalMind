@@ -6,6 +6,7 @@
 
 mod config;
 mod context_export;
+mod eval;
 mod extraction;
 mod graph_store;
 mod import;
@@ -24,6 +25,9 @@ pub use config::{
     StoreConfigError,
 };
 pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
+pub use eval::{
+    default_fixtures, run_eval, EvalError, EvalFixture, EvalReport, FixtureScore, RetrievalCase,
+};
 pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
     ExtractionOutput, ModelBackedExtractor, SessionExtractor,

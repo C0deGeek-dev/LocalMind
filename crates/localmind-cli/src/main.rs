@@ -89,6 +89,16 @@ enum Command {
         #[command(subcommand)]
         command: InsightCommand,
     },
+    /// Score memory quality (extraction precision/recall, retrieval recall@k)
+    /// over the built-in golden fixtures.
+    Eval {
+        /// Retrieval cutoff for recall@k.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+        /// Emit the report as JSON instead of a text summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -503,6 +513,37 @@ fn main() -> Result<()> {
                 );
             }
         },
+        Command::Eval { k, json } => {
+            let work_root =
+                std::env::temp_dir().join(format!("localmind-eval-{}", std::process::id()));
+            fs::create_dir_all(&work_root)?;
+            let result = localmind_store::run_eval(&localmind_store::default_fixtures(), k, &work_root);
+            let _ = fs::remove_dir_all(&work_root);
+            let report = result?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Memory-quality evaluation (recall@{}):", report.k);
+                for score in &report.scores {
+                    println!(
+                        "  {:<22} candidates={:<3} precision={:.3} recall={:.3} recall@k={:.3}",
+                        score.name,
+                        score.candidate_count,
+                        score.extraction_precision,
+                        score.extraction_recall,
+                        score.retrieval_recall_at_k
+                    );
+                }
+                println!(
+                    "  {:<22} {:<14} precision={:.3} recall={:.3} recall@k={:.3}",
+                    "MEAN",
+                    "",
+                    report.mean_extraction_precision,
+                    report.mean_extraction_recall,
+                    report.mean_retrieval_recall_at_k
+                );
+            }
+        }
     }
 
     Ok(())
