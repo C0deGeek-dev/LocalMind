@@ -21,14 +21,26 @@ impl BatchInsightPipeline {
     pub fn distill(
         project_root: impl AsRef<Path>,
     ) -> Result<BatchInsightReport, BatchInsightError> {
-        Self::run(project_root, "distillation", &insight_instruction("Distill the accepted LocalMind memories into high-level principles."))
+        Self::run(
+            project_root,
+            "distillation",
+            &insight_instruction(
+                "Distill the accepted LocalMind memories into high-level principles.",
+            ),
+        )
     }
 
     pub fn research(
         project_root: impl AsRef<Path>,
         topic: &str,
     ) -> Result<BatchInsightReport, BatchInsightError> {
-        Self::run(project_root, "research", &insight_instruction(&format!("Research gaps, contradictions, and recurring patterns about {topic}.")))
+        Self::run(
+            project_root,
+            "research",
+            &insight_instruction(&format!(
+                "Research gaps, contradictions, and recurring patterns about {topic}."
+            )),
+        )
     }
 
     fn run(
@@ -114,11 +126,17 @@ fn default_insight_confidence() -> f32 {
 /// turned every output line, including preamble and noise, into a candidate.
 /// Individually malformed insights (empty/non-sentence summary, out-of-range
 /// confidence) are dropped; only schema-valid candidates survive.
-fn parse_distillation(kind: &str, content: &str) -> Result<Vec<CandidateLesson>, BatchInsightError> {
+fn parse_distillation(
+    kind: &str,
+    content: &str,
+) -> Result<Vec<CandidateLesson>, BatchInsightError> {
     let parsed: DistillationOutput =
         serde_json::from_str(content.trim()).map_err(BatchInsightError::ModelOutput)?;
-    let evidence =
-        EvidenceRef::new(EvidenceKind::Other(format!("{kind} batch")), "batch insight").redacted();
+    let evidence = EvidenceRef::new(
+        EvidenceKind::Other(format!("{kind} batch")),
+        "batch insight",
+    )
+    .redacted();
 
     let mut candidates = Vec::new();
     for (index, insight) in parsed.insights.into_iter().enumerate() {

@@ -644,9 +644,17 @@ fn is_failure_line(line: &str) -> bool {
     // A genuine failure *report* opens with an error token, ends in FAILED, or
     // is a panic — not a documentation sentence that merely mentions "failed"
     // somewhere in its prose (the dominant false-positive over dumped docs).
-    const FAILURE_OPENERS: [&str; 6] =
-        ["error", "failed", "failure", "exception", "panicked", "traceback"];
-    FAILURE_OPENERS.iter().any(|marker| lower.starts_with(marker))
+    const FAILURE_OPENERS: [&str; 6] = [
+        "error",
+        "failed",
+        "failure",
+        "exception",
+        "panicked",
+        "traceback",
+    ];
+    FAILURE_OPENERS
+        .iter()
+        .any(|marker| lower.starts_with(marker))
         || lower.ends_with("failed")
         || lower.contains("panicked at")
         || lower.contains("test result: failed")
@@ -834,9 +842,7 @@ fn looks_like_code_or_markup(text: &str) -> bool {
     if t.contains("**") || t.contains(".md:") || t.contains("/archive/") {
         return true;
     }
-    if t.ends_with(['{', '}', ';', ',', '(', '[', ':'])
-        || t.ends_with("=>")
-        || t.ends_with("\")]")
+    if t.ends_with(['{', '}', ';', ',', '(', '[', ':']) || t.ends_with("=>") || t.ends_with("\")]")
     {
         return true;
     }
@@ -1075,7 +1081,9 @@ mod tests {
             "`crates/localmind-skills` — skill draft generation and maintenance boundary"
         ));
         // An explicit proposal is.
-        assert!(mentions_skill_intent("let's create a skill for the release checklist"));
+        assert!(mentions_skill_intent(
+            "let's create a skill for the release checklist"
+        ));
         assert!(mentions_skill_intent(
             "this validate-before-handoff workflow could be a reusable checklist"
         ));

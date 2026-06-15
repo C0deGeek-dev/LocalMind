@@ -96,7 +96,11 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 }
 
 /// Score one fixture in an isolated project directory under `work_root`.
-fn score_fixture(fixture: &EvalFixture, k: usize, work_root: &Path) -> Result<FixtureScore, EvalError> {
+fn score_fixture(
+    fixture: &EvalFixture,
+    k: usize,
+    work_root: &Path,
+) -> Result<FixtureScore, EvalError> {
     let project = work_root.join(&fixture.name);
     fs::create_dir_all(&project).map_err(|source| EvalError::Workspace {
         path: project.clone(),

@@ -43,8 +43,17 @@ fn similarity(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f32 {
 
 /// Markers that a statement reverses or forbids prior guidance.
 const NEGATION_MARKERS: [&str; 11] = [
-    "do not", "don't", "never", "no longer", "instead", "avoid", "stop ", "rather than",
-    "deprecated", "not ", "isn't",
+    "do not",
+    "don't",
+    "never",
+    "no longer",
+    "instead",
+    "avoid",
+    "stop ",
+    "rather than",
+    "deprecated",
+    "not ",
+    "isn't",
 ];
 
 /// Whether `candidate` contradicts existing accepted memory. With a topically
@@ -263,10 +272,7 @@ mod tests {
             Some(related)
         ));
         // A correction with no related memory is not a standalone conflict…
-        assert!(!is_contradiction(
-            "do not use tabs for indentation",
-            None
-        ));
+        assert!(!is_contradiction("do not use tabs for indentation", None));
         // …but an explicit reversal is.
         assert!(is_contradiction("that guidance no longer applies", None));
         assert!(is_contradiction("these notes contradict the policy", None));
@@ -305,8 +311,12 @@ mod tests {
             TranscriptImportFormat::PlainText,
         )
         .unwrap();
-        CloseoutProcessor::closeout_project_session(root, &import.session_id, &DeterministicExtractor)
-            .unwrap();
+        CloseoutProcessor::closeout_project_session(
+            root,
+            &import.session_id,
+            &DeterministicExtractor,
+        )
+        .unwrap();
         let queue = ReviewQueue::open_project(root).unwrap();
         let persistence = MemoryPersistence::open_project(root).unwrap();
         let seed = queue.list().unwrap();
@@ -349,7 +359,13 @@ mod tests {
             "a near-duplicate must not auto-accept"
         );
         assert!(
-            dup_item.candidate.review_annotation.as_ref().unwrap().duplicate_of.is_some(),
+            dup_item
+                .candidate
+                .review_annotation
+                .as_ref()
+                .unwrap()
+                .duplicate_of
+                .is_some(),
             "the near-duplicate should be flagged against the accepted memory"
         );
         assert_eq!(

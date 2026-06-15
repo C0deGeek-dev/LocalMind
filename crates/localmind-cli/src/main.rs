@@ -517,7 +517,8 @@ fn main() -> Result<()> {
             let work_root =
                 std::env::temp_dir().join(format!("localmind-eval-{}", std::process::id()));
             fs::create_dir_all(&work_root)?;
-            let result = localmind_store::run_eval(&localmind_store::default_fixtures(), k, &work_root);
+            let result =
+                localmind_store::run_eval(&localmind_store::default_fixtures(), k, &work_root);
             let _ = fs::remove_dir_all(&work_root);
             let report = result?;
             if json {
