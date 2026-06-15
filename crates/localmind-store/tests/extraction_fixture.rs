@@ -74,9 +74,16 @@ fn fixture_session_produces_reviewable_candidates() -> Result<(), Box<dyn std::e
         .find(|item| item.candidate.category == LessonCategory::DebuggingRecipe)
         .map(|item| item.candidate.summary().to_string())
         .unwrap_or_default();
-    assert!(recipe.contains("FAILED"), "recipe was {recipe:?}");
+    // The recipe pairs the descriptive failure (the assertion message naming the
+    // real cause) with the real resolution. The terse `test … FAILED` status line
+    // is intentionally not used — it is too short to read as a lesson.
+    let recipe_lower = recipe.to_lowercase();
     assert!(
-        recipe.to_lowercase().contains("passing") || recipe.to_lowercase().contains("fix"),
+        recipe_lower.contains("assertion failed") || recipe_lower.contains("row_groups"),
+        "recipe lacks the real failure: {recipe:?}"
+    );
+    assert!(
+        recipe_lower.contains("passing") || recipe_lower.contains("fix"),
         "recipe lacks a resolution: {recipe:?}"
     );
 

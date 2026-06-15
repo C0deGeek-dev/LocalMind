@@ -380,7 +380,7 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         let Some(summary) = lesson_summary(line) else {
             continue;
         };
-        if summary.is_empty() || !seen.insert(summary.to_ascii_lowercase()) {
+        if !is_admissible_text(summary) || !seen.insert(summary.to_ascii_lowercase()) {
             continue;
         }
 
@@ -397,15 +397,22 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
         candidates.push(candidate);
     }
 
-    // Family 2: skill/workflow keyword lines.
+    // Family 2: lines proposing a reusable skill/workflow. The bare keyword
+    // "skill"/"workflow" is far too broad — it fires on file paths
+    // (`…\skill.rs`), crate names (`localmind-skills`), and any documentation
+    // sentence mentioning skills. Require an explicit *intent* phrase, a
+    // lesson-like sentence, and a per-family cap so this heuristic cannot flood
+    // the queue as it did before (435 file-path/doc-line candidates).
+    let mut family2 = 0usize;
     for line in &lines {
-        let lower = line.to_ascii_lowercase();
-        if !(lower.contains("skill") || lower.contains("workflow")) {
+        if family2 >= MAX_CANDIDATES_PER_FAMILY {
+            break;
+        }
+        let summary = line.trim_start_matches("- ").trim();
+        if !mentions_skill_intent(&summary.to_ascii_lowercase()) || !is_lesson_like(summary) {
             continue;
         }
-
-        let summary = line.trim_start_matches("- ").trim();
-        if summary.is_empty() || !seen.insert(summary.to_ascii_lowercase()) {
+        if !seen.insert(summary.to_ascii_lowercase()) {
             continue;
         }
 
@@ -413,13 +420,14 @@ fn extract_candidates(input: &ExtractionInput) -> Result<Vec<CandidateLesson>, C
             LessonId::new(candidate_id(&input.session_id, summary)),
             summary,
             LessonCategory::CandidateSkill,
-            Confidence::new(0.65)?,
+            Confidence::new(0.55)?,
             SuggestedAction::CreateSkillDraft,
         )
         .with_evidence(input.transcript_evidence.clone());
         candidate.suggested_destination = CandidateDestination::SkillDraft;
         annotate_candidate(&mut candidate)?;
         candidates.push(candidate);
+        family2 += 1;
     }
 
     // Family 3: failure→resolution pairs — a debugging recipe worth keeping.
@@ -593,14 +601,17 @@ fn failure_resolution_summaries(lines: &[&str]) -> Vec<String> {
     let mut summaries = Vec::new();
     let mut index = 0;
     while index < lines.len() {
-        if !is_failure_line(lines[index]) {
+        // The failure line itself must read like a reported problem, not a line
+        // of source code that merely contains "error"/"failed" (e.g.
+        // `fn deserialize<...> -> Result<...>`). Same gate for the resolution.
+        if !is_failure_line(lines[index]) || !is_lesson_like(strip_speaker(lines[index])) {
             index += 1;
             continue;
         }
         let window_end = lines.len().min(index + 1 + RESOLUTION_WINDOW);
         let Some(resolution_offset) = lines[index + 1..window_end]
             .iter()
-            .position(|line| is_resolution_line(line))
+            .position(|line| is_resolution_line(line) && is_lesson_like(strip_speaker(line)))
         else {
             index += 1;
             continue;
@@ -619,20 +630,26 @@ fn failure_resolution_summaries(lines: &[&str]) -> Vec<String> {
 }
 
 fn is_failure_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("0 errors") || lower.contains("no errors") {
+    let lower = strip_speaker(line).trim().to_ascii_lowercase();
+    // Success/summary lines that merely contain the word "failed"/"error".
+    if lower.contains("0 errors")
+        || lower.contains("no errors")
+        || lower.contains("0 failed")
+        || lower.contains("0 failures")
+        || lower.contains("no failures")
+        || lower.starts_with("test result: ok")
+    {
         return false;
     }
-    [
-        "error",
-        "failed",
-        "failure",
-        "exception",
-        "panicked",
-        "traceback",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    // A genuine failure *report* opens with an error token, ends in FAILED, or
+    // is a panic — not a documentation sentence that merely mentions "failed"
+    // somewhere in its prose (the dominant false-positive over dumped docs).
+    const FAILURE_OPENERS: [&str; 6] =
+        ["error", "failed", "failure", "exception", "panicked", "traceback"];
+    FAILURE_OPENERS.iter().any(|marker| lower.starts_with(marker))
+        || lower.ends_with("failed")
+        || lower.contains("panicked at")
+        || lower.contains("test result: failed")
 }
 
 fn is_resolution_line(line: &str) -> bool {
@@ -714,7 +731,7 @@ fn user_correction_summaries(lines: &[&str]) -> Vec<String> {
             ]
             .iter()
             .any(|marker| rest.starts_with(marker));
-            if !is_correction || text.len() < 12 {
+            if !is_correction || !is_lesson_like(text) {
                 return None;
             }
             Some(format!("User correction: {}", truncate_fragment(text)))
@@ -740,11 +757,130 @@ fn truncate_fragment(text: &str) -> String {
     format!("{truncated}…")
 }
 
+/// Fewest space-separated words a summary needs to read as a sentence rather
+/// than a fragment.
+const MIN_LESSON_WORDS: usize = 5;
+/// Smallest fraction of a summary that must be letters or spaces for it to read
+/// as prose rather than punctuation/code soup.
+const MIN_ALPHA_RATIO: f32 = 0.65;
+
+/// Count the space-separated tokens in `text` that contain at least one letter.
+fn alpha_word_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphabetic))
+        .count()
+}
+
+/// Lighter gate for *author-declared* lessons (explicit `Lesson:` markers). The
+/// author already decided the line is worth keeping, so a short statement is
+/// fine — but it must still be prose, not a bare file path, a code/markup line,
+/// or a punctuation/sub-token fragment.
+fn is_admissible_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || looks_like_path(trimmed) || looks_like_code_or_markup(trimmed) {
+        return false;
+    }
+    if alpha_word_count(trimmed) < 2 {
+        return false;
+    }
+    let total = trimmed.chars().count();
+    let alpha = trimmed
+        .chars()
+        .filter(|c| c.is_alphabetic() || c.is_whitespace())
+        .count();
+    total > 0 && (alpha as f32 / total as f32) >= MIN_ALPHA_RATIO
+}
+
+/// Stronger gate every *heuristic* candidate summary must pass (skill/workflow
+/// proposals, failure→resolution pairs, user corrections). The signal is weaker
+/// than an explicit marker, so require a full sentence — this is what rejects
+/// the bare file paths and code fragments that flooded the queue before.
+///
+/// Deliberately conservative: a learning loop that occasionally drops a real
+/// lesson is recoverable; one that floods the review queue (the observed
+/// failure) is not.
+fn is_lesson_like(text: &str) -> bool {
+    is_admissible_text(text) && alpha_word_count(text.trim()) >= MIN_LESSON_WORDS
+}
+
+/// A bare file path: a single whitespace-free token carrying a path separator
+/// (`LocalMind\crates\…\skill.rs`), optionally behind a list bullet.
+fn looks_like_path(text: &str) -> bool {
+    let token = text.trim_start_matches(['-', '*', ' ']).trim();
+    !token.contains(char::is_whitespace) && (token.contains('/') || token.contains('\\'))
+}
+
+/// A source-code or markup line rather than prose: markdown structure, a line
+/// that ends in code-structural punctuation, or one carrying source signatures.
+fn looks_like_code_or_markup(text: &str) -> bool {
+    let t = text.trim();
+    if t.starts_with('#') || t.starts_with("> ") || t.starts_with('|') || t.starts_with("//") {
+        return true;
+    }
+    // A list bullet whose body is a file/line citation (e.g.
+    // "- LocalHub/plans/foo.md:62-93 - …") is dumped doc content, not a lesson.
+    if t.starts_with("- ") || t.starts_with("* ") {
+        if let Some(rest) = t.get(2..) {
+            if (rest.contains(".md:") || rest.contains(".rs:") || rest.contains(".ps1:"))
+                || rest.contains("/archive/")
+            {
+                return true;
+            }
+        }
+    }
+    // Markdown bold/emphasis runs and inline file:line citations mark a verbatim
+    // documentation line rather than session prose.
+    if t.contains("**") || t.contains(".md:") || t.contains("/archive/") {
+        return true;
+    }
+    if t.ends_with(['{', '}', ';', ',', '(', '[', ':'])
+        || t.ends_with("=>")
+        || t.ends_with("\")]")
+    {
+        return true;
+    }
+    // Note: a bare `::` is intentionally *not* a marker — a genuine lesson may
+    // reference a Rust path ("prefer std::mem::take here"). Real source lines are
+    // caught by the keyword/structural markers and the trailing-punctuation check.
+    const CODE_MARKERS: [&str; 12] = [
+        "fn ", "=>", "impl ", "pub use", "pub fn", "#[", "Result<", "Box<dyn", "{reason}", ":new(",
+        "let mut ", "});",
+    ];
+    CODE_MARKERS.iter().any(|marker| t.contains(marker))
+}
+
+/// Whether a (lowercased) line expresses intent to capture a reusable skill or
+/// workflow, as opposed to merely containing the word "skill"/"workflow". The
+/// phrase set keys on author intent ("create a skill", "reusable workflow")
+/// rather than the bare token, which appears in paths, crate names, and docs.
+fn mentions_skill_intent(lower: &str) -> bool {
+    // Proposal phrases only. Bare noun phrases ("reusable skills", "skill
+    // draft") are deliberately excluded — they appear verbatim throughout the
+    // ecosystem's own documentation about skills and produced most of the
+    // false positives.
+    const INTENT: [&str; 9] = [
+        "create a skill",
+        "create skill for",
+        "add a skill",
+        "turn this into a skill",
+        "turn it into a skill",
+        "could be a reusable",
+        "would be a reusable",
+        "would make a good skill",
+        "worth turning into a skill",
+    ];
+    INTENT.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Extract an explicit lesson marker's text. Only a line that *begins* with
+/// `Lesson:` (after any speaker label) is the author declaring a lesson; an
+/// embedded `lesson:` substring is almost always source code (e.g.
+/// `#[error("invalid candidate lesson: {reason}")]`) or prose mentioning the
+/// word, so it must not match.
 fn lesson_summary(line: &str) -> Option<&str> {
-    line.strip_prefix("Lesson:")
-        .or_else(|| line.strip_prefix("lesson:"))
-        .or_else(|| line.split_once("Lesson:").map(|(_, rest)| rest))
-        .or_else(|| line.split_once("lesson:").map(|(_, rest)| rest))
+    let body = strip_speaker(line);
+    body.strip_prefix("Lesson:")
+        .or_else(|| body.strip_prefix("lesson:"))
         .map(str::trim)
 }
 
@@ -845,4 +981,204 @@ pub enum CloseoutError {
     },
     #[error(transparent)]
     ReviewQueue(#[from] ReviewQueueError),
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn extract(transcript: &str) -> Vec<CandidateLesson> {
+        let evidence = EvidenceRef::new(EvidenceKind::Transcript, "redacted transcript").redacted();
+        let input = ExtractionInput {
+            session_id: SessionId::new("session-test"),
+            transcript: transcript.to_string(),
+            transcript_evidence: evidence,
+        };
+        DeterministicExtractor
+            .extract(input)
+            .expect("extraction never fails on text")
+            .candidates
+    }
+
+    // --- Rejection rule: bare file paths -----------------------------------
+    #[test]
+    fn rejects_bare_file_paths() {
+        for path in [
+            r"LocalMind\crates\localmind-core\src\skill.rs",
+            "LocalHub/plans/archive/09-localmind-skills.md",
+            r"- LocalPilot\external\localmind\crates\localmind-store\src\skill_drafts.rs",
+        ] {
+            assert!(looks_like_path(path), "should be a path: {path:?}");
+            assert!(!is_admissible_text(path), "path admitted: {path:?}");
+        }
+        // A sentence that merely names a file is not a bare path.
+        assert!(!looks_like_path(
+            "the off-by-one was in writer.rs at the bounds check"
+        ));
+    }
+
+    // --- Rejection rule: punctuation / sub-token fragments ------------------
+    #[test]
+    fn rejects_punctuation_and_subtoken_fragments() {
+        for fragment in [":{", ":new(", "{reason}\")]", "=> Ok(())", "});"] {
+            assert!(
+                !is_admissible_text(fragment),
+                "fragment admitted: {fragment:?}"
+            );
+        }
+    }
+
+    // --- Rejection rule: verbatim source / markup lines ---------------------
+    #[test]
+    fn rejects_source_and_markup_lines() {
+        for line in [
+            "fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {",
+            "use thiserror::Error;",
+            "## 13. Possible Architecture",
+            "> Do not make tests pass by weakening them",
+            "- LocalHub/plans/localmind/archive/LocalMind-Plan.md:161: still open",
+            "structured signals from the **event log** of failed tools and recovery",
+        ] {
+            assert!(
+                looks_like_code_or_markup(line),
+                "should read as code/markup: {line:?}"
+            );
+            assert!(!is_lesson_like(line), "code/markup admitted: {line:?}");
+        }
+    }
+
+    // --- Rejection rule: too short to be a sentence (heuristic gate) --------
+    #[test]
+    fn heuristic_gate_requires_sentence_length() {
+        // Fewer than five words: not enough to be a heuristic lesson…
+        assert!(!is_lesson_like("prefer fixtures here"));
+        // …but an author-declared marker accepts a short statement.
+        assert!(is_admissible_text("prefer fixtures here"));
+        assert!(is_admissible_text("Prefer fixtures."));
+        // A full sentence passes both.
+        assert!(is_lesson_like(
+            "exporter changes need the integration suite, not just unit tests"
+        ));
+    }
+
+    // --- Rejection rule: skill/workflow needs an explicit proposal ----------
+    #[test]
+    fn skill_family_requires_proposal_intent() {
+        // Documentation that merely mentions skills is not a proposal.
+        assert!(!mentions_skill_intent(
+            "memory, graph-connected knowledge, and reusable skills, and agent context"
+        ));
+        assert!(!mentions_skill_intent(
+            "`crates/localmind-skills` — skill draft generation and maintenance boundary"
+        ));
+        // An explicit proposal is.
+        assert!(mentions_skill_intent("let's create a skill for the release checklist"));
+        assert!(mentions_skill_intent(
+            "this validate-before-handoff workflow could be a reusable checklist"
+        ));
+    }
+
+    // --- Rejection rule: explicit marker must open the line -----------------
+    #[test]
+    fn lesson_marker_must_open_the_line() {
+        assert_eq!(
+            lesson_summary("Lesson: prefer guard clauses"),
+            Some("prefer guard clauses")
+        );
+        assert_eq!(
+            lesson_summary("user: Lesson: prefer guard clauses"),
+            Some("prefer guard clauses")
+        );
+        // An embedded mention is source code, not a declared lesson.
+        assert_eq!(
+            lesson_summary("#[error(\"invalid candidate lesson: {reason}\")]"),
+            None
+        );
+    }
+
+    // --- Rejection rule: failure lines are reports, not prose mentions ------
+    #[test]
+    fn failure_line_must_be_a_report() {
+        assert!(is_failure_line("error: assertion failed at writer.rs:88"));
+        assert!(is_failure_line("tool: test writer::flushes ... FAILED"));
+        // Success summaries and documentation that mention "failed" are not.
+        assert!(!is_failure_line(
+            "test result: ok. 19 passed; 0 failed; 0 ignored"
+        ));
+        assert!(!is_failure_line(
+            "`FAIL` means startup or probing failed for another reason"
+        ));
+        assert!(!is_failure_line(
+            "After attempts_per_step failures, stop or replan depending on config"
+        ));
+    }
+
+    // --- Family behaviour: junk in, nothing out ----------------------------
+    #[test]
+    fn pure_dumped_content_yields_no_candidates() {
+        // A transcript made only of file paths, source, and documentation —
+        // the shape of the dogfood sessions that produced 354 noise candidates.
+        let transcript = "\
+LocalMind\\crates\\localmind-core\\src\\skill.rs
+use thiserror::Error;
+fn deserialize<D>(d: D) -> Result<Self, D::Error> {
+## Implementation Status
+- reusable skills, and agent context.
+`crates/localmind-skills` — skill draft generation and maintenance boundary.
+:{
+{reason}\")]
+test result: ok. 19 passed; 0 failed; 0 ignored
+";
+        assert!(
+            extract(transcript).is_empty(),
+            "dumped file content must not produce candidates: {:?}",
+            extract(transcript)
+                .iter()
+                .map(|c| c.summary().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // --- Family behaviour: real lessons still survive ----------------------
+    #[test]
+    fn genuine_session_lessons_survive() {
+        let transcript = "\
+user: the exporter test is failing again
+assistant: error: assertion failed at writer.rs:88, the batch flush ordering is wrong
+assistant: Fixed: flushing before the clear; the suite is passing now.
+user: Lesson: exporter changes need the integration suite, not just unit tests.
+assistant: this validate-before-handoff routine could be a reusable checklist.
+user: no, don't weaken the test to make it pass, keep the assertion strict.
+";
+        let candidates = extract(transcript);
+        assert!(
+            !candidates.is_empty(),
+            "a session with genuine lessons must produce candidates"
+        );
+        // Every surviving candidate reads like prose, never a fragment/path.
+        for candidate in &candidates {
+            assert!(
+                is_admissible_text(candidate.summary()),
+                "implausible candidate survived: {:?}",
+                candidate.summary()
+            );
+        }
+        // The explicit marker and the failure→fix recipe both survive.
+        let summaries: Vec<String> = candidates
+            .iter()
+            .map(|c| c.summary().to_ascii_lowercase())
+            .collect();
+        assert!(
+            summaries.iter().any(|s| s.contains("integration suite")),
+            "explicit lesson lost: {summaries:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .any(|s| s.contains("assertion failed") && s.contains("passing")),
+            "failure-to-resolution recipe lost: {summaries:?}"
+        );
+    }
 }
