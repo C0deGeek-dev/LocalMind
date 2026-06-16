@@ -16,6 +16,10 @@ pub struct CandidateLesson {
     pub validation_status: ValidationStatus,
     #[serde(default)]
     pub review_annotation: Option<ReviewAnnotation>,
+    /// The full tool-use lesson, present when `category` is
+    /// [`LessonCategory::ToolUse`]. `None` for every other category.
+    #[serde(default)]
+    pub tool_use: Option<ToolUseLesson>,
 }
 
 impl CandidateLesson {
@@ -40,12 +44,20 @@ impl CandidateLesson {
             suggested_action,
             validation_status: ValidationStatus::Valid,
             review_annotation: None,
+            tool_use: None,
         }
     }
 
     #[must_use]
     pub fn with_evidence(mut self, evidence: EvidenceRef) -> Self {
         self.evidence.push(evidence);
+        self
+    }
+
+    /// Attach the full tool-use lesson (for a `LessonCategory::ToolUse` candidate).
+    #[must_use]
+    pub fn with_tool_use(mut self, lesson: ToolUseLesson) -> Self {
+        self.tool_use = Some(lesson);
         self
     }
 
@@ -190,6 +202,44 @@ impl ToolUseLesson {
     }
 }
 
+/// A completed tool-use trajectory a host offers for promotion. The host fills
+/// `verified` from its verifier's verdict — a fact keyed by the event log, not
+/// re-parsed prose — and `degraded_or_looping` from recovery state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolUseTrajectory {
+    pub id: LessonId,
+    pub summary: String,
+    /// The source trajectory's verifier verdict was `Verified`.
+    pub verified: bool,
+    /// The trajectory ended degraded or in a tool loop.
+    pub degraded_or_looping: bool,
+    pub lesson: ToolUseLesson,
+    pub evidence: EvidenceRef,
+}
+
+/// Promote a tool-use trajectory to a candidate lesson — **only** when it was
+/// verified and not degraded or looping. A failed or unverified trajectory
+/// yields no standalone lesson (it stays episodic); a failure survives only as
+/// the `failure_recovery` of a verified lesson, never as its own "do this".
+/// The candidate still flows through the normal review gate.
+#[must_use]
+pub fn promote_tool_use(trajectory: &ToolUseTrajectory) -> Option<CandidateLesson> {
+    if !trajectory.verified || trajectory.degraded_or_looping {
+        return None;
+    }
+    Some(
+        CandidateLesson::new(
+            trajectory.id.clone(),
+            trajectory.summary.clone(),
+            LessonCategory::ToolUse,
+            trajectory.lesson.confidence,
+            SuggestedAction::PromoteToMemory,
+        )
+        .with_evidence(trajectory.evidence.clone())
+        .with_tool_use(trajectory.lesson.clone()),
+    )
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SuggestedAction {
     PromoteToMemory,
@@ -222,6 +272,7 @@ pub enum ValidationStatus {
 #[cfg(test)]
 mod tool_use_tests {
     use super::*;
+    use crate::{EvidenceKind, EvidenceRef, LessonId};
 
     fn sample() -> ToolUseLesson {
         ToolUseLesson {
@@ -269,5 +320,35 @@ mod tool_use_tests {
         let mut lesson = sample();
         lesson.invalidation = InvalidationRule::Never;
         assert!(!lesson.is_stale_for(99));
+    }
+
+    fn trajectory(verified: bool, degraded: bool) -> ToolUseTrajectory {
+        ToolUseTrajectory {
+            id: LessonId::new("lesson-1"),
+            summary: "read before overwriting a config file".to_string(),
+            verified,
+            degraded_or_looping: degraded,
+            lesson: sample(),
+            evidence: EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted(),
+        }
+    }
+
+    #[test]
+    fn a_verified_trajectory_yields_a_tool_use_candidate() {
+        let candidate = promote_tool_use(&trajectory(true, false)).expect("verified -> candidate");
+        assert_eq!(candidate.category, LessonCategory::ToolUse);
+        assert!(candidate.tool_use.is_some());
+        // The failure→recovery the lesson carries is preserved, never standalone.
+        assert!(!candidate.tool_use.unwrap().failure_recovery.is_empty());
+    }
+
+    #[test]
+    fn an_unverified_trajectory_stays_episodic() {
+        assert!(promote_tool_use(&trajectory(false, false)).is_none());
+    }
+
+    #[test]
+    fn a_degraded_or_looping_trajectory_is_not_promoted() {
+        assert!(promote_tool_use(&trajectory(true, true)).is_none());
     }
 }
