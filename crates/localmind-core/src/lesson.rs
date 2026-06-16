@@ -240,6 +240,50 @@ pub fn promote_tool_use(trajectory: &ToolUseTrajectory) -> Option<CandidateLesso
     )
 }
 
+/// The retrieval source-quality weight for a tool-use lesson: ranked between
+/// accepted memory (highest) and a recent session (lowest) in the ranked
+/// candidate pool (ADR-0015).
+pub const TOOL_USE_SOURCE_WEIGHT: f64 = 0.7;
+
+impl ToolUseLesson {
+    /// A retrieval relevance score against a set of query context cues: the
+    /// fraction of query cues this lesson covers, scaled by the source-quality
+    /// weight and demoted by how often its guidance has been ignored or
+    /// contradicted (`guidance_followed_rate` in `0.0..=1.0`). Zero when nothing
+    /// matches, so an off-topic lesson is never surfaced.
+    #[must_use]
+    pub fn relevance(&self, query_cues: &[String], guidance_followed_rate: f64) -> f64 {
+        if query_cues.is_empty() {
+            return 0.0;
+        }
+        let matched = query_cues
+            .iter()
+            .filter(|query| {
+                let query = query.to_lowercase();
+                self.context_cues.iter().any(|cue| {
+                    let cue = cue.to_lowercase();
+                    cue.contains(&query) || query.contains(&cue)
+                })
+            })
+            .count();
+        let coverage = matched as f64 / query_cues.len() as f64;
+        coverage * TOOL_USE_SOURCE_WEIGHT * guidance_followed_rate.clamp(0.0, 1.0)
+    }
+}
+
+/// The tool-use lessons a tool-version bump to `current_version` made stale: they
+/// must go back through review before they are trusted again.
+#[must_use]
+pub fn stale_tool_use_lessons(
+    lessons: &[ToolUseLesson],
+    current_version: u32,
+) -> Vec<&ToolUseLesson> {
+    lessons
+        .iter()
+        .filter(|lesson| lesson.is_stale_for(current_version))
+        .collect()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SuggestedAction {
     PromoteToMemory,
@@ -350,5 +394,36 @@ mod tool_use_tests {
     #[test]
     fn a_degraded_or_looping_trajectory_is_not_promoted() {
         assert!(promote_tool_use(&trajectory(true, true)).is_none());
+    }
+
+    #[test]
+    fn a_lesson_is_retrievable_by_its_context_cues() {
+        let lesson = sample(); // cue: "overwrite an existing config file"
+        let on_topic = lesson.relevance(&["overwrite an existing config file".to_string()], 1.0);
+        let off_topic = lesson.relevance(&["run the test suite".to_string()], 1.0);
+        assert!(
+            on_topic > 0.0,
+            "a matching cue makes the lesson retrievable"
+        );
+        assert_eq!(off_topic, 0.0, "an off-topic query never surfaces it");
+    }
+
+    #[test]
+    fn ignored_guidance_demotes_a_lesson() {
+        let lesson = sample();
+        let cues = vec!["overwrite an existing config file".to_string()];
+        let followed = lesson.relevance(&cues, 1.0);
+        let ignored = lesson.relevance(&cues, 0.2);
+        assert!(ignored < followed, "guidance that is ignored ranks lower");
+    }
+
+    #[test]
+    fn a_version_bump_collects_the_stale_lessons_for_re_review() {
+        let mut never = sample();
+        never.invalidation = InvalidationRule::Never;
+        let lessons = vec![sample(), never]; // first is OnToolVersionBump at v1
+        let stale = stale_tool_use_lessons(&lessons, 2);
+        assert_eq!(stale.len(), 1, "only the on-bump lesson is stale at v2");
+        assert!(stale_tool_use_lessons(&lessons, 1).is_empty());
     }
 }

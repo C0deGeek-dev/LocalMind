@@ -31,9 +31,9 @@ pub use graph::{
 };
 pub use inference::{InferenceFeatureSettings, InferenceSettings};
 pub use lesson::{
-    promote_tool_use, CandidateDestination, CandidateLesson, Confidence, FailureRecovery,
-    InvalidationRule, LessonCategory, LessonScope, ReviewAnnotation, SuggestedAction,
-    ToolUseLesson, ToolUseTrajectory, ValidationStatus,
+    promote_tool_use, stale_tool_use_lessons, CandidateDestination, CandidateLesson, Confidence,
+    FailureRecovery, InvalidationRule, LessonCategory, LessonScope, ReviewAnnotation,
+    SuggestedAction, ToolUseLesson, ToolUseTrajectory, ValidationStatus, TOOL_USE_SOURCE_WEIGHT,
 };
 pub use memory::{MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};
