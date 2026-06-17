@@ -16,4 +16,6 @@ time = { workspace = true }
 
 [dev-dependencies]
 localmind-codegraph = { path = "../localmind-codegraph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }

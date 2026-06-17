@@ -574,6 +574,8 @@ dependencies = [
  "localmind-codegraph",
  "localmind-core",
  "localmind-store",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "time",
