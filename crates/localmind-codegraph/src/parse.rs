@@ -88,7 +88,10 @@ impl RustParser {
     }
 }
 
-fn file_graph_node(file: &AdmittedFile, text: &str) -> Result<GraphNode, CodeGraphError> {
+pub(crate) fn file_graph_node(
+    file: &AdmittedFile,
+    text: &str,
+) -> Result<GraphNode, CodeGraphError> {
     let name = file
         .relative
         .rsplit('/')
@@ -320,19 +323,19 @@ fn named_child_text(node: Node<'_>, field: &str, text: &str) -> Option<String> {
         .map(|child| node_text(child, text).to_string())
 }
 
-fn node_text<'t>(node: Node<'_>, text: &'t str) -> &'t str {
+pub(crate) fn node_text<'t>(node: Node<'_>, text: &'t str) -> &'t str {
     text.get(node.start_byte()..node.end_byte()).unwrap_or("")
 }
 
-fn line_of(node: Node<'_>) -> u64 {
+pub(crate) fn line_of(node: Node<'_>) -> u64 {
     node.start_position().row as u64 + 1
 }
 
-fn end_line_of(node: Node<'_>) -> u64 {
+pub(crate) fn end_line_of(node: Node<'_>) -> u64 {
     node.end_position().row as u64 + 1
 }
 
-fn parse_evidence(path: &str, line_start: u64, line_end: u64) -> EvidenceRef {
+pub(crate) fn parse_evidence(path: &str, line_start: u64, line_end: u64) -> EvidenceRef {
     EvidenceRef::new(
         EvidenceKind::CodeParse,
         format!("{path}:{line_start}-{line_end}"),

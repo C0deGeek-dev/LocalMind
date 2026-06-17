@@ -1,7 +1,8 @@
 //! End-to-end ingest: admit → parse → resolve → persist.
 
 use crate::boundary::{BoundaryRejection, IngestBoundary};
-use crate::parse::{ParsedFile, RustParser};
+use crate::parse::ParsedFile;
+use crate::provider::{CodeIntelligenceProvider, NativeProvider};
 use crate::resolve::resolve_edges;
 use crate::CodeGraphError;
 use localmind_core::{
@@ -22,15 +23,24 @@ pub struct IngestReport {
     pub rejected: Vec<BoundaryRejection>,
 }
 
-pub struct Ingester {
-    parser: RustParser,
+pub struct Ingester<P = NativeProvider> {
+    provider: P,
 }
 
-impl Ingester {
+impl Ingester<NativeProvider> {
     pub fn new() -> Result<Self, CodeGraphError> {
         Ok(Self {
-            parser: RustParser::new()?,
+            provider: NativeProvider::new()?,
         })
+    }
+}
+
+impl<P: CodeIntelligenceProvider> Ingester<P> {
+    /// Builds an ingester over a specific provider. The native default is
+    /// reached through [`Ingester::new`]; this is the seam for an alternative
+    /// (e.g. out-of-process) provider.
+    pub fn with_provider(provider: P) -> Self {
+        Self { provider }
     }
 
     /// Ingests the host-supplied candidate files into the graph store.
@@ -59,7 +69,7 @@ impl Ingester {
                     source,
                 }
             })?;
-            parsed_files.push(self.parser.parse_file(&admitted, &text)?);
+            parsed_files.push(self.provider.parse_file(&admitted, &text)?);
         }
 
         let repository = repository_node(boundary)?;

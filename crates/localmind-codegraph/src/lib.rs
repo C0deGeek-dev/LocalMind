@@ -9,14 +9,19 @@
 mod boundary;
 mod ingest;
 mod join;
+mod language;
 mod parse;
+mod provider;
 mod reindex;
 mod resolve;
+mod tags;
 
 pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
 pub use ingest::{IngestReport, Ingester};
 pub use join::{anchor_memory, AnchorReport};
+pub use language::Language;
 pub use parse::{CallSite, ParsedFile, RustParser, UsePath};
+pub use provider::{CodeIntelligenceProvider, NativeProvider};
 pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};
 pub use resolve::{resolve_edges, resolve_file_edges, ResolutionContext};
 

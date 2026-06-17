@@ -13,7 +13,8 @@
 
 use crate::boundary::{BoundaryRejection, IngestBoundary};
 use crate::ingest::repository_node;
-use crate::parse::{ParsedFile, RustParser};
+use crate::parse::ParsedFile;
+use crate::provider::{CodeIntelligenceProvider, NativeProvider};
 use crate::resolve::{resolve_file_edges, ResolutionContext};
 use crate::CodeGraphError;
 use localmind_core::{
@@ -62,15 +63,23 @@ pub struct ReindexBatchReport {
     pub edges_revived: usize,
 }
 
-pub struct Reindexer {
-    parser: RustParser,
+pub struct Reindexer<P = NativeProvider> {
+    provider: P,
 }
 
-impl Reindexer {
+impl Reindexer<NativeProvider> {
     pub fn new() -> Result<Self, CodeGraphError> {
         Ok(Self {
-            parser: RustParser::new()?,
+            provider: NativeProvider::new()?,
         })
+    }
+}
+
+impl<P: CodeIntelligenceProvider> Reindexer<P> {
+    /// Builds a reindexer over a specific provider; the native default is
+    /// reached through [`Reindexer::new`].
+    pub fn with_provider(provider: P) -> Self {
+        Self { provider }
     }
 
     /// Compares the candidate set against the stored graph and produces the
@@ -169,7 +178,7 @@ impl Reindexer {
                 }
             })?;
             superseded_edges.extend(store.supersede_path(&admitted.relative)?);
-            let parsed = self.parser.parse_file(&admitted, &text)?;
+            let parsed = self.provider.parse_file(&admitted, &text)?;
             store.upsert_node(&parsed.file_node)?;
             for item in &parsed.items {
                 store.upsert_node(item)?;
