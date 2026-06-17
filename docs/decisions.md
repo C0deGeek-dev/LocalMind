@@ -4,6 +4,28 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0010 — Embedding rerank is an opt-in, additive stage over the deterministic blend
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+Ranked search can optionally rerank the top blended hits by cosine similarity
+between the query embedding and each hit's embedding. The decision is that this
+stays **strictly additive on top of the deterministic 3-signal blend**, never a
+replacement: the blend (`search_workspace`) remains the reproducible, offline
+floor, and the rerank stage (`rerank_hits` / `search_workspace_reranked`) only
+reorders a bounded top-`window` of the already-ranked list.
+
+It is gated like `review.semantic_dedup` (D-LM-0007): a `[retrieval].rerank`
+flag **and** a configured `[inference]` embedding endpoint must both be present
+(`ProjectConfig::rerank_active`). With either missing the stage is inert and the
+ordering is byte-identical to the no-rerank path — a flag-off determinism test
+pins that. The embedder is injected through a `RerankEmbedder` trait, so the
+engine takes no new hard dependency on a network client and the path is testable
+with a deterministic stub. This keeps retrieval reproducible and local-first by
+default while letting a configured local embedding model lift relevance when the
+user opts in.
+
 ## D-LM-0009 — The repo primer is a deterministic, review-gated, supersedable Project memory
 
 - **Date**: 2026-06-17
