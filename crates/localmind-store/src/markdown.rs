@@ -1,4 +1,4 @@
-use localmind_core::{EvidenceRef, MemoryEntry, MemoryEntryId};
+use localmind_core::{EpistemicStatus, EvidenceRef, MemoryEntry, MemoryEntryId};
 use time::format_description::well_known::Rfc3339;
 
 pub struct MarkdownMemoryFormat;
@@ -12,6 +12,12 @@ impl MarkdownMemoryFormat {
         output.push_str(&format!("id: {}\n", entry.id));
         output.push_str(&format!("scope: {:?}\n", entry.scope));
         output.push_str(&format!("category: {:?}\n", entry.category));
+        // Derived from category — recorded in front matter so the memory's
+        // epistemic status is legible in the human-readable source of truth.
+        output.push_str(&format!(
+            "epistemic_status: {}\n",
+            EpistemicStatus::from_category(&entry.category).as_str()
+        ));
         output.push_str(&format!("confidence: {:.3}\n", entry.confidence.value()));
         push_optional_id(&mut output, "source_session", entry.source_session.as_ref());
         push_optional_time(&mut output, "created_at", entry.created_at);

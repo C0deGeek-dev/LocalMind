@@ -4,6 +4,29 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0012 — Memory trust is legible: epistemic status + contradiction flags at retrieval
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+Every accepted memory carries a deterministic **epistemic status**
+(observation / hypothesis / fact / decision / procedure), classified by a total
+function of its lesson category (`EpistemicStatus::from_category`) and stored on
+`memory_index` (schema v6) plus the Markdown front matter. No model is involved;
+the same category always yields the same status, so the agent can say *what kind*
+of knowledge it is using.
+
+Contradictions are detected **at promotion**, deterministically: a new memory
+that shares a topic (`related_entities`) with an active memory but takes the
+opposite recommendation polarity (one prohibits what the other endorses) creates
+a `contradicts` relationship — stored both ways in `memory_relationships` and
+flagging both rows `contradicted` — so retrieval surfaces the conflict instead of
+asserting one side. Consistent with D-LM-0008, a contradiction is a *signal*, not
+a deletion: both memories stay active and served, and a human resolves the
+conflict (supersede / keep / refresh). A provenance answer (`provenance`) reports
+source session, confidence, epistemic status, staleness, and the contradicted
+memories for any id — the "why do you think that?" surface.
+
 ## D-LM-0011 — Change-aware staleness flags memory for review, never deletes it
 
 - **Date**: 2026-06-17

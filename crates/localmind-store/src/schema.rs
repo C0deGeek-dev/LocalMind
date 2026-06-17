@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 5;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 6;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -51,6 +51,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 5 {
         apply_v5(&tx)?;
+    }
+    if current < 6 {
+        apply_v6(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -198,6 +201,23 @@ fn apply_v5(connection: &Connection) -> Result<(), SchemaError> {
     connection
         .execute_batch(
             "ALTER TABLE memory_index ADD COLUMN stale_candidate INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
+/// Epistemic-status + contradiction support on accepted memory: a deterministic
+/// trust classification, a flag set when a memory is in a `contradicts`
+/// relationship, and the entry's confidence (so provenance can answer "why do
+/// you think that?" without re-reading the Markdown). All default so pre-existing
+/// rows upgrade cleanly; a reindex repopulates the derived classification.
+fn apply_v6(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE memory_index ADD COLUMN epistemic_status TEXT NOT NULL DEFAULT 'observation';
+            ALTER TABLE memory_index ADD COLUMN contradicted INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE memory_index ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+            "#,
         )
         .map_err(SchemaError::Sqlite)
 }

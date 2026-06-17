@@ -43,8 +43,8 @@ pub use import::{
 };
 pub use markdown::MarkdownMemoryFormat;
 pub use memory_persistence::{
-    AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryRecord, MemorySearchResult,
-    VectorSearchResult,
+    AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryProvenance, MemoryRecord,
+    MemorySearchResult, VectorSearchResult,
 };
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use redaction::{Redaction, RedactionReport, Redactor};

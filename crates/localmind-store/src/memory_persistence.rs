@@ -3,8 +3,8 @@ use crate::{
     StoreConfigError,
 };
 use localmind_core::{
-    content_fingerprint, AuditEventKind, Confidence, MemoryEntry, MemoryEntryId, MemoryScope,
-    MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
+    content_fingerprint, AuditEventKind, Confidence, EpistemicStatus, MemoryEntry, MemoryEntryId,
+    MemoryScope, MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
 };
 use localmind_inference::{InferenceCapability, InferenceError, TokenUsage};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -35,6 +35,25 @@ pub struct MemorySearchResult {
     /// changed, so it may be stale and is awaiting review. Still served — callers
     /// down-rank or mark it rather than dropping it.
     pub stale_candidate: bool,
+    /// The memory's deterministic epistemic status (observation/hypothesis/fact/
+    /// decision/procedure), so trust is legible at retrieval time.
+    pub epistemic_status: EpistemicStatus,
+    /// True when this memory is in a `contradicts` relationship with another, so
+    /// the agent can flag the conflict instead of asserting one side blindly.
+    pub contradicted: bool,
+}
+
+/// The provenance answer for one memory — "why do you think that?". Source
+/// session, confidence, epistemic status, and the memories it contradicts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryProvenance {
+    pub memory_id: MemoryEntryId,
+    pub source_session: Option<String>,
+    pub confidence: f32,
+    pub epistemic_status: EpistemicStatus,
+    pub status: String,
+    pub stale_candidate: bool,
+    pub contradicts: Vec<MemoryEntryId>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -508,7 +527,7 @@ impl MemoryPersistence {
             .prepare(
                 r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
-                       bm25(memory_fts) AS rank
+                       m.epistemic_status, m.contradicted, bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'
@@ -524,14 +543,16 @@ impl MemoryPersistence {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)? != 0,
-                    row.get::<_, f64>(5)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)? != 0,
+                    row.get::<_, f64>(7)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (memory_id, path, body, created_at, stale_candidate, rank) =
+            let (memory_id, path, body, created_at, stale_candidate, epistemic, contradicted, rank) =
                 row.map_err(MemoryPersistenceError::Sqlite)?;
             // bm25 returns a more-negative value for better matches; expose a
             // positive bigger-is-better integer to keep the result contract.
@@ -544,9 +565,75 @@ impl MemoryPersistence {
                 snippet: body.chars().take(160).collect(),
                 created_at,
                 stale_candidate,
+                epistemic_status: EpistemicStatus::from_token(&epistemic),
+                contradicted,
             });
         }
         Ok(results)
+    }
+
+    /// The provenance for a memory — source session, confidence, epistemic
+    /// status, staleness, and the memories it contradicts — or `None` when the
+    /// memory id is unknown. Answers "why do you think that?".
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn provenance(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Option<MemoryProvenance>, MemoryPersistenceError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT source_session, status, epistemic_status, contradicted, confidence, \
+                 stale_candidate FROM memory_index WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(5)? != 0,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let Some((source_session, status, epistemic, _contradicted, confidence, stale_candidate)) =
+            row
+        else {
+            return Ok(None);
+        };
+
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT target FROM memory_relationships \
+                 WHERE memory_id = ?1 AND relation_kind = 'contradicts' ORDER BY target",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let targets = statement
+            .query_map(params![memory_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut contradicts = Vec::new();
+        for target in targets {
+            contradicts.push(MemoryEntryId::new(
+                target.map_err(MemoryPersistenceError::Sqlite)?,
+            ));
+        }
+
+        Ok(Some(MemoryProvenance {
+            memory_id: memory_id.clone(),
+            source_session,
+            #[allow(clippy::cast_possible_truncation)]
+            confidence: confidence as f32,
+            epistemic_status: EpistemicStatus::from_token(&epistemic),
+            status,
+            stale_candidate,
+            contradicts,
+        }))
     }
 
     /// Flag an active memory as a change-aware staleness candidate: the code it
@@ -701,12 +788,14 @@ impl MemoryPersistence {
         entry: &MemoryEntry,
         path: &Path,
     ) -> Result<(), MemoryPersistenceError> {
+        let epistemic_status = EpistemicStatus::from_category(&entry.category);
         connection
             .execute(
                 r#"
                 INSERT INTO memory_index
-                (memory_id, path, scope, category, body, source_session, status, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7)
+                (memory_id, path, scope, category, body, source_session, status, created_at,
+                 epistemic_status, confidence)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     path = excluded.path,
                     scope = excluded.scope,
@@ -714,6 +803,8 @@ impl MemoryPersistence {
                     body = excluded.body,
                     source_session = excluded.source_session,
                     status = excluded.status,
+                    epistemic_status = excluded.epistemic_status,
+                    confidence = excluded.confidence,
                     -- Re-promoting a memory refreshes it, clearing any prior
                     -- change-aware staleness flag.
                     stale_candidate = 0
@@ -728,7 +819,9 @@ impl MemoryPersistence {
                         .source_session
                         .as_ref()
                         .map(|id| id.as_str().to_string()),
-                    OffsetDateTime::now_utc().to_string()
+                    OffsetDateTime::now_utc().to_string(),
+                    epistemic_status.as_str(),
+                    entry.confidence.value(),
                 ],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
@@ -745,6 +838,80 @@ impl MemoryPersistence {
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::record_relationships_with(connection, entry)?;
+        Self::record_contradictions_with(connection, entry)?;
+        Ok(())
+    }
+
+    /// Record `contradicts` relationships for a freshly-indexed memory: the
+    /// entry's explicitly-declared contradictions, plus a deterministic
+    /// auto-detection — an active memory that shares a topic (`related_entities`)
+    /// but takes the opposite recommendation polarity (one prohibits what the
+    /// other endorses). Each contradiction is stored both ways and flags both
+    /// memories `contradicted`, so retrieval can surface the conflict. Nothing is
+    /// removed — a contradiction is a *signal*, not a deletion (D-LM-0008).
+    fn record_contradictions_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut targets: std::collections::BTreeSet<String> = entry
+            .contradicts
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+
+        if !entry.related_entities.is_empty() {
+            let entry_prohibits = body_prohibits(&entry.body);
+            let placeholders = std::iter::repeat_n("?", entry.related_entities.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT DISTINCT r.memory_id, m.body FROM memory_relationships r \
+                 JOIN memory_index m ON m.memory_id = r.memory_id \
+                 WHERE r.relation_kind = 'entity' AND r.target IN ({placeholders}) \
+                 AND m.status = 'active' AND m.memory_id != ?{self_param}",
+                self_param = entry.related_entities.len() + 1
+            );
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            let mut bound: Vec<String> = entry.related_entities.clone();
+            bound.push(entry.id.as_str().to_string());
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(bound), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            for row in rows {
+                let (other_id, other_body) = row.map_err(MemoryPersistenceError::Sqlite)?;
+                if body_prohibits(&other_body) != entry_prohibits {
+                    targets.insert(other_id);
+                }
+            }
+        }
+
+        for target in targets {
+            // Store the relationship both directions, idempotently.
+            for (memory_id, other) in [
+                (entry.id.as_str(), target.as_str()),
+                (target.as_str(), entry.id.as_str()),
+            ] {
+                connection
+                    .execute(
+                        "INSERT OR IGNORE INTO memory_relationships(memory_id, relation_kind, target) \
+                         VALUES(?1, 'contradicts', ?2)",
+                        params![memory_id, other],
+                    )
+                    .map_err(MemoryPersistenceError::Sqlite)?;
+            }
+            // Flag both memories so retrieval surfaces the conflict.
+            connection
+                .execute(
+                    "UPDATE memory_index SET contradicted = 1 \
+                     WHERE memory_id IN (?1, ?2) AND status = 'active'",
+                    params![entry.id.as_str(), target],
+                )
+                .map_err(MemoryPersistenceError::Sqlite)?;
+        }
         Ok(())
     }
 
@@ -868,6 +1035,27 @@ fn fts_match_expression(query: &str) -> Option<String> {
         return None;
     }
     Some(terms.join(" OR "))
+}
+
+/// Whether a memory body recommends *against* something — a prohibition. Used to
+/// detect contradictions: two memories about the same topic with opposite
+/// polarity (one prohibits what the other endorses) conflict.
+fn body_prohibits(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    [
+        "do not",
+        "don't",
+        "never ",
+        "avoid ",
+        "stop ",
+        "no longer",
+        "instead of",
+        "must not",
+        "should not",
+        "shouldn't",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn path_is_under_root(root: &Path, path: &Path) -> bool {

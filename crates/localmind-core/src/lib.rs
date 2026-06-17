@@ -35,7 +35,7 @@ pub use lesson::{
     FailureRecovery, InvalidationRule, LessonCategory, LessonScope, ReviewAnnotation,
     SuggestedAction, ToolUseLesson, ToolUseTrajectory, ValidationStatus, TOOL_USE_SOURCE_WEIGHT,
 };
-pub use memory::{MemoryEntry, MemoryScope, MemoryStatus};
+pub use memory::{EpistemicStatus, MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};
 pub use session::{
     CommandEvent, EventStatus, FileChange, FileChangeKind, ProjectRef, SessionOutcome,
