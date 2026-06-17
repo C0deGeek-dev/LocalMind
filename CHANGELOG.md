@@ -3,6 +3,13 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
+## 2026-06-17 - Documentation
+
+- Added an in-repo wiki source (`docs/wiki/`) that is one-way CI-synced to the
+  GitHub Wiki, a `docs/README.md` doc-ownership index, and an offline link check
+  over the docs.
+- Documented the `localmind eval` memory-quality command in the README.
+
 ## v0.3.0-beta.2 - 2026-06-15
 
 Coordinated LocalX beta release. Makes the learning loop produce usable results.

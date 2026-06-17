@@ -115,6 +115,10 @@ cargo run -p localmind-cli -- --help
 Aliases for the CI steps live in `.cargo/config.toml`: `cargo ci-fmt`,
 `cargo ci-lint`, `cargo ci-test` (nextest, as in CI), `cargo ci-doctest`.
 
+Memory quality has a regression gate: `localmind eval` scores extraction
+precision/recall and retrieval recall@k against a golden fixture set (`-k` sets
+the retrieval cutoff; `--json` emits machine-readable output).
+
 The MVP remains local-first and opt-in. No cloud dependency, autonomous memory
 write, hidden transcript capture, or host-specific dependency belongs in
 `localmind-core`.
