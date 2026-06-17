@@ -22,8 +22,8 @@ mod schema;
 mod skill_drafts;
 
 pub use config::{
-    LearningConfig, LocalMindConfig, ProjectConfig, ReviewConfig, ReviewModeConfig,
-    StoreConfigError,
+    LearningConfig, LocalMindConfig, ProjectConfig, RetrievalConfig, ReviewConfig,
+    ReviewModeConfig, StoreConfigError,
 };
 pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
 pub use dedup::{

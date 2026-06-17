@@ -7,7 +7,10 @@ use localmind_core::{
     Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope,
     MemoryStatus, NodeKind,
 };
-use localmind_search::{search_workspace, RankedHit, RankingConfig, SearchHitKind, WorkspaceQuery};
+use localmind_search::{
+    search_workspace, search_workspace_reranked, RankedHit, RankingConfig, RerankOptions,
+    SearchHitKind, WorkspaceQuery,
+};
 use localmind_store::{GraphStore, MemoryPersistence};
 use std::fs;
 use std::path::Path;
@@ -230,5 +233,54 @@ fn anchored_memory_rideses_focus_proximity() -> Result<(), Box<dyn std::error::E
         !listing.iter().any(|id| id == "memory:memory-audio"),
         "lesson anchored outside the neighborhood must not: {listing:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn reranked_path_with_rerank_off_is_byte_identical_to_the_blend(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let root = temp_dir.path();
+    build_fixture(root)?;
+    let store = GraphStore::open_project(root)?;
+    let boundary = IngestBoundary::new(root, Vec::new())?;
+    Ingester::new()?.ingest(
+        &boundary,
+        &[root.join("src/geometry.rs"), root.join("src/audio.rs")],
+        &store,
+    )?;
+    seed_lesson(
+        root,
+        &store,
+        "memory-norm",
+        "Prefer the squared form when comparing distances.",
+        "src/geometry.rs::norm",
+    )?;
+
+    let memory = MemoryPersistence::open_project(root)?;
+    let query = WorkspaceQuery {
+        text: "geometry".to_string(),
+        focus: None,
+    };
+
+    let baseline = search_workspace(&store, &memory, &query, &RankingConfig::default())?;
+    // Default options: rerank flag off, no embedder — the determinism floor.
+    let wired = search_workspace_reranked(
+        &store,
+        &memory,
+        &query,
+        &RankingConfig::default(),
+        &RerankOptions::default(),
+    )?;
+
+    assert_eq!(
+        ids(&baseline),
+        ids(&wired),
+        "the rerank-off path must preserve the blend order exactly"
+    );
+    // Scores, not just ids, stay identical when rerank is off.
+    for (left, right) in baseline.iter().zip(wired.iter()) {
+        assert_eq!(left.score, right.score, "blend score must be untouched");
+    }
     Ok(())
 }

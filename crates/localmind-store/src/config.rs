@@ -14,6 +14,8 @@ pub struct LocalMindConfig {
     pub inference: Option<InferenceSettings>,
     #[serde(default)]
     pub review: ReviewConfig,
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -66,6 +68,30 @@ impl Default for ReviewConfig {
     }
 }
 
+/// Retrieval-ranking knobs. All default to the deterministic blend; the rerank
+/// stage is opt-in and only takes effect when an embedding endpoint is also
+/// configured (see [`ProjectConfig::rerank_active`]).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RetrievalConfig {
+    /// Opt in to the embedding rerank stage on top of the deterministic blend.
+    /// Off by default; without an inference embedding endpoint it is inert and
+    /// the blend order is the whole story.
+    #[serde(default)]
+    pub rerank: bool,
+    /// How many top blended hits the rerank stage may reorder.
+    #[serde(default = "default_rerank_window")]
+    pub rerank_window: usize,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        Self {
+            rerank: false,
+            rerank_window: default_rerank_window(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewModeConfig {
@@ -90,6 +116,10 @@ fn default_allowed_scopes() -> Vec<MemoryScope> {
 
 fn default_trusted_threshold() -> f32 {
     0.82
+}
+
+fn default_rerank_window() -> usize {
+    20
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +249,28 @@ impl ProjectConfig {
                 .and_then(|inference| inference.embedding_base_url())
                 .is_some()
     }
+
+    /// Whether the embedding rerank stage should run: the opt-in flag is set
+    /// **and** an inference embedding endpoint is configured. When this is false
+    /// the ranked search path uses the deterministic blend alone — the floor
+    /// that always holds when no endpoint is present, keeping ranking
+    /// reproducible and offline.
+    #[must_use]
+    pub fn rerank_active(&self) -> bool {
+        self.config.retrieval.rerank
+            && self
+                .config
+                .inference
+                .as_ref()
+                .and_then(|inference| inference.embedding_base_url())
+                .is_some()
+    }
+
+    /// The number of top blended hits the rerank stage may reorder.
+    #[must_use]
+    pub fn rerank_window(&self) -> usize {
+        self.config.retrieval.rerank_window
+    }
 }
 
 fn validate_inference_endpoint(
@@ -311,5 +363,32 @@ mod tests {
             "[learning]\nenabled = true\n\n[review]\nsemantic_dedup = true\n\n[inference]\nembedding_base_url = \"http://127.0.0.1:1\"\n",
         );
         assert!(active.semantic_dedup_active());
+    }
+
+    #[test]
+    fn rerank_is_off_by_default_and_needs_both_flag_and_endpoint() {
+        // Default: deterministic blend only.
+        let plain = discover("[learning]\nenabled = true\n");
+        assert!(!plain.rerank_active());
+        assert_eq!(plain.rerank_window(), 20);
+
+        // Flag on but no embedding endpoint → still the blend floor.
+        let flag_only = discover("[learning]\nenabled = true\n\n[retrieval]\nrerank = true\n");
+        assert!(!flag_only.rerank_active());
+
+        // Endpoint but flag off → opt-in, so still the blend floor.
+        let endpoint_only = discover(
+            "[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"http://127.0.0.1:1\"\n",
+        );
+        assert!(!endpoint_only.rerank_active());
+    }
+
+    #[test]
+    fn rerank_activates_only_with_both_flag_and_endpoint() {
+        let active = discover(
+            "[learning]\nenabled = true\n\n[retrieval]\nrerank = true\nrerank_window = 8\n\n[inference]\nembedding_base_url = \"http://127.0.0.1:1\"\n",
+        );
+        assert!(active.rerank_active());
+        assert_eq!(active.rerank_window(), 8);
     }
 }

@@ -32,6 +32,10 @@ research = true
 [review]
 mode = "manual"              # manual, assisted, trusted, or automatic
 trusted_threshold = 0.82     # trusted auto-accept threshold
+
+[retrieval]
+rerank = false               # opt in to the embedding rerank stage; off = deterministic blend only
+rerank_window = 20           # how many top blended hits rerank may reorder
 ```
 
 A missing file, `enabled = false`, malformed TOML, or a `memory_root` that
@@ -39,6 +43,12 @@ escapes the project root are all hard, typed errors — never silent fallbacks.
 When `[inference]` is absent, model-backed extraction, embeddings, review
 annotation, skill writing, research, and distillation are disabled and the
 deterministic paths remain active.
+
+`[retrieval].rerank` is opt-in and inert on its own: it reorders the top
+`rerank_window` blended hits by embedding similarity **only** when an
+`[inference]` embedding endpoint is also configured. Without both, the
+deterministic blend order is the whole contract — ranking stays reproducible and
+offline, byte-identical to the no-rerank path.
 
 ## Directory layout
 
@@ -88,7 +98,7 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **2**); every component steps the schema on open and refuses
+(currently **4**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |

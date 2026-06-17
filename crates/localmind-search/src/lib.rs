@@ -5,13 +5,15 @@
 //! match) with no model and no network.
 
 mod rank;
+mod rerank;
 mod workspace;
 
 pub use rank::{combined_score, proximity_score, temporal_score, RankingConfig, SearchWeights};
+pub use rerank::{rerank_hits, RerankEmbedder, RerankError, RerankOptions};
 pub use workspace::{search_workspace, RankedHit, SearchHitKind, WorkspaceQuery};
 
 use localmind_core::ContextQuery;
-use localmind_store::{MemoryPersistence, MemorySearchResult};
+use localmind_store::{GraphStore, MemoryPersistence, MemorySearchResult};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -23,6 +25,24 @@ pub enum SearchError {
     Graph(#[from] localmind_store::GraphStoreError),
     #[error(transparent)]
     Memory(#[from] localmind_store::MemoryPersistenceError),
+    #[error(transparent)]
+    Rerank(#[from] RerankError),
+}
+
+/// The ranked search path with the optional rerank stage wired in. Runs the
+/// deterministic blend, then applies `rerank` — which is identity unless its
+/// flag is on *and* an embedder is supplied. With `RerankOptions::default()`
+/// (flag off, no embedder) the result is byte-identical to [`search_workspace`],
+/// so the determinism floor holds through this entry point too.
+pub fn search_workspace_reranked(
+    graph: &GraphStore,
+    memory: &MemoryPersistence,
+    query: &WorkspaceQuery,
+    config: &RankingConfig,
+    rerank: &RerankOptions<'_>,
+) -> Result<Vec<RankedHit>, SearchError> {
+    let hits = search_workspace(graph, memory, query, config)?;
+    Ok(rerank_hits(hits, &query.text, rerank)?)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
