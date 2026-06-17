@@ -23,6 +23,9 @@ use std::collections::BTreeMap;
 const EXACT_CONFIDENCE: f32 = 1.0;
 const RESOLVED_IMPORT_CONFIDENCE: f32 = 0.9;
 const HEURISTIC_CONFIDENCE: f32 = 0.6;
+/// A same-file unique name match for a call: a strong heuristic, but still a
+/// heuristic — the call site is parsed, the target binding is inferred.
+const CALL_SAME_FILE_CONFIDENCE: f32 = 0.9;
 
 /// A named item the resolver can target, wherever it came from.
 #[derive(Clone, Debug)]
@@ -191,9 +194,74 @@ pub fn resolve_file_edges(
     let mut edges = Vec::new();
     containment_edges(file, &mut edges)?;
     test_edges(file, context, &mut edges)?;
+    call_edges(file, context, &mut edges)?;
     use_edges(file, context, &mut edges)?;
     documentation_edges(file, context, &mut edges)?;
     Ok(edges)
+}
+
+/// `function —calls→ function` for calls made from this file's non-test
+/// function bodies. The caller is a definition in this file; the callee is
+/// matched by name — uniquely in this file (a strong heuristic) or uniquely
+/// across the graph (a weaker one). Ambiguous names and self-calls resolve to
+/// nothing. A `Calls` edge is always [`EdgeDerivation::Heuristic`]: the call
+/// site is parsed fact, but which definition it binds to is inferred. Calls
+/// from test bodies are covered by `tested_by` instead.
+fn call_edges(
+    file: &ParsedFile,
+    context: &ResolutionContext,
+    edges: &mut Vec<GraphEdge>,
+) -> Result<(), CodeGraphError> {
+    for caller in file
+        .items
+        .iter()
+        .filter(|item| item.kind == NodeKind::Function)
+    {
+        for call in file
+            .calls
+            .iter()
+            .filter(|call| call.caller == caller.qualified_name)
+        {
+            let same_file: Vec<&TargetRef> = context
+                .functions
+                .iter()
+                .filter(|function| {
+                    function.file == file.file.relative && function.name == call.callee
+                })
+                .collect();
+            let (target, confidence) = if let [target] = same_file.as_slice() {
+                (*target, CALL_SAME_FILE_CONFIDENCE)
+            } else {
+                let elsewhere: Vec<&TargetRef> = context
+                    .functions
+                    .iter()
+                    .filter(|function| function.name == call.callee)
+                    .collect();
+                match elsewhere.as_slice() {
+                    [target] => (*target, HEURISTIC_CONFIDENCE),
+                    _ => continue,
+                }
+            };
+
+            // Skip self-recursion: a node calling itself adds no navigation.
+            if target.id == caller.id {
+                continue;
+            }
+
+            edges.push(GraphEdge::structural(
+                EdgeKind::Calls,
+                caller.id.clone(),
+                target.id.clone(),
+                EdgeDerivation::Heuristic,
+                Confidence::new(confidence)?,
+                EvidenceRef::new(
+                    EvidenceKind::CodeParse,
+                    format!("{}:{}", file.file.relative, call.line),
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `file —implemented_by→ item` for every item extracted from the file.
@@ -271,9 +339,11 @@ fn use_edges(
     edges: &mut Vec<GraphEdge>,
 ) -> Result<(), CodeGraphError> {
     for use_path in &file.uses {
+        // Split on the path separators used across languages (`::` Rust, `.`
+        // Python/Java, `/` JS/Go), dropping relative and empty markers.
         let segments: Vec<&str> = use_path
             .path
-            .split("::")
+            .split([':', '.', '/', '\\'])
             .map(|segment| segment.trim().trim_end_matches(';'))
             .filter(|segment| {
                 !segment.is_empty() && !matches!(*segment, "crate" | "super" | "self")
@@ -381,7 +451,12 @@ fn mention_edge(
 /// `geometry`, `src/audio/mod.rs` → `audio`.
 fn module_stem(relative: &str) -> String {
     let file_name = relative.rsplit('/').next().unwrap_or(relative);
-    let stem = file_name.trim_end_matches(".rs");
+    // Strip the final extension, language-agnostically (`geometry.rs` →
+    // `geometry`, `utils.py` → `utils`, `App.tsx` → `App`).
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
     if stem == "mod" || stem == "lib" || stem == "main" {
         let mut parts = relative.rsplit('/');
         parts.next();

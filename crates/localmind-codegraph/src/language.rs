@@ -166,6 +166,28 @@ const TYPESCRIPT_TAGS: &[&str] = &[
     tree_sitter_typescript::TAGS_QUERY,
 ];
 
+impl Language {
+    /// An original query naming this language's import targets (the module path
+    /// as written), captured as `@path`. `None` where imports are not yet
+    /// extracted (Rust uses its own `use`-declaration path in the walker;
+    /// the rest are demand-driven). The resolver turns a captured path into a
+    /// `Uses` edge to the in-repo file it names, if any.
+    #[must_use]
+    pub fn import_query(self) -> Option<&'static str> {
+        match self {
+            Language::Python => Some(
+                "(import_statement name: (dotted_name) @path)\n\
+                 (import_from_statement module_name: (dotted_name) @path)",
+            ),
+            Language::Go => Some("(import_spec path: (interpreted_string_literal) @path)"),
+            Language::JavaScript | Language::TypeScript | Language::Tsx => {
+                Some("(import_statement source: (string) @path)")
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Original tag query for PowerShell (the grammar ships none). Names function
 /// definitions and command/method call sites with the standard tags captures so
 /// the shared extractor treats PowerShell like any other language.

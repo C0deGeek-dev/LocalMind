@@ -138,6 +138,10 @@ pub enum EdgeKind {
     TestedBy,
     DocumentedIn,
     Uses,
+    /// One callable invokes another. The call site is read from the tree, but
+    /// the target is matched by name, so a `Calls` edge is always
+    /// [`EdgeDerivation::Heuristic`].
+    Calls,
     BelongsToProject,
     /// Learned knowledge (an accepted memory entry) anchored to a code node.
     AnchoredTo,
@@ -151,6 +155,7 @@ impl EdgeKind {
             Self::TestedBy => "tested_by",
             Self::DocumentedIn => "documented_in",
             Self::Uses => "uses",
+            Self::Calls => "calls",
             Self::BelongsToProject => "belongs_to_project",
             Self::AnchoredTo => "anchored_to",
         }
@@ -404,6 +409,29 @@ mod tests {
         assert!(json.contains("\"derivation\":\"parsed\""));
         assert_eq!(edge.from, GraphEndpoint::Node(function.id));
         assert_eq!(edge.to, GraphEndpoint::Node(test.id));
+        Ok(())
+    }
+
+    #[test]
+    fn calls_edges_serialize_as_snake_case_and_round_trip() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let caller = function_node("geometry::draw");
+        let callee = function_node("geometry::norm");
+        let edge = GraphEdge::structural(
+            EdgeKind::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+            EdgeDerivation::Heuristic,
+            Confidence::new(0.9)?,
+            evidence(),
+        );
+
+        let json = serde_json::to_string(&edge)?;
+        assert!(json.contains("\"kind\":\"calls\""));
+        assert!(json.contains("\"derivation\":\"heuristic\""));
+        let back: GraphEdge = serde_json::from_str(&json)?;
+        assert_eq!(back, edge);
+        assert_eq!(EdgeKind::Calls.as_str(), "calls");
         Ok(())
     }
 

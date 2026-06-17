@@ -28,13 +28,20 @@ pub trait CodeIntelligenceProvider {
         -> Result<ParsedFile, CodeGraphError>;
 }
 
+/// The compiled queries for one tag-query language: the definition/call tag
+/// query, and an optional import query.
+struct LanguageQueries {
+    tags: Query,
+    imports: Option<Query>,
+}
+
 /// The native, in-process provider: tree-sitter grammars only, deterministic and
 /// offline. Holds the Rust walker, one reusable parser for the tag-query
-/// languages, and a lazily compiled query per language.
+/// languages, and lazily compiled queries per language.
 pub struct NativeProvider {
     rust: RustParser,
     parser: Parser,
-    queries: HashMap<Language, Query>,
+    queries: HashMap<Language, LanguageQueries>,
 }
 
 impl NativeProvider {
@@ -61,36 +68,58 @@ impl CodeIntelligenceProvider for NativeProvider {
             // Rust keeps its richer hand-written extraction unchanged.
             Some(Language::Rust) | None => self.rust.parse_file(file, text),
             Some(language) => {
-                // Compile the tag query once per language, then extract.
+                // Compile this language's queries once, then extract.
                 // `queries` and `parser` are disjoint fields, so the immutable
                 // query borrow and the mutable parser borrow do not conflict.
                 if let Entry::Vacant(slot) = self.queries.entry(language) {
-                    let sources = language.tags_sources();
-                    if sources.is_empty() {
-                        return Err(CodeGraphError::Grammar(format!(
-                            "{} has no tag query",
-                            language.as_str()
-                        )));
-                    }
-                    let source = sources.join("\n");
-                    let query = Query::new(&language.grammar(), &source).map_err(|error| {
-                        CodeGraphError::Grammar(format!(
-                            "{} tag query failed to compile: {error}",
-                            language.as_str()
-                        ))
-                    })?;
-                    slot.insert(query);
+                    slot.insert(compile_queries(language)?);
                 }
-                let query = self.queries.get(&language).ok_or_else(|| {
+                let queries = self.queries.get(&language).ok_or_else(|| {
                     CodeGraphError::Grammar(format!(
-                        "{} tag query missing after compile",
+                        "{} queries missing after compile",
                         language.as_str()
                     ))
                 })?;
-                parse_with_tags(&mut self.parser, language, query, file, text)
+                parse_with_tags(
+                    &mut self.parser,
+                    language,
+                    &queries.tags,
+                    queries.imports.as_ref(),
+                    file,
+                    text,
+                )
             }
         }
     }
+}
+
+/// Compiles a tag-query language's queries against its grammar. The tag query
+/// is required; the import query is optional.
+fn compile_queries(language: Language) -> Result<LanguageQueries, CodeGraphError> {
+    let sources = language.tags_sources();
+    if sources.is_empty() {
+        return Err(CodeGraphError::Grammar(format!(
+            "{} has no tag query",
+            language.as_str()
+        )));
+    }
+    let grammar = language.grammar();
+    let tags = Query::new(&grammar, &sources.join("\n")).map_err(|error| {
+        CodeGraphError::Grammar(format!(
+            "{} tag query failed to compile: {error}",
+            language.as_str()
+        ))
+    })?;
+    let imports = match language.import_query() {
+        Some(source) => Some(Query::new(&grammar, source).map_err(|error| {
+            CodeGraphError::Grammar(format!(
+                "{} import query failed to compile: {error}",
+                language.as_str()
+            ))
+        })?),
+        None => None,
+    };
+    Ok(LanguageQueries { tags, imports })
 }
 
 #[cfg(test)]

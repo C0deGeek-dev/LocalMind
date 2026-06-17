@@ -9,7 +9,9 @@
 //! resolver's job.
 
 use crate::language::Language;
-use crate::parse::{end_line_of, file_graph_node, line_of, node_text, parse_evidence};
+use crate::parse::{
+    end_line_of, file_graph_node, line_of, node_text, parse_evidence, CallSite, UsePath,
+};
 use crate::{AdmittedFile, CodeGraphError, ParsedFile};
 use localmind_core::{content_fingerprint, Confidence, GraphNode, NodeKind, SourceLocation};
 use std::collections::BTreeSet;
@@ -23,7 +25,8 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 pub(crate) fn parse_with_tags(
     parser: &mut Parser,
     language: Language,
-    query: &Query,
+    tags: &Query,
+    imports: Option<&Query>,
     file: &AdmittedFile,
     text: &str,
 ) -> Result<ParsedFile, CodeGraphError> {
@@ -44,28 +47,72 @@ pub(crate) fn parse_with_tags(
         return Ok(parsed);
     };
 
-    parsed.items = extract_items(query, tree.root_node(), file, text)?;
+    let (items, calls) = extract(tags, tree.root_node(), file, text)?;
+    parsed.items = items;
+    parsed.calls = calls;
+    if let Some(imports) = imports {
+        parsed.uses = extract_imports(imports, tree.root_node(), text);
+    }
     Ok(parsed)
 }
 
-/// Walks the tag-query matches and builds one node per `@definition.*` whose
-/// capture maps to a tracked node kind. De-duplicated by stable node id, since a
-/// definition can satisfy more than one query pattern.
-fn extract_items(
+/// Collects import targets (`@path`) the resolver matches to in-repo files,
+/// stripping any surrounding string quotes. Relative markers and resolution are
+/// the resolver's concern; this only records the module path as written.
+fn extract_imports(query: &Query, root: Node<'_>, text: &str) -> Vec<UsePath> {
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, text.as_bytes());
+    let mut uses = Vec::new();
+    while let Some(matched) = matches.next() {
+        for capture in matched.captures {
+            if capture_names.get(capture.index as usize).copied() != Some("path") {
+                continue;
+            }
+            let path = node_text(capture.node, text)
+                .trim_matches(['"', '\'', '`'])
+                .to_string();
+            if !path.is_empty() {
+                uses.push(UsePath {
+                    path,
+                    line: line_of(capture.node),
+                });
+            }
+        }
+    }
+    uses
+}
+
+/// A call site before its caller is known: the callee name as written, and the
+/// byte where the call starts (used to find the enclosing definition).
+struct RawCall {
+    callee: String,
+    start_byte: usize,
+    line: u64,
+}
+
+/// Walks the tag-query matches once, building one node per `@definition.*` whose
+/// capture maps to a tracked node kind (de-duplicated by stable node id) and
+/// collecting `@reference.call` sites. Each call is then attributed to the
+/// innermost enclosing definition so the resolver can turn it into a `Calls`
+/// edge; a call with no enclosing definition is dropped rather than guessed.
+fn extract(
     query: &Query,
     root: Node<'_>,
     file: &AdmittedFile,
     text: &str,
-) -> Result<Vec<GraphNode>, CodeGraphError> {
+) -> Result<(Vec<GraphNode>, Vec<CallSite>), CodeGraphError> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, text.as_bytes());
 
     let mut items: Vec<GraphNode> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut raw_calls: Vec<RawCall> = Vec::new();
     while let Some(matched) = matches.next() {
         let mut name: Option<&str> = None;
         let mut definition: Option<(Node<'_>, NodeKind)> = None;
+        let mut call: Option<Node<'_>> = None;
         for capture in matched.captures {
             let capture_name = capture_names
                 .get(capture.index as usize)
@@ -73,24 +120,57 @@ fn extract_items(
                 .unwrap_or("");
             if capture_name == "name" {
                 name = Some(node_text(capture.node, text));
+            } else if capture_name.starts_with("reference.call") {
+                call = Some(capture.node);
             } else if let Some(kind) = definition_kind(capture_name) {
                 definition = Some((capture.node, kind));
             }
         }
 
-        let (Some(name), Some((node, kind))) = (name, definition) else {
+        let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
             continue;
         };
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let item = definition_node(kind, name, node, file, text)?;
-        if seen.insert(item.id.as_str().to_string()) {
-            items.push(item);
+        if let Some((node, kind)) = definition {
+            let item = definition_node(kind, name, node, file, text)?;
+            if seen.insert(item.id.as_str().to_string()) {
+                items.push(item);
+            }
+        } else if let Some(node) = call {
+            raw_calls.push(RawCall {
+                callee: name.to_string(),
+                start_byte: node.start_byte(),
+                line: line_of(node),
+            });
         }
     }
-    Ok(items)
+
+    let calls = attribute_calls(&items, raw_calls);
+    Ok((items, calls))
+}
+
+/// Assigns each raw call to the innermost definition whose byte span contains
+/// it (its caller). Calls outside every definition (top-level statements) are
+/// dropped — a call with no honest caller is not invented.
+fn attribute_calls(items: &[GraphNode], raw_calls: Vec<RawCall>) -> Vec<CallSite> {
+    raw_calls
+        .into_iter()
+        .filter_map(|call| {
+            let caller = items
+                .iter()
+                .filter(|item| {
+                    item.location.as_ref().is_some_and(|location| {
+                        (location.byte_start as usize) <= call.start_byte
+                            && call.start_byte < (location.byte_end as usize)
+                    })
+                })
+                .max_by_key(|item| item.location.as_ref().map(|l| l.byte_start).unwrap_or(0))?;
+            Some(CallSite {
+                caller: caller.qualified_name.clone(),
+                callee: call.callee,
+                line: call.line,
+            })
+        })
+        .collect()
 }
 
 /// Maps a `@definition.*` capture name to the node kind we track, or `None` for
