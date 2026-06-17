@@ -4,6 +4,28 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0007 — Review candidates are deduplicated at enqueue with a layered ladder
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+The review queue grew unbounded with restatements of the same lesson. Schema
+v3 adds `canonical_hash` and `seen_count` to `review_items`, and
+`enqueue_candidates` runs a deterministic dedup ladder against existing
+*pending* candidates: an exact normalized-canonical-hash match (lowercased,
+whitespace-collapsed, trailing punctuation stripped) or a lexical
+near-duplicate (token-set overlap ≥ 0.7) is **merged** into the survivor —
+bumping `seen_count` rather than inserting a new row — while distinct lessons
+are kept.
+
+Embedding-based dedup is opt-in (`review.semantic_dedup`) and only active when
+an inference embedding endpoint is configured; otherwise the deterministic
+lexical contract is the whole story, so the queue stays clean and testable with
+no network access. Dedup is scoped to pending candidates; duplication against
+*accepted* memory remains the review-mode annotation path (`duplicate_of` →
+`IgnoreSimilar`). A one-time `purge_pending` clears an un-reviewed backlog,
+leaving decided items and accepted-memory tables untouched.
+
 ## D-LM-0006 — Candidates pass a prose-admission gate; batch insights are strict-JSON
 
 - **Date**: 2026-06-15
