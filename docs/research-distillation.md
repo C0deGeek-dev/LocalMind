@@ -33,3 +33,10 @@ Provenance and healing:
 - Accepted memory remains the source of truth; derived rows are rebuildable.
 - Deleting or retiring source memory should trigger host-visible refresh or
   retirement scans rather than silent deletion of derived insight.
+
+Authoring quality:
+
+- Generated agent-facing bodies (distilled lessons, `SKILL.md` skill drafts) are
+  written and pruned per the ecosystem [prompt-authoring doctrine](https://github.com/David-c0degeek/c0degeek-ai/blob/main/instructions/prompt-authoring-doctrine.md)
+  — predictability of process, the information hierarchy, and the no-op pruning test.
+  Link it; do not restate it here.
