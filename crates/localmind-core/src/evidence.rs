@@ -34,6 +34,20 @@ impl EvidenceRef {
         self.redacted = true;
         self
     }
+
+    /// Pins the evidence to a locator (e.g. `repo@commit`).
+    #[must_use]
+    pub fn with_uri(mut self, uri: impl Into<String>) -> Self {
+        self.uri = Some(uri.into());
+        self
+    }
+
+    /// Records the content fingerprint the evidence was taken at, for staleness.
+    #[must_use]
+    pub fn with_content_hash(mut self, content_hash: impl Into<String>) -> Self {
+        self.content_hash = Some(content_hash.into());
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -13,6 +13,7 @@ mod join;
 mod language;
 mod overview;
 mod parse;
+mod primer;
 mod provider;
 mod reindex;
 mod resolve;
@@ -29,6 +30,7 @@ pub use overview::{
     compute_overview, ArchitectureOverview, LanguageStat, OverviewOptions, PackageStat, SymbolStat,
 };
 pub use parse::{CallSite, ParsedFile, RustParser, UsePath};
+pub use primer::{distill_primer, overview_content_hash, primer_is_stale};
 pub use provider::{CodeIntelligenceProvider, NativeProvider};
 pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};
 pub use resolve::{resolve_edges, resolve_file_edges, ResolutionContext};

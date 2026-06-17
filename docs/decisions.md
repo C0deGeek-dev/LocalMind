@@ -4,6 +4,37 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0009 — The repo primer is a deterministic, review-gated, supersedable Project memory
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+The engine can distil a one-shot **repository primer** — the orientation an
+agent needs to start work on an unfamiliar repo without reading files. It is
+derived deterministically from the architecture overview (`compute_overview`):
+a templated body over the language/package/entry-point/hotspot breakdown, with
+**no model in the path**, so it is byte-stable for a fixed overview and ships
+independent of any inference configuration.
+
+The primer is an *inference about the repo*, and is honest about it:
+
+- category `ArchitectureRule`, `Confidence < 1.0` — never asserted as parsed
+  fact;
+- evidence is an `EvidenceKind::CodeParse` ref pinned to `repo@commit` (`uri`)
+  with a `content_hash` taken over the overview's shape (not the commit string),
+  so the hash changes only when the source-derived structure drifts;
+- it is produced as a `CandidateLesson` and routed through the **review queue**
+  like any other memory (`remember`/D-LM-0004 discipline) — distillation never
+  writes accepted memory directly.
+
+Re-distillation reuses supersession (D-LM-0008): a drifted repo yields a primer
+with a distinct content-hash id, which a reviewer accepts as
+`ReviewAction::Supersede(prior)`; promotion retires the prior primer and records
+`supersedes`. Staleness reuses the host's session-open refresh trigger — a primer
+whose stored `content_hash` no longer matches the current overview is stale and
+offered for re-distillation. One graph, one store: the primer adds no new
+persistent store, only a `Project` memory.
+
 ## D-LM-0008 — Supersede is a reviewer-targeted decision that retires the prior memory
 
 - **Date**: 2026-06-17
