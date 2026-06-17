@@ -7,6 +7,7 @@
 //! confidence vocabulary as lessons and persist through the graph store.
 
 mod boundary;
+mod impact;
 mod ingest;
 mod join;
 mod language;
@@ -18,6 +19,9 @@ mod resolve;
 mod tags;
 
 pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
+pub use impact::{
+    compute_impact, ChangeImpact, ChangedSpan, ImpactOptions, ImpactedSymbol, RiskTier,
+};
 pub use ingest::{IngestReport, Ingester};
 pub use join::{anchor_memory, AnchorReport};
 pub use language::Language;
