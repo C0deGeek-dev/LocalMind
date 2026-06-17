@@ -10,6 +10,7 @@ mod boundary;
 mod ingest;
 mod join;
 mod language;
+mod overview;
 mod parse;
 mod provider;
 mod reindex;
@@ -20,6 +21,9 @@ pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
 pub use ingest::{IngestReport, Ingester};
 pub use join::{anchor_memory, AnchorReport};
 pub use language::Language;
+pub use overview::{
+    compute_overview, ArchitectureOverview, LanguageStat, OverviewOptions, PackageStat, SymbolStat,
+};
 pub use parse::{CallSite, ParsedFile, RustParser, UsePath};
 pub use provider::{CodeIntelligenceProvider, NativeProvider};
 pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};

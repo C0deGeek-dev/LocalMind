@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 localmind-core = { path = "../localmind-core" }
 localmind-store = { path = "../localmind-store" }
+serde = { workspace = true }
 streaming-iterator = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
@@ -32,4 +33,5 @@ tree-sitter-elixir = { workspace = true }
 tree-sitter-powershell = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = { workspace = true }
