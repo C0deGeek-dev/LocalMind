@@ -1,4 +1,4 @@
-//! Contradiction detection and the provenance answer (subject 06).
+//! Contradiction detection and the provenance answer.
 //!
 //! Two accepted memories about the same topic with opposite recommendation
 //! polarity must produce a `contradicts` relationship that surfaces in ranked

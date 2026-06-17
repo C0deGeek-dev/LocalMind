@@ -1,5 +1,5 @@
 {
-  "description": "Small retrieval fixture for measuring rerank lift. Each query lists candidates in deterministic-blend order (best blend first) with a relevance flag and an embedding vector. In every query the truly relevant candidate sits below the top-k cut in blend order, but its vector is closest to the query vector, so rerank should raise hit-rate@k from 0 to 1 without ever demoting a relevant item. Reused by the memory-strategy eval (subject 04).",
+  "description": "Small retrieval fixture for measuring rerank lift. Each query lists candidates in deterministic-blend order (best blend first) with a relevance flag and an embedding vector. In every query the truly relevant candidate sits below the top-k cut in blend order, but its vector is closest to the query vector, so rerank should raise hit-rate@k from 0 to 1 without ever demoting a relevant item. Reused by the memory-strategy eval.",
   "k": 2,
   "queries": [
     {

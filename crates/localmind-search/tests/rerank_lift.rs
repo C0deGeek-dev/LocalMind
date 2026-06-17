@@ -1,10 +1,10 @@
-//! Before/after relevance check for the optional rerank stage (subject 01.5).
+//! Before/after relevance check for the optional rerank stage.
 //!
 //! Loads a small committed fixture of queries whose truly-relevant memory sits
 //! below the top-k cut in deterministic-blend order, measures hit-rate@k with
 //! and without rerank, and pins that rerank lifts it without regressing. The
-//! fixture and this measurement are handed to the memory-strategy eval
-//! (subject 04), which formalizes the harness.
+//! fixture and this measurement are reused by the memory-strategy eval, which
+//! formalizes the harness.
 
 #![allow(clippy::unwrap_used)]
 
@@ -124,7 +124,7 @@ fn rerank_lifts_hit_rate_without_regressing() -> Result<(), Box<dyn std::error::
     let total = fixture.queries.len();
     let baseline_rate = baseline_hits as f32 / total as f32;
     let reranked_rate = reranked_hits as f32 / total as f32;
-    // Recorded for the subject 01 progress log and handed to subject 04.
+    // Recorded as the rerank relevance check and reused by the eval harness.
     println!(
         "hit-rate@{k}: baseline {baseline_rate:.2} ({baseline_hits}/{total}), \
          rerank {reranked_rate:.2} ({reranked_hits}/{total})"

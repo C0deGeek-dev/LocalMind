@@ -19,8 +19,8 @@ use std::path::Path;
 use thiserror::Error;
 
 /// A retrieval reranker the eval can apply before measuring recall@k, so the
-/// retrieval lift of the optional rerank stage (subject 01) can be scored
-/// against the keyword baseline. Object-safe and defined here so the store does
+/// retrieval lift of the optional rerank stage can be scored against the keyword
+/// baseline. Object-safe and defined here so the store does
 /// not depend on the search crate; a host that has the embedding reranker
 /// injects it, and tests inject a stub.
 pub trait EvalReranker {
