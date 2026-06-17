@@ -25,8 +25,8 @@ behavior does not; "absent" means not started.
 |---|---|---|
 | Session capture — manual transcript import (§1) | implemented | `localmind-store` (`TranscriptImporter`), `localmind-cli` |
 | Redaction before storage (§1, §12) | implemented — pattern table + entropy backstop, corpus-tested | `localmind-store` |
-| Inference foundation | implemented (engine) — opt-in local OpenAI-compatible chat and embedding endpoints; unset config keeps deterministic behavior. **Engine-complete; the LocalPilot host does not yet select the configured path** (see note below) | `localmind-core`, `localmind-inference`, `localmind-store` |
-| Lesson extraction (§2) | implemented (engine) — model-backed extractor when configured, deterministic fallback otherwise. **Engine-complete; not yet selected by the LocalPilot host, and extraction quality is not yet measured** (see note below) | `localmind-store` (`extraction.rs`), `localmind-inference` |
+| Inference foundation | implemented — opt-in local OpenAI-compatible chat and embedding endpoints; unset config keeps deterministic behavior. The LocalPilot host selects the configured path when `[inference]` is set (off-machine endpoints gated behind an explicit opt-in) | `localmind-core`, `localmind-inference`, `localmind-store` |
+| Lesson extraction (§2) | implemented — model-backed extractor when configured (selected by the LocalPilot host), deterministic fallback otherwise. **Extraction quality is not yet measured by an eval** (see note below) | `localmind-store` (`extraction.rs`), `localmind-inference` |
 | Review queue — manual mode (§3) | implemented | `localmind-store` (`ReviewQueue`); `localmind-review` is the future home (see topology note) |
 | Review queue — assisted/trusted/automatic modes (§3) | implemented — project config selects mode; assisted annotates, trusted/automatic audit auto-accepts and route conflicts to manual | `localmind-store` (`ReviewModeProcessor`) |
 | Memory store: Markdown memory, SQLite index/audit (§4) | implemented — transactional, schema-versioned | `localmind-store` |
@@ -40,13 +40,14 @@ behavior does not; "absent" means not started.
 | Hosts | standalone CLI; LocalPilot embeds via its adapter crate | `localmind-cli`; adapter lives in the host |
 
 **Host-integration note.** "Implemented (engine)" above means the behaviour is
-tested and usable *through the LocalMind engine / `localmind` CLI*. Two honest
-caveats apply to the inference and lesson-extraction rows: (1) the embedding
-LocalPilot host currently drives the **deterministic** extractor only — it does
-not yet select the configured model-backed path — so a LocalPilot user does not
-yet benefit from `[inference]`; and (2) extraction *quality* (precision of the
-candidates, usefulness of promoted memory) is **not yet measured** by any eval.
-Both are being addressed; until then, do not read "implemented" as "the primary
+tested and usable *through the LocalMind engine / `localmind` CLI*. One honest
+caveat remains on the inference and lesson-extraction rows: extraction *quality*
+(precision of the candidates, usefulness of promoted memory) is **not yet
+measured** by any eval. (The earlier caveat — that the LocalPilot host drove the
+deterministic extractor only — no longer applies: the host now selects the
+configured model-backed path when `[inference]` is set, with the deterministic
+extractor as the default and the off-machine endpoint gated behind an explicit
+opt-in.) Until the quality eval lands, do not read "implemented" as "the primary
 host produces high-quality learning today."
 
 **Topology note.** `localmind-review` and `localmind-skills` stay as thin
