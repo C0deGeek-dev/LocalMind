@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 4;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 5;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -48,6 +48,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 4 {
         apply_v4(&tx)?;
+    }
+    if current < 5 {
+        apply_v5(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -184,6 +187,18 @@ fn apply_v3(connection: &Connection) -> Result<(), SchemaError> {
 fn apply_v4(connection: &Connection) -> Result<(), SchemaError> {
     connection
         .execute_batch("ALTER TABLE review_items ADD COLUMN supersede_target TEXT;")
+        .map_err(SchemaError::Sqlite)
+}
+
+/// Change-aware staleness support: a `stale_candidate` flag on accepted memory,
+/// set when code the memory was anchored to changes. The memory stays active and
+/// retrievable (just flagged for review), so retrieval can surface it rather than
+/// silently drop it. Defaults to 0 so every pre-existing row upgrades cleanly.
+fn apply_v5(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            "ALTER TABLE memory_index ADD COLUMN stale_candidate INTEGER NOT NULL DEFAULT 0;",
+        )
         .map_err(SchemaError::Sqlite)
 }
 

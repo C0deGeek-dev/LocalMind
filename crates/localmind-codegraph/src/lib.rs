@@ -17,6 +17,7 @@ mod primer;
 mod provider;
 mod reindex;
 mod resolve;
+mod staleness;
 mod tags;
 
 pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
@@ -34,6 +35,10 @@ pub use primer::{distill_primer, overview_content_hash, primer_is_stale};
 pub use provider::{CodeIntelligenceProvider, NativeProvider};
 pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};
 pub use resolve::{resolve_edges, resolve_file_edges, ResolutionContext};
+pub use staleness::{
+    change_affected_memories, flag_stale_candidates, AffectedMemory, StalenessConfig,
+    StalenessReport,
+};
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -56,4 +61,8 @@ pub enum CodeGraphError {
     Confidence(#[from] localmind_core::ContractError),
     #[error(transparent)]
     Store(#[from] localmind_store::GraphStoreError),
+    #[error(transparent)]
+    Memory(#[from] localmind_store::MemoryPersistenceError),
+    #[error(transparent)]
+    Review(#[from] localmind_store::ReviewQueueError),
 }

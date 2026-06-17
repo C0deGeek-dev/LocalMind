@@ -4,6 +4,29 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0011 — Change-aware staleness flags memory for review, never deletes it
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+When code changes, memories anchored to the changed (or dependent) symbols may
+no longer hold. The engine joins the change-impact walk (reverse `Calls`/`Uses`
+BFS from the changed spans) to the memory↔code anchor edges and, **above a
+conservative anchor-strength threshold** (default 0.6 — admits qualified 0.9 and
+plain-name 0.6 anchors, rejects weaker links), flags each affected memory as a
+`stale_candidate` (schema v5, additive column on `memory_index`) and enqueues one
+review item.
+
+The decision is that this is **flag-for-review, never auto-invalidate**: a flagged
+memory stays `status = 'active'` and keeps being retrieved — search marks it
+`stale_candidate` so callers can down-rank or surface it, but it is never silently
+dropped or auto-superseded. Resolution stays human: a reviewer refreshes
+(re-promote clears the flag), supersedes (D-LM-0008), or keeps it. The threshold
+is tunable and conservative so a weak/distant link does not flood the review
+queue. This is the same reviewed-promotion discipline as extraction (D-LM-0004):
+a machine-inferred signal routes through review, it does not change durable memory
+on its own.
+
 ## D-LM-0010 — Embedding rerank is an opt-in, additive stage over the deterministic blend
 
 - **Date**: 2026-06-17

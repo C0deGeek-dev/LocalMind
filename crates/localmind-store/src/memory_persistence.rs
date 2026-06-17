@@ -31,6 +31,10 @@ pub struct MemorySearchResult {
     pub snippet: String,
     /// Index timestamp of the entry, as stored (RFC-ish text).
     pub created_at: String,
+    /// Flagged by change-aware invalidation: the code this memory was anchored to
+    /// changed, so it may be stale and is awaiting review. Still served — callers
+    /// down-rank or mark it rather than dropping it.
+    pub stale_candidate: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -503,7 +507,8 @@ impl MemoryPersistence {
             .connection
             .prepare(
                 r#"
-                SELECT m.memory_id, m.path, m.body, m.created_at, bm25(memory_fts) AS rank
+                SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
+                       bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'
@@ -518,14 +523,15 @@ impl MemoryPersistence {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(4)? != 0,
+                    row.get::<_, f64>(5)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (memory_id, path, body, created_at, rank) =
+            let (memory_id, path, body, created_at, stale_candidate, rank) =
                 row.map_err(MemoryPersistenceError::Sqlite)?;
             // bm25 returns a more-negative value for better matches; expose a
             // positive bigger-is-better integer to keep the result contract.
@@ -537,9 +543,84 @@ impl MemoryPersistence {
                 score: score.max(1),
                 snippet: body.chars().take(160).collect(),
                 created_at,
+                stale_candidate,
             });
         }
         Ok(results)
+    }
+
+    /// Flag an active memory as a change-aware staleness candidate: the code it
+    /// was anchored to changed, so it should be reviewed. The memory stays active
+    /// and retrievable — this only sets the flag (and audits it). Returns whether
+    /// an active memory matched.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    pub fn mark_stale_candidate(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE memory_index SET stale_candidate = 1 \
+                 WHERE memory_id = ?1 AND status = 'active' AND stale_candidate = 0",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        if changed > 0 {
+            self.write_audit(
+                AuditEventKind::MemoryFlaggedStale,
+                "localmind",
+                memory_id.as_str(),
+                &serde_json::json!({ "reason": "anchored code changed" }),
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    /// Clear a memory's staleness flag (e.g. a reviewer confirmed it still holds).
+    /// Returns whether a row changed.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update fails.
+    pub fn clear_stale_candidate(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE memory_index SET stale_candidate = 0 WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(changed > 0)
+    }
+
+    /// The active memories currently flagged as staleness candidates — the review
+    /// list a reviewer or the inspector pulls.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn list_stale_candidates(&self) -> Result<Vec<MemoryEntryId>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT memory_id FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 1 ORDER BY memory_id",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(MemoryEntryId::new(
+                row.map_err(MemoryPersistenceError::Sqlite)?,
+            ));
+        }
+        Ok(ids)
     }
 
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>, MemoryPersistenceError> {
@@ -632,7 +713,10 @@ impl MemoryPersistence {
                     category = excluded.category,
                     body = excluded.body,
                     source_session = excluded.source_session,
-                    status = excluded.status
+                    status = excluded.status,
+                    -- Re-promoting a memory refreshes it, clearing any prior
+                    -- change-aware staleness flag.
+                    stale_candidate = 0
                 "#,
                 params![
                     entry.id.as_str(),

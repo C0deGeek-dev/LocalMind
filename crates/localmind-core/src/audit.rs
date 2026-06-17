@@ -24,6 +24,7 @@ pub enum AuditEventKind {
     MemoryPromoted,
     MemoryDeleted,
     MemorySuperseded,
+    MemoryFlaggedStale,
     SkillDraftCreated,
     InferenceCallCompleted,
     VectorIndexUpdated,

@@ -99,65 +99,18 @@ pub fn compute_impact(
     let nodes = store.active_nodes()?;
     let node_by_id: HashMap<&str, &GraphNode> =
         nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+    let visited = reachable_dependents(store, &nodes, spans, options)?;
 
-    // Reverse dependency map: a changed node's dependents are its callers
-    // (incoming `Calls`) and, for files, its importers (incoming `Uses`).
-    let mut dependents: HashMap<String, Vec<Dependent>> = HashMap::new();
-    for edge in store.active_edges()? {
-        if !matches!(edge.kind, EdgeKind::Calls | EdgeKind::Uses) {
-            continue;
-        }
-        let (GraphEndpoint::Node(from), GraphEndpoint::Node(to)) = (&edge.from, &edge.to) else {
-            continue;
-        };
-        dependents
-            .entry(to.as_str().to_string())
-            .or_default()
-            .push(Dependent {
-                id: from.as_str().to_string(),
-                heuristic: edge.derivation == localmind_core::EdgeDerivation::Heuristic,
-            });
-    }
-
-    // Seeds: nodes whose source span overlaps a changed span.
-    let mut visited: BTreeMap<String, (u32, bool)> = BTreeMap::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    let mut changed: Vec<ImpactedSymbol> = Vec::new();
-    for node in &nodes {
-        if node
-            .location
-            .as_ref()
-            .is_some_and(|location| spans.iter().any(|span| overlaps(location, span)))
-        {
-            visited.insert(node.id.as_str().to_string(), (0, false));
-            queue.push_back(node.id.as_str().to_string());
-            if is_symbol(node.kind) {
-                changed.push(symbol(node, 0, false));
-            }
-        }
-    }
-
-    // Bounded BFS over reverse dependencies.
-    while let Some(current) = queue.pop_front() {
-        let (hops, current_heuristic) = visited.get(&current).copied().unwrap_or((0, false));
-        if hops >= options.max_depth {
-            continue;
-        }
-        let Some(parents) = dependents.get(&current) else {
-            continue;
-        };
-        for parent in parents {
-            let next_heuristic = current_heuristic || parent.heuristic;
-            let next_hops = hops + 1;
-            match visited.get(&parent.id) {
-                Some(_) => {}
-                None => {
-                    visited.insert(parent.id.clone(), (next_hops, next_heuristic));
-                    queue.push_back(parent.id.clone());
-                }
-            }
-        }
-    }
+    let mut changed: Vec<ImpactedSymbol> = visited
+        .iter()
+        .filter(|(_, (hops, _))| *hops == 0)
+        .filter_map(|(id, (_, heuristic))| {
+            node_by_id
+                .get(id.as_str())
+                .filter(|node| is_symbol(node.kind))
+                .map(|node| symbol(node, 0, *heuristic))
+        })
+        .collect();
 
     let mut impacted: Vec<ImpactedSymbol> = visited
         .iter()
@@ -178,6 +131,73 @@ pub fn compute_impact(
 
     changed.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
     Ok(ChangeImpact { changed, impacted })
+}
+
+/// The shared reverse-dependency walk: seed from nodes whose source span overlaps
+/// a changed span (hop 0), then BFS inward over incoming `Calls`/`Uses` edges up
+/// to `max_depth`. Returns each reached node id mapped to `(hops, via_heuristic)`.
+/// Both [`compute_impact`] and change-aware staleness build on this.
+pub(crate) fn reachable_dependents(
+    store: &GraphStore,
+    nodes: &[GraphNode],
+    spans: &[ChangedSpan],
+    options: ImpactOptions,
+) -> Result<BTreeMap<String, (u32, bool)>, CodeGraphError> {
+    // Reverse dependency map: a changed node's dependents are its callers
+    // (incoming `Calls`) and, for files, its importers (incoming `Uses`).
+    let mut dependents: HashMap<String, Vec<Dependent>> = HashMap::new();
+    for edge in store.active_edges()? {
+        if !matches!(edge.kind, EdgeKind::Calls | EdgeKind::Uses) {
+            continue;
+        }
+        let (GraphEndpoint::Node(from), GraphEndpoint::Node(to)) = (&edge.from, &edge.to) else {
+            continue;
+        };
+        dependents
+            .entry(to.as_str().to_string())
+            .or_default()
+            .push(Dependent {
+                id: from.as_str().to_string(),
+                heuristic: edge.derivation == localmind_core::EdgeDerivation::Heuristic,
+            });
+    }
+
+    let mut visited: BTreeMap<String, (u32, bool)> = BTreeMap::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for node in nodes {
+        if node
+            .location
+            .as_ref()
+            .is_some_and(|location| spans.iter().any(|span| overlaps(location, span)))
+        {
+            visited.insert(node.id.as_str().to_string(), (0, false));
+            queue.push_back(node.id.as_str().to_string());
+        }
+    }
+
+    while let Some(current) = queue.pop_front() {
+        let (hops, current_heuristic) = visited.get(&current).copied().unwrap_or((0, false));
+        if hops >= options.max_depth {
+            continue;
+        }
+        let Some(parents) = dependents.get(&current) else {
+            continue;
+        };
+        for parent in parents {
+            let next_heuristic = current_heuristic || parent.heuristic;
+            let next_hops = hops + 1;
+            if !visited.contains_key(&parent.id) {
+                visited.insert(parent.id.clone(), (next_hops, next_heuristic));
+                queue.push_back(parent.id.clone());
+            }
+        }
+    }
+    Ok(visited)
+}
+
+/// Expose the risk tier for a hop distance to sibling modules (staleness).
+pub(crate) fn risk_for_hop(hops: u32) -> RiskTier {
+    RiskTier::for_hop(hops)
 }
 
 fn symbol(node: &GraphNode, hops: u32, via_heuristic: bool) -> ImpactedSymbol {
