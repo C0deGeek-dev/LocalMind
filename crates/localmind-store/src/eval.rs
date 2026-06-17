@@ -9,18 +9,29 @@
 //! and memory quality.
 
 use crate::{
-    CloseoutProcessor, DeterministicExtractor, MemoryPersistence, ProjectConfig, ReviewQueue,
-    TranscriptImportFormat, TranscriptImporter,
+    CloseoutProcessor, DeterministicExtractor, MemoryPersistence, MemorySearchResult,
+    ProjectConfig, ReviewQueue, SessionExtractor, TranscriptImportFormat, TranscriptImporter,
 };
 use localmind_core::{ReviewAction, ReviewDecision, SessionSource};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
 
+/// A retrieval reranker the eval can apply before measuring recall@k, so the
+/// retrieval lift of the optional rerank stage (subject 01) can be scored
+/// against the keyword baseline. Object-safe and defined here so the store does
+/// not depend on the search crate; a host that has the embedding reranker
+/// injects it, and tests inject a stub.
+pub trait EvalReranker {
+    /// Reorder the search results for `query`. The eval measures recall@k before
+    /// and after to report the retrieval lift.
+    fn rerank(&self, query: &str, results: Vec<MemorySearchResult>) -> Vec<MemorySearchResult>;
+}
+
 /// One retrieval case: a query, and a substring that a top-k memory snippet must
 /// contain for the case to count as answered.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrievalCase {
     pub query: String,
     pub expected_contains: String,
@@ -39,12 +50,45 @@ impl RetrievalCase {
 /// extractor should surface (matched case-insensitively as substrings of a
 /// candidate summary), and the retrieval cases a good index answers after the
 /// candidates are promoted.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvalFixture {
     pub name: String,
     pub transcript: String,
     pub expected_lessons: Vec<String>,
     pub retrieval_cases: Vec<RetrievalCase>,
+}
+
+/// Load golden fixtures from JSON (the on-disk fixture format). The built-in
+/// [`default_fixtures`] are the committed seed set; this lets a host or
+/// LocalBench supply its own fixture file in the same shape.
+///
+/// # Errors
+/// Returns [`EvalError::Fixture`] when the JSON does not match the fixture shape.
+pub fn load_fixtures(json: &str) -> Result<Vec<EvalFixture>, EvalError> {
+    serde_json::from_str(json).map_err(EvalError::Fixture)
+}
+
+/// The difference in mean scores between a candidate report and a baseline —
+/// the lift (positive) or regression (negative) of turning a feature on.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct EvalLift {
+    pub extraction_precision_delta: f32,
+    pub extraction_recall_delta: f32,
+    pub retrieval_recall_at_k_delta: f32,
+}
+
+/// The lift of `candidate` over `baseline`: per-mean deltas. A rerank-on report
+/// vs the keyword baseline gives retrieval lift; a model-extraction report vs
+/// the deterministic baseline gives extraction lift.
+#[must_use]
+pub fn lift(baseline: &EvalReport, candidate: &EvalReport) -> EvalLift {
+    EvalLift {
+        extraction_precision_delta: candidate.mean_extraction_precision
+            - baseline.mean_extraction_precision,
+        extraction_recall_delta: candidate.mean_extraction_recall - baseline.mean_extraction_recall,
+        retrieval_recall_at_k_delta: candidate.mean_retrieval_recall_at_k
+            - baseline.mean_retrieval_recall_at_k,
+    }
 }
 
 /// Scores for one fixture. Precision/recall treat an expected lesson as matched
@@ -89,17 +133,24 @@ pub enum EvalError {
     Review(#[from] crate::ReviewQueueError),
     #[error(transparent)]
     Memory(#[from] crate::MemoryPersistenceError),
+    #[error("failed to parse eval fixtures: {0}")]
+    Fixture(serde_json::Error),
+    #[error(transparent)]
+    Inference(#[from] localmind_inference::InferenceError),
 }
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
-/// Score one fixture in an isolated project directory under `work_root`.
-fn score_fixture(
+/// Score one fixture in an isolated project directory under `work_root`, using
+/// `extractor` for close-out and optionally `reranker` before retrieval scoring.
+fn score_fixture<E: SessionExtractor>(
     fixture: &EvalFixture,
     k: usize,
     work_root: &Path,
+    extractor: &E,
+    reranker: Option<&dyn EvalReranker>,
 ) -> Result<FixtureScore, EvalError> {
     let project = work_root.join(&fixture.name);
     fs::create_dir_all(&project).map_err(|source| EvalError::Workspace {
@@ -122,11 +173,7 @@ fn score_fixture(
         SessionSource::GenericTranscript,
         TranscriptImportFormat::PlainText,
     )?;
-    CloseoutProcessor::closeout_project_session(
-        &project,
-        &import.session_id,
-        &DeterministicExtractor,
-    )?;
+    CloseoutProcessor::closeout_project_session(&project, &import.session_id, extractor)?;
 
     let queue = ReviewQueue::open_project(&project)?;
     let items = queue.list()?;
@@ -187,7 +234,12 @@ fn score_fixture(
 
     let mut retrieval_hits = 0;
     for case in &fixture.retrieval_cases {
-        let results = persistence.search(&case.query)?;
+        let mut results = persistence.search(&case.query)?;
+        // Apply the optional rerank stage before the top-k cut, so its retrieval
+        // lift over the keyword baseline is what recall@k measures.
+        if let Some(reranker) = reranker {
+            results = reranker.rerank(&case.query, results);
+        }
         if results
             .iter()
             .take(k)
@@ -216,16 +268,34 @@ fn score_fixture(
     })
 }
 
-/// Run the evaluation over `fixtures`, scoring each in its own project under
-/// `work_root`. `k` is the retrieval cutoff for recall@k.
+/// Run the evaluation over `fixtures` with the deterministic extractor and no
+/// reranker — the offline baseline. `k` is the retrieval cutoff for recall@k.
 pub fn run_eval(
     fixtures: &[EvalFixture],
     k: usize,
     work_root: &Path,
 ) -> Result<EvalReport, EvalError> {
+    run_eval_with(fixtures, k, work_root, &DeterministicExtractor, None)
+}
+
+/// Run the evaluation with a chosen `extractor` and optional `reranker`, so a
+/// candidate configuration (model extraction on, rerank on) can be scored and
+/// compared to the baseline via [`lift`]. Each fixture is scored in its own
+/// project under `work_root`.
+///
+/// # Errors
+/// Returns [`EvalError`] when a fixture workspace, import, close-out, review, or
+/// retrieval step fails.
+pub fn run_eval_with<E: SessionExtractor>(
+    fixtures: &[EvalFixture],
+    k: usize,
+    work_root: &Path,
+    extractor: &E,
+    reranker: Option<&dyn EvalReranker>,
+) -> Result<EvalReport, EvalError> {
     let mut scores = Vec::with_capacity(fixtures.len());
     for fixture in fixtures {
-        scores.push(score_fixture(fixture, k, work_root)?);
+        scores.push(score_fixture(fixture, k, work_root, extractor, reranker)?);
     }
 
     let mean = |select: fn(&FixtureScore) -> f32| -> f32 {
@@ -242,6 +312,30 @@ pub fn run_eval(
         scores,
     };
     Ok(report)
+}
+
+/// Run the baseline (deterministic) eval and a candidate eval that uses the
+/// configured-inference extractor, and return the baseline report plus the
+/// extraction lift of the model path over it. With no `inference` configured —
+/// or an unreachable endpoint — the model path falls back to deterministic and
+/// the lift is zero: the honest "no measured lift offline" signal that gates
+/// turning model extraction on by default.
+///
+/// # Errors
+/// Returns [`EvalError`] when a fixture run or the inference capability build
+/// fails.
+pub fn run_eval_lift(
+    fixtures: &[EvalFixture],
+    k: usize,
+    work_root: &Path,
+    inference: Option<&localmind_core::InferenceSettings>,
+) -> Result<(EvalReport, EvalLift), EvalError> {
+    let baseline = run_eval(fixtures, k, &work_root.join("baseline"))?;
+    let capability = localmind_inference::InferenceCapability::from_settings(inference)?;
+    let extractor = crate::ModelBackedExtractor::new(&capability);
+    let candidate = run_eval_with(fixtures, k, &work_root.join("candidate"), &extractor, None)?;
+    let lift = lift(&baseline, &candidate);
+    Ok((baseline, lift))
 }
 
 /// The built-in golden fixtures. Original to this repository (no captured
@@ -285,4 +379,116 @@ test result: ok. 19 passed; 0 failed; 0 ignored
             retrieval_cases: Vec::new(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn work_root() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn fixtures_round_trip_through_the_loader() {
+        let fixtures = default_fixtures();
+        let json = serde_json::to_string(&fixtures).unwrap();
+        let loaded = load_fixtures(&json).unwrap();
+        assert_eq!(loaded.len(), fixtures.len());
+        assert_eq!(loaded[0].name, fixtures[0].name);
+        assert_eq!(loaded[0].expected_lessons, fixtures[0].expected_lessons);
+        // A malformed payload is a typed error, not a panic.
+        assert!(load_fixtures("{ not fixtures }").is_err());
+    }
+
+    #[test]
+    fn the_seed_fixtures_score_as_expected() {
+        let work = work_root();
+        let report = run_eval(&default_fixtures(), 5, work.path()).unwrap();
+        // Both seed fixtures are designed to score perfectly: the bugfix fixture
+        // surfaces its two lessons and answers both queries; the dumped-content
+        // fixture correctly produces nothing.
+        assert_eq!(report.mean_extraction_precision, 1.0);
+        assert_eq!(report.mean_extraction_recall, 1.0);
+        assert_eq!(report.mean_retrieval_recall_at_k, 1.0);
+    }
+
+    #[test]
+    fn lift_computes_per_mean_deltas() {
+        let baseline = EvalReport {
+            k: 5,
+            scores: Vec::new(),
+            mean_extraction_precision: 0.6,
+            mean_extraction_recall: 0.5,
+            mean_retrieval_recall_at_k: 0.4,
+        };
+        let candidate = EvalReport {
+            k: 5,
+            scores: Vec::new(),
+            mean_extraction_precision: 0.9,
+            mean_extraction_recall: 0.8,
+            mean_retrieval_recall_at_k: 0.7,
+        };
+        let lift = lift(&baseline, &candidate);
+        assert!((lift.extraction_precision_delta - 0.3).abs() < 1e-6);
+        assert!((lift.extraction_recall_delta - 0.3).abs() < 1e-6);
+        assert!((lift.retrieval_recall_at_k_delta - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_deterministic_baseline_has_zero_lift_against_itself() {
+        let work = work_root();
+        let baseline = run_eval(&default_fixtures(), 5, work.path()).unwrap();
+        let again = run_eval_with(
+            &default_fixtures(),
+            5,
+            work.path(),
+            &DeterministicExtractor,
+            None,
+        )
+        .unwrap();
+        let lift = lift(&baseline, &again);
+        assert_eq!(lift.extraction_precision_delta, 0.0);
+        assert_eq!(lift.extraction_recall_delta, 0.0);
+        assert_eq!(lift.retrieval_recall_at_k_delta, 0.0);
+    }
+
+    /// A reranker that drops every result, proving the rerank hook is wired into
+    /// retrieval scoring: with it, recall@k collapses, so a real reranker's
+    /// retrieval lift is measurable through the same seam.
+    struct DroppingReranker;
+
+    impl EvalReranker for DroppingReranker {
+        fn rerank(
+            &self,
+            _query: &str,
+            _results: Vec<MemorySearchResult>,
+        ) -> Vec<MemorySearchResult> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn the_reranker_hook_changes_retrieval_recall() {
+        let work = work_root();
+        let baseline = run_eval(&default_fixtures(), 5, work.path()).unwrap();
+        assert_eq!(baseline.mean_retrieval_recall_at_k, 1.0);
+
+        let work2 = work_root();
+        let reranked = run_eval_with(
+            &default_fixtures(),
+            5,
+            work2.path(),
+            &DeterministicExtractor,
+            Some(&DroppingReranker),
+        )
+        .unwrap();
+        // The dropping reranker erases every retrieval hit — the hook is in the
+        // scoring path, so a real reranker's lift is measurable here.
+        assert!(reranked.mean_retrieval_recall_at_k < baseline.mean_retrieval_recall_at_k);
+        let lift = lift(&baseline, &reranked);
+        assert!(lift.retrieval_recall_at_k_delta < 0.0);
+    }
 }

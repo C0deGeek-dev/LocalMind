@@ -98,6 +98,12 @@ enum Command {
         /// Emit the report as JSON instead of a text summary.
         #[arg(long)]
         json: bool,
+        /// Also report the lift of the configured-inference extractor over the
+        /// deterministic baseline. Without a configured local model the model
+        /// path falls back to deterministic, so the lift is zero — an honest
+        /// "no measured lift offline" signal that gates default-on extraction.
+        #[arg(long)]
+        with_lift: bool,
     },
 }
 
@@ -552,16 +558,32 @@ fn main() -> Result<()> {
                 );
             }
         },
-        Command::Eval { k, json } => {
+        Command::Eval { k, json, with_lift } => {
             let work_root =
                 std::env::temp_dir().join(format!("localmind-eval-{}", std::process::id()));
             fs::create_dir_all(&work_root)?;
-            let result =
-                localmind_store::run_eval(&localmind_store::default_fixtures(), k, &work_root);
+            let fixtures = localmind_store::default_fixtures();
+            // When --with-lift is set, score the deterministic baseline against
+            // the configured-inference extractor (read from the current project's
+            // config, if any) and report the lift. Offline, the model path falls
+            // back to deterministic and the lift is zero.
+            let outcome = if with_lift {
+                let inference = localmind_store::ProjectConfig::discover(".")
+                    .ok()
+                    .and_then(|config| config.config.inference);
+                localmind_store::run_eval_lift(&fixtures, k, &work_root, inference.as_ref())
+                    .map(|(report, lift)| (report, Some(lift)))
+            } else {
+                localmind_store::run_eval(&fixtures, k, &work_root).map(|report| (report, None))
+            };
             let _ = fs::remove_dir_all(&work_root);
-            let report = result?;
+            let (report, lift) = outcome?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                let mut value = serde_json::to_value(&report)?;
+                if let (Some(lift), Some(object)) = (&lift, value.as_object_mut()) {
+                    object.insert("lift".to_string(), serde_json::to_value(lift)?);
+                }
+                println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!("Memory-quality evaluation (recall@{}):", report.k);
                 for score in &report.scores {
@@ -582,6 +604,16 @@ fn main() -> Result<()> {
                     report.mean_extraction_recall,
                     report.mean_retrieval_recall_at_k
                 );
+                if let Some(lift) = &lift {
+                    println!(
+                        "  {:<22} {:<14} precision={:+.3} recall={:+.3} recall@k={:+.3}",
+                        "LIFT (model)",
+                        "",
+                        lift.extraction_precision_delta,
+                        lift.extraction_recall_delta,
+                        lift.retrieval_recall_at_k_delta
+                    );
+                }
             }
         }
     }

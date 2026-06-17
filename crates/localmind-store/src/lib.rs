@@ -30,7 +30,8 @@ pub use dedup::{
     canonical, canonical_hash, is_near_duplicate, similarity, token_set, NEAR_DUP_THRESHOLD,
 };
 pub use eval::{
-    default_fixtures, run_eval, EvalError, EvalFixture, EvalReport, FixtureScore, RetrievalCase,
+    default_fixtures, lift, load_fixtures, run_eval, run_eval_lift, run_eval_with, EvalError,
+    EvalFixture, EvalLift, EvalReport, EvalReranker, FixtureScore, RetrievalCase,
 };
 pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
