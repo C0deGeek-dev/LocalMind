@@ -92,7 +92,7 @@ fn supersede_retires_the_target_records_the_link_and_audits_it() {
             evidence: Vec::new(),
         })
         .unwrap();
-    // 03.1: the decision is accepted and carries the supersede target.
+    // The decision is accepted and carries the supersede target.
     assert_eq!(decided.state, localmind_core::ReviewState::Accepted);
     assert_eq!(
         decided.supersede_target.as_ref().map(MemoryEntryId::as_str),
@@ -104,7 +104,7 @@ fn supersede_retires_the_target_records_the_link_and_audits_it() {
         .promote_review_item(&ReviewItemId::new("m2"))
         .unwrap();
 
-    // 03.2: the new memory records the link; the target leaves the active set.
+    // The new memory records the link; the target leaves the active set.
     assert_eq!(new_entry.supersedes, vec![MemoryEntryId::new("m1")]);
     assert!(
         !persistence
@@ -115,12 +115,12 @@ fn supersede_retires_the_target_records_the_link_and_audits_it() {
         "the superseded memory must drop out of the active set"
     );
 
-    // 03.4: retrieval returns only the replacement, never the retired memory.
+    // Retrieval returns only the replacement, never the retired memory.
     let hits = persistence.search("tabs").unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].memory_id.as_str(), "m2");
 
-    // 03.3: a MemorySuperseded audit row links both memories and the reviewer.
+    // A MemorySuperseded audit row links both memories and the reviewer.
     let audit = persistence
         .audit_records()
         .unwrap()
