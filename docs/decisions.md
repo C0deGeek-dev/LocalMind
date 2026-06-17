@@ -4,6 +4,33 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0013 — LocalMind skills stay advisory/read-only under the host's skill model
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+The host (LocalPilot) names a stack-wide skill model on two axes — **invocation**
+(who reaches an artifact: user-only or discoverable) and **authority** (what reaching
+it does: advisory or enforced) — with two artifact types: enforced harness rules and
+advisory skills. Model discovery is pull-based (an on-demand skill search, not skill
+descriptions pushed into every turn). The single source of truth for that model is the
+host ADR (LocalPilot `docs/10-decisions.md`, ADR-0027); this record is the engine-side
+pointer, not a copy.
+
+The engine's commitment under that model is unchanged and reaffirmed: a LocalMind
+**skill is advisory and read-only** — a reviewable prompt module distilled from
+accepted memory, emitted disabled, carrying provenance, and surfaced to a host only as
+content to read. The engine **never** executes, enables, disables, or auto-fires a
+skill; enabling/retiring is a host-driven, human, review-gated step. Model-invocation
+of an advisory skill (when the host opts in) changes only *who may reach* the content,
+never the engine's no-side-effect guarantee. This is consistent with D-LM-0004
+(distillation/research are review-routed) and the review-gating in D-LM-0008/0011.
+
+Reason: the host owns invocation policy and the command surface; the engine owns
+*advisory, review-gated* skill emission. Recording the boundary as a pointer keeps one
+authoritative definition (the host ADR) while making the engine's standing obligation
+explicit where engine contributors read decisions.
+
 ## D-LM-0012 — Memory trust is legible: epistemic status + contradiction flags at retrieval
 
 - **Date**: 2026-06-17
