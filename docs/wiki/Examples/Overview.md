@@ -1,8 +1,50 @@
 # Examples
 
-Runnable, copy-pasteable samples that match shipped behaviour at the current
-`VERSION`. Each example states what it does and what to expect.
+Copy-pasteable samples that match shipped behaviour at the current `VERSION`.
 
 > **Do not edit on github.com.** This wiki is generated from in-repo Markdown
 > under `docs/wiki/` and synced one-way on every push to `main`. Edit the source
 > in `docs/wiki/`; web edits are overwritten on the next sync.
+
+## Opt in, then run the loop end to end
+
+```powershell
+# 1. enable the project (writes .localmind.toml)
+@'
+[learning]
+enabled = true
+local_only = true
+memory_root = ".localmind/memory"
+allowed_scopes = ["project"]
+excluded_paths = ["target/**", ".git/**"]
+'@ | Set-Content .localmind.toml
+
+# 2. import a transcript and close it out
+localmind import .\session.txt --project . --source localpilot
+localmind closeout session-1234 --project .
+
+# 3. review, accept, promote
+localmind review list --project .
+localmind review accept lesson-1234 --project . --reviewer david
+localmind promote lesson-1234 --project .
+
+# 4. search and audit
+localmind search "release checklist" --project .
+localmind audit --project .
+```
+
+Expect: a redacted session folder under `.localmind/sessions/`, candidate
+lessons in the review queue, a promoted Markdown memory file under
+`.localmind/memory/project/`, and an audit row in `.localmind/localmind.sqlite`.
+
+## Render context for a host agent
+
+```powershell
+localmind context export "deterministic fixtures" --target open-ai-codex --project .
+```
+
+Renders accepted memory (plus disabled skill suggestions) as concise agent
+context for the chosen target.
+
+See the on-disk contract for the exact file shapes:
+[on-disk-contract.md](https://github.com/C0deGeek-dev/LocalMind/blob/main/docs/on-disk-contract.md).
