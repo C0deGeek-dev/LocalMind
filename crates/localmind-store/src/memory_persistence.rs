@@ -103,6 +103,11 @@ impl MemoryPersistence {
             .replacement_summary
             .clone()
             .unwrap_or_else(|| item.candidate.summary().to_string());
+        // A supersede decision retires its target: the new memory records the
+        // target in `supersedes`, and the same transaction flips the target to
+        // `Superseded` so retrieval (filtered to `status = 'active'`) stops
+        // serving it.
+        let target = item.supersede_target.clone();
         let entry = MemoryEntry {
             id: MemoryEntryId::new(item.candidate.id.as_str()),
             scope: MemoryScope::Project,
@@ -116,7 +121,7 @@ impl MemoryPersistence {
             related_entities: item.candidate.related_entities.clone(),
             created_at: Some(OffsetDateTime::now_utc()),
             updated_at: None,
-            supersedes: Vec::new(),
+            supersedes: target.iter().cloned().collect(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
         };
@@ -130,6 +135,19 @@ impl MemoryPersistence {
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::index_memory_with(&tx, &entry, &path)?;
+        if let Some(target) = &target {
+            Self::supersede_memory_with(&tx, target)?;
+            Self::write_audit_with(
+                &tx,
+                AuditEventKind::MemorySuperseded,
+                item.reviewer.as_deref().unwrap_or("unknown"),
+                target.as_str(),
+                &serde_json::json!({
+                    "superseded_by": entry.id.to_string(),
+                    "review_item": item.id.to_string(),
+                }),
+            )?;
+        }
         Self::write_audit_with(
             &tx,
             AuditEventKind::MemoryPromoted,
@@ -143,6 +161,24 @@ impl MemoryPersistence {
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         self.embed_memory_if_configured(&entry)?;
         Ok(entry)
+    }
+
+    /// Flips a memory's index status to `Superseded` so retrieval (which filters
+    /// to `status = 'active'`) stops returning it. The Markdown body and the
+    /// index row are kept — supersession is reversible and provenance survives.
+    fn supersede_memory_with(
+        connection: &Connection,
+        target: &MemoryEntryId,
+    ) -> Result<(), MemoryPersistenceError> {
+        // Lowercase to match the `'active'` literal the index is written with and
+        // the `status = 'active'` retrieval filter.
+        connection
+            .execute(
+                "UPDATE memory_index SET status = 'superseded' WHERE memory_id = ?1",
+                params![target.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(())
     }
 
     /// Persists an accepted memory entry: the Markdown file plus its search

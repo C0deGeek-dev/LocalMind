@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 3;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 4;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -45,6 +45,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 3 {
         apply_v3(&tx)?;
+    }
+    if current < 4 {
+        apply_v4(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -172,6 +175,15 @@ fn apply_v3(connection: &Connection) -> Result<(), SchemaError> {
                 ON review_items(canonical_hash);
             "#,
         )
+        .map_err(SchemaError::Sqlite)
+}
+
+/// Supersede support: the memory a `Supersede` decision retires, carried from the
+/// decision to promotion. Nullable so every other decision and every pre-existing
+/// row upgrades cleanly.
+fn apply_v4(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch("ALTER TABLE review_items ADD COLUMN supersede_target TEXT;")
         .map_err(SchemaError::Sqlite)
 }
 

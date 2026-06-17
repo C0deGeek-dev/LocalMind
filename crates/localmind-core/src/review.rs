@@ -1,4 +1,4 @@
-use crate::{CandidateLesson, EvidenceRef, ReviewItemId};
+use crate::{CandidateLesson, EvidenceRef, MemoryEntryId, ReviewItemId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -40,4 +40,9 @@ pub enum ReviewAction {
     MarkTemporary,
     ConvertToSkill,
     IgnoreSimilar,
+    /// Accept this candidate as the replacement for an existing memory and retire
+    /// that target. The reviewer (or a trusted/automatic mode with a clear
+    /// conflict target) selects which memory to supersede; promotion records the
+    /// new memory's `supersedes`, flips the target to `Superseded`, and audits it.
+    Supersede(MemoryEntryId),
 }

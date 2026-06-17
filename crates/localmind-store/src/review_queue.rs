@@ -1,6 +1,7 @@
 use crate::{ProjectConfig, StoreConfigError};
 use localmind_core::{
-    CandidateLesson, ReviewAction, ReviewDecision, ReviewItemId, ReviewState, SessionId,
+    CandidateLesson, MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, ReviewState,
+    SessionId,
 };
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use std::fs;
@@ -26,6 +27,9 @@ pub struct ReviewQueueItem {
     /// been proposed. Starts at 1; dedup at enqueue bumps the survivor instead of
     /// inserting a new row.
     pub seen_count: i64,
+    /// The memory a `Supersede` decision retires, carried from the decision to
+    /// promotion. `None` for every other decision.
+    pub supersede_target: Option<MemoryEntryId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,7 +225,7 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count
+                       seen_count, supersede_target
                 FROM review_items
                 ORDER BY created_at, id
                 "#,
@@ -243,7 +247,7 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count
+                       seen_count, supersede_target
                 FROM review_items
                 WHERE id = ?1
                 "#,
@@ -290,6 +294,10 @@ impl ReviewQueue {
                 item_id: decision.item_id,
             });
         }
+        let supersede_target = match &decision.action {
+            ReviewAction::Supersede(target) => Some(target.as_str().to_string()),
+            _ => None,
+        };
 
         let changed = self
             .connection
@@ -301,7 +309,8 @@ impl ReviewQueue {
                     reviewer = ?4,
                     note = ?5,
                     replacement_summary = ?6,
-                    updated_at = ?7
+                    updated_at = ?7,
+                    supersede_target = ?8
                 WHERE id = ?1
                 "#,
                 params![
@@ -311,7 +320,8 @@ impl ReviewQueue {
                     decision.reviewer,
                     decision.note,
                     decision.replacement_summary,
-                    now_string()
+                    now_string(),
+                    supersede_target,
                 ],
             )
             .map_err(ReviewQueueError::Sqlite)?;
@@ -375,6 +385,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewQueueItem> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         seen_count: row.get(10)?,
+        supersede_target: row.get::<_, Option<String>>(11)?.map(MemoryEntryId::new),
     })
 }
 
@@ -398,7 +409,9 @@ fn find_duplicate(pending: &[DedupKey], hash: &str, summary: &str) -> Option<Str
 
 fn state_for_action(action: &ReviewAction) -> ReviewState {
     match action {
-        ReviewAction::Accept | ReviewAction::ConvertToSkill => ReviewState::Accepted,
+        ReviewAction::Accept | ReviewAction::ConvertToSkill | ReviewAction::Supersede(_) => {
+            ReviewState::Accepted
+        }
         ReviewAction::Reject | ReviewAction::IgnoreSimilar => ReviewState::Rejected,
         ReviewAction::Edit => ReviewState::Edited,
         ReviewAction::MergeInto(_) => ReviewState::Merged,
@@ -437,6 +450,7 @@ fn action_name(action: &ReviewAction) -> &'static str {
         ReviewAction::MarkTemporary => "defer",
         ReviewAction::ConvertToSkill => "convert_to_skill",
         ReviewAction::IgnoreSimilar => "ignore_similar",
+        ReviewAction::Supersede(_) => "supersede",
     }
 }
 

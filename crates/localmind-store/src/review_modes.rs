@@ -2,7 +2,9 @@ use crate::{
     MemoryPersistence, MemoryPersistenceError, ProjectConfig, ReviewModeConfig, ReviewQueue,
     ReviewQueueError,
 };
-use localmind_core::{AuditEventKind, Confidence, ReviewAction, ReviewAnnotation, ReviewDecision};
+use localmind_core::{
+    AuditEventKind, Confidence, ReviewAction, ReviewAnnotation, ReviewDecision, ReviewItemId,
+};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -120,6 +122,12 @@ impl ReviewModeProcessor {
                 .as_ref()
                 .filter(|(_, sim)| *sim >= CONFLICT_TOPIC_OVERLAP)
                 .map(|(hit, _)| hit.snippet.as_str());
+            // The memory a contradicting candidate would supersede: the same
+            // topically-related hit, identified for an automated supersede.
+            let related_target = best
+                .as_ref()
+                .filter(|(_, sim)| *sim >= CONFLICT_TOPIC_OVERLAP)
+                .map(|(hit, _)| hit.memory_id.clone());
             let conflict = is_contradiction(summary, related);
             item.candidate.review_annotation = Some(ReviewAnnotation {
                 score: Confidence::new(confidence)?,
@@ -143,21 +151,37 @@ impl ReviewModeProcessor {
                 }
                 ReviewModeConfig::Trusted => {
                     queue.replace_candidate(&item.id, &item.candidate)?;
-                    if !conflict
-                        && duplicate.is_none()
-                        && confidence >= config.config.review.trusted_threshold
-                    {
-                        let decided = queue.decide(ReviewDecision {
-                            item_id: item.id.clone(),
-                            action: ReviewAction::Accept,
-                            reviewer: "localmind-trusted".to_string(),
-                            decided_at: None,
-                            note: Some("trusted mode auto-accepted above threshold".to_string()),
-                            replacement_summary: None,
-                            evidence: Vec::new(),
-                        })?;
-                        persistence.record_review_item_audit(&decided)?;
-                        persistence.write_mode_audit("trusted", item.id.as_str(), true)?;
+                    let above_threshold = confidence >= config.config.review.trusted_threshold;
+                    // A contradiction with a clear target retires that memory; a
+                    // clean novel candidate is accepted; everything else (a
+                    // conflict with no clear target, a duplicate, low confidence)
+                    // stays human-gated.
+                    let decided = if above_threshold {
+                        match (conflict, related_target.clone()) {
+                            (true, Some(target)) => auto_decide(
+                                &queue,
+                                &persistence,
+                                &item.id,
+                                ReviewAction::Supersede(target),
+                                "localmind-trusted",
+                                "trusted mode auto-superseded a contradicted memory",
+                                "trusted",
+                            )?,
+                            (false, _) if duplicate.is_none() => auto_decide(
+                                &queue,
+                                &persistence,
+                                &item.id,
+                                ReviewAction::Accept,
+                                "localmind-trusted",
+                                "trusted mode auto-accepted above threshold",
+                                "trusted",
+                            )?,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+                    if decided {
                         report.accepted += 1;
                     } else {
                         persistence.write_mode_audit("trusted", item.id.as_str(), false)?;
@@ -166,18 +190,32 @@ impl ReviewModeProcessor {
                 }
                 ReviewModeConfig::Automatic => {
                     queue.replace_candidate(&item.id, &item.candidate)?;
-                    if !conflict && duplicate.is_none() {
-                        let decided = queue.decide(ReviewDecision {
-                            item_id: item.id.clone(),
-                            action: ReviewAction::Accept,
-                            reviewer: "localmind-automatic".to_string(),
-                            decided_at: None,
-                            note: Some("automatic mode auto-accepted".to_string()),
-                            replacement_summary: None,
-                            evidence: Vec::new(),
-                        })?;
-                        persistence.record_review_item_audit(&decided)?;
-                        persistence.write_mode_audit("automatic", item.id.as_str(), true)?;
+                    // Auto-retiring a human's prior memory is gated on the same
+                    // confidence threshold as trusted mode (risk control); a clean
+                    // novel candidate auto-accepts as before.
+                    let above_threshold = confidence >= config.config.review.trusted_threshold;
+                    let decided = match (conflict, related_target.clone()) {
+                        (true, Some(target)) if above_threshold => auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::Supersede(target),
+                            "localmind-automatic",
+                            "automatic mode auto-superseded a contradicted memory",
+                            "automatic",
+                        )?,
+                        (false, _) if duplicate.is_none() => auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::Accept,
+                            "localmind-automatic",
+                            "automatic mode auto-accepted",
+                            "automatic",
+                        )?,
+                        _ => false,
+                    };
+                    if decided {
                         report.accepted += 1;
                     } else {
                         persistence.write_mode_audit("automatic", item.id.as_str(), false)?;
@@ -189,6 +227,31 @@ impl ReviewModeProcessor {
 
         Ok(report)
     }
+}
+
+/// Record an automated decision (accept or supersede), its review audit, and the
+/// mode audit marking it auto-decided. Returns `true` so callers can tally it.
+fn auto_decide(
+    queue: &ReviewQueue,
+    persistence: &MemoryPersistence,
+    item_id: &ReviewItemId,
+    action: ReviewAction,
+    reviewer: &str,
+    note: &str,
+    mode: &str,
+) -> Result<bool, ReviewModeError> {
+    let decided = queue.decide(ReviewDecision {
+        item_id: item_id.clone(),
+        action,
+        reviewer: reviewer.to_string(),
+        decided_at: None,
+        note: Some(note.to_string()),
+        replacement_summary: None,
+        evidence: Vec::new(),
+    })?;
+    persistence.record_review_item_audit(&decided)?;
+    persistence.write_mode_audit(mode, item_id.as_str(), true)?;
+    Ok(true)
 }
 
 trait ReviewModeAudit {
@@ -237,9 +300,30 @@ mod tests {
         CloseoutProcessor, DeterministicExtractor, TranscriptImportFormat, TranscriptImporter,
     };
     use localmind_core::{
-        CandidateLesson, EvidenceKind, EvidenceRef, LessonCategory, LessonId, ReviewState,
-        SessionSource, SuggestedAction,
+        CandidateLesson, EvidenceKind, EvidenceRef, LessonCategory, LessonId, MemoryEntry,
+        MemoryEntryId, MemoryScope, MemoryStatus, ReviewState, SessionId, SessionSource,
+        SuggestedAction,
     };
+
+    fn seed_memory(id: &str, body: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: MemoryEntryId::new(id),
+            scope: MemoryScope::Project,
+            body: body.to_string(),
+            category: LessonCategory::ProjectConvention,
+            confidence: Confidence::new(0.9).unwrap(),
+            source_session: Some(SessionId::new("seed")),
+            evidence: vec![EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted()],
+            tags: vec!["accepted".to_string()],
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+        }
+    }
 
     #[test]
     fn similarity_flags_restatements_not_single_keyword_overlap() {
@@ -372,6 +456,98 @@ mod tests {
             novel_item.state,
             ReviewState::Accepted,
             "a novel candidate should auto-accept under automatic mode"
+        );
+    }
+
+    #[test]
+    fn automatic_mode_supersedes_a_contradiction_with_a_clear_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\n",
+        )
+        .unwrap();
+
+        // An accepted memory the contradiction should retire.
+        let persistence = MemoryPersistence::open_project(root).unwrap();
+        persistence
+            .persist_memory_entry(&seed_memory(
+                "mem-tabs",
+                "use tabs for indentation in this project",
+            ))
+            .unwrap();
+
+        let queue = ReviewQueue::open_project(root).unwrap();
+        let contradiction = candidate("do not use tabs for indentation; use spaces instead");
+        let novel = candidate("prefer ripgrep over grep when searching the codebase");
+        queue
+            .enqueue_candidates(
+                &SessionId::new("session"),
+                &[contradiction.clone(), novel.clone()],
+            )
+            .unwrap();
+
+        ReviewModeProcessor::apply_project(root).unwrap();
+
+        let items = queue.list().unwrap();
+        let find = |summary: &str| {
+            items
+                .iter()
+                .find(|item| item.candidate.summary() == summary)
+                .unwrap_or_else(|| panic!("missing item {summary}"))
+        };
+        // The contradiction is auto-decided as a supersede of the seeded memory.
+        let superseding = find(contradiction.summary());
+        assert_eq!(superseding.state, ReviewState::Accepted);
+        assert_eq!(superseding.reviewer_action.as_deref(), Some("supersede"));
+        assert_eq!(
+            superseding
+                .supersede_target
+                .as_ref()
+                .map(MemoryEntryId::as_str),
+            Some("mem-tabs")
+        );
+        // A clean novel candidate still plain-accepts (no target).
+        let novel_item = find(novel.summary());
+        assert_eq!(novel_item.state, ReviewState::Accepted);
+        assert_eq!(novel_item.reviewer_action.as_deref(), Some("accept"));
+    }
+
+    #[test]
+    fn manual_mode_leaves_a_contradiction_for_a_human_to_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\n\n[review]\nmode = \"manual\"\n",
+        )
+        .unwrap();
+        let persistence = MemoryPersistence::open_project(root).unwrap();
+        persistence
+            .persist_memory_entry(&seed_memory(
+                "mem-tabs",
+                "use tabs for indentation in this project",
+            ))
+            .unwrap();
+        let queue = ReviewQueue::open_project(root).unwrap();
+        let contradiction = candidate("do not use tabs for indentation; use spaces instead");
+        queue
+            .enqueue_candidates(&SessionId::new("session"), &[contradiction.clone()])
+            .unwrap();
+
+        ReviewModeProcessor::apply_project(root).unwrap();
+
+        let item = queue
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.candidate.summary() == contradiction.summary())
+            .unwrap();
+        assert_eq!(
+            item.state,
+            ReviewState::Pending,
+            "manual mode leaves the supersede target choice to a human"
         );
     }
 }

@@ -4,6 +4,40 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0008 — Supersede is a reviewer-targeted decision that retires the prior memory
+
+- **Date**: 2026-06-17
+- **Status**: accepted
+
+A review decision can now retire prior accepted guidance.
+`ReviewAction::Supersede(target)` carries the memory id the reviewer — or a
+trusted/automatic mode with a clear conflict target above the trusted threshold —
+chooses to replace. The target is persisted on the review item (schema v4,
+`supersede_target`) and applied at promotion: the new memory records
+`supersedes = [target]`, the target's index status flips to `Superseded` in the
+same transaction, and a `MemorySuperseded` audit row links both memories and the
+reviewer. Retrieval already filters to `status = 'active'`, so the retired memory
+stops being served while its Markdown body and index row are kept — supersession
+is reversible and provenance survives (mirroring the code-graph supersede).
+
+Superseded vs Stale, supersede vs contradict:
+
+- **Superseded** is used only when there is a clear replacement — a new memory
+  takes the old one's place. That is the wired path (`supersedes` + status
+  `Superseded`).
+- **Stale** stays in the model for a memory that is no longer valid but has no
+  replacement (a contradiction with no clear successor). It is *not* auto-applied
+  here: a contradiction without a clear target stays human-gated (manual/assisted
+  modes, or trusted/automatic when no related memory clears the topic-overlap
+  threshold), so a human decides whether to retire it and what replaces it.
+- `contradicts` remains a descriptive annotation the extractor sets on a
+  candidate; promotion does not auto-write `MemoryEntry.contradicts`. Only a
+  chosen replacement (`supersedes`) justifies removing guidance from retrieval.
+
+Auto-supersede is gated on the trusted threshold in **both** trusted and
+automatic modes — a higher bar than a plain auto-accept — because retiring a
+human's prior memory is higher-risk than adding a new one.
+
 ## D-LM-0007 — Review candidates are deduplicated at enqueue with a layered ladder
 
 - **Date**: 2026-06-17

@@ -32,6 +32,7 @@ pub fn decision_closes_item(action: &ReviewAction) -> bool {
             | ReviewAction::Edit
             | ReviewAction::MergeInto(_)
             | ReviewAction::ConvertToSkill
+            | ReviewAction::Supersede(_)
     )
 }
 
@@ -43,6 +44,7 @@ pub fn state_after_decision(decision: &ReviewDecision) -> ReviewState {
         ReviewAction::MergeInto(_) => ReviewState::Merged,
         ReviewAction::MarkTemporary => ReviewState::Deferred,
         ReviewAction::ConvertToSkill => ReviewState::Accepted,
+        ReviewAction::Supersede(_) => ReviewState::Accepted,
     }
 }
 

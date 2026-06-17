@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use localmind_core::SkillDraftId;
 use localmind_core::{
-    ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionOutcome, SessionRecord,
-    SessionSource,
+    MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionOutcome,
+    SessionRecord, SessionSource,
 };
 use localmind_store::{
     CloseoutProcessor, ContextExportTarget, ContextExporter, MemoryPersistence, ReviewQueue,
@@ -126,6 +126,21 @@ enum ReviewCommand {
     Edit {
         item_id: String,
         replacement: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Accept one item as the replacement for an existing memory, retiring it.
+    Supersede {
+        item_id: String,
+        /// The memory id this candidate replaces (flipped to superseded on promote).
+        target: String,
         /// Project root containing .localmind.toml.
         #[arg(long, default_value = ".")]
         project: PathBuf,
@@ -382,6 +397,30 @@ fn main() -> Result<()> {
                 })?;
                 persistence.record_review_item_audit(&item)?;
                 println!("{} -> {:?}", item.id, item.state);
+            }
+            ReviewCommand::Supersede {
+                item_id,
+                target,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let item = queue.decide(ReviewDecision {
+                    item_id: ReviewItemId::new(item_id),
+                    action: ReviewAction::Supersede(MemoryEntryId::new(target)),
+                    reviewer,
+                    decided_at: None,
+                    note,
+                    replacement_summary: None,
+                    evidence: Vec::new(),
+                })?;
+                persistence.record_review_item_audit(&item)?;
+                println!(
+                    "{} -> {:?} (promote to retire the target)",
+                    item.id, item.state
+                );
             }
         },
         Command::Promote { item_id, project } => {
