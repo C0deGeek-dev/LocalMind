@@ -48,6 +48,12 @@ pub struct ReviewConfig {
     pub mode: ReviewModeConfig,
     #[serde(default = "default_trusted_threshold")]
     pub trusted_threshold: f32,
+    /// Opt in to embedding-based dedup on top of the deterministic lexical rung.
+    /// Only takes effect when an inference embedding endpoint is also configured;
+    /// otherwise the queue degrades to the lexical contract (see
+    /// [`ProjectConfig::semantic_dedup_active`]).
+    #[serde(default)]
+    pub semantic_dedup: bool,
 }
 
 impl Default for ReviewConfig {
@@ -55,6 +61,7 @@ impl Default for ReviewConfig {
         Self {
             mode: ReviewModeConfig::Manual,
             trusted_threshold: default_trusted_threshold(),
+            semantic_dedup: false,
         }
     }
 }
@@ -197,6 +204,21 @@ impl ProjectConfig {
     pub fn allows_scope(&self, scope: &MemoryScope) -> bool {
         self.config.learning.allowed_scopes.contains(scope)
     }
+
+    /// Whether embedding-based review-queue dedup should run: the opt-in flag is
+    /// set **and** an inference embedding endpoint is configured. When this is
+    /// false the queue uses the deterministic lexical contract alone — the
+    /// fallback that always holds when no endpoint is present.
+    #[must_use]
+    pub fn semantic_dedup_active(&self) -> bool {
+        self.config.review.semantic_dedup
+            && self
+                .config
+                .inference
+                .as_ref()
+                .and_then(|inference| inference.embedding_base_url())
+                .is_some()
+    }
 }
 
 fn validate_inference_endpoint(
@@ -252,4 +274,42 @@ pub enum StoreConfigError {
     InvalidInferenceTimeout { path: PathBuf },
     #[error("review trusted_threshold must be between 0.0 and 1.0 in {path:?}, got {value}")]
     InvalidReviewThreshold { path: PathBuf, value: f32 },
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn discover(toml: &str) -> ProjectConfig {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CONFIG_FILE_NAME), toml).unwrap();
+        ProjectConfig::discover(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn semantic_dedup_is_off_without_the_flag_and_endpoint() {
+        // Default: no flag, no endpoint → lexical only.
+        let plain = discover("[learning]\nenabled = true\n");
+        assert!(!plain.semantic_dedup_active());
+
+        // Flag on but no embedding endpoint → still lexical (the fallback holds).
+        let flag_only = discover("[learning]\nenabled = true\n\n[review]\nsemantic_dedup = true\n");
+        assert!(!flag_only.semantic_dedup_active());
+
+        // Endpoint configured but flag off → opt-in, so still lexical.
+        let endpoint_only = discover(
+            "[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"http://127.0.0.1:1\"\n",
+        );
+        assert!(!endpoint_only.semantic_dedup_active());
+    }
+
+    #[test]
+    fn semantic_dedup_activates_only_with_both_flag_and_endpoint() {
+        let active = discover(
+            "[learning]\nenabled = true\n\n[review]\nsemantic_dedup = true\n\n[inference]\nembedding_base_url = \"http://127.0.0.1:1\"\n",
+        );
+        assert!(active.semantic_dedup_active());
+    }
 }

@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 2;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 3;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -42,6 +42,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 2 {
         apply_v2(&tx)?;
+    }
+    if current < 3 {
+        apply_v3(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -150,6 +153,23 @@ fn apply_v2(connection: &Connection) -> Result<(), SchemaError> {
                 created_at TEXT NOT NULL,
                 updated_at TEXT
             );
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
+/// Review-queue dedup support: a normalized-canonical hash to collapse trivial
+/// variants and a `seen_count` so a repeated proposal bumps the survivor instead
+/// of stacking a new row. Both default so pre-existing rows upgrade cleanly.
+fn apply_v3(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE review_items ADD COLUMN canonical_hash TEXT;
+            ALTER TABLE review_items ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 1;
+
+            CREATE INDEX IF NOT EXISTS idx_review_items_canonical
+                ON review_items(canonical_hash);
             "#,
         )
         .map_err(SchemaError::Sqlite)

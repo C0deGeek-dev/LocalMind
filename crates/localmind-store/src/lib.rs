@@ -6,6 +6,7 @@
 
 mod config;
 mod context_export;
+mod dedup;
 mod eval;
 mod extraction;
 mod graph_store;
@@ -25,6 +26,9 @@ pub use config::{
     StoreConfigError,
 };
 pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
+pub use dedup::{
+    canonical, canonical_hash, is_near_duplicate, similarity, token_set, NEAR_DUP_THRESHOLD,
+};
 pub use eval::{
     default_fixtures, run_eval, EvalError, EvalFixture, EvalReport, FixtureScore, RetrievalCase,
 };
