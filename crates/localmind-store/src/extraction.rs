@@ -1045,7 +1045,7 @@ mod tests {
             "use thiserror::Error;",
             "## 13. Possible Architecture",
             "> Do not make tests pass by weakening them",
-            "- LocalHub/plans/localmind/archive/LocalMind-Plan.md:161: still open",
+            "- docs/notes/architecture-review.md:161: still open",
             "structured signals from the **event log** of failed tools and recovery",
         ] {
             assert!(

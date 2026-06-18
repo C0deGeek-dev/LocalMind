@@ -1,8 +1,8 @@
 //! Storage boundary for LocalMind.
 //!
 //! The MVP keeps durable memory Markdown-first and uses SQLite for queue, audit,
-//! and index state. This crate will own that persistence behavior; subject 01
-//! only establishes the dependency direction.
+//! and index state. This crate owns that persistence behavior and establishes
+//! the host → engine dependency direction.
 
 mod config;
 mod context_export;
