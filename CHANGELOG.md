@@ -3,6 +3,16 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
+## 2026-06-18 - Memory quality
+
+- Added a third golden extraction fixture (`lock-order-deadlock`) to
+  `default_fixtures`, broadening the gated eval beyond the exporter case while
+  keeping mean precision/recall at 1.0.
+- Corrected the `vision.md` status table: lesson-extraction quality **is** gated
+  by the golden eval (`golden_eval_meets_quality_threshold`, mean precision/recall
+  ≥ 0.9 with a negative no-false-positive fixture) and the extraction acceptance
+  bar — the previous "not yet measured" line was stale.
+
 ## 2026-06-17 - Documentation
 
 - Added an in-repo wiki source (`docs/wiki/`) that is one-way CI-synced to the

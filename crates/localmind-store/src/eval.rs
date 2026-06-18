@@ -378,6 +378,24 @@ test result: ok. 19 passed; 0 failed; 0 ignored
             expected_lessons: Vec::new(),
             retrieval_cases: Vec::new(),
         },
+        EvalFixture {
+            name: "lock-order-deadlock".to_string(),
+            transcript: "\
+user: the auth cache test is flaky - it passes alone but hangs in the full suite
+assistant: error: deadlock detected: two tasks lock the session map in opposite order in auth/src/cache.rs
+assistant: Fixed: acquire the user lock before the session lock everywhere; the flake is gone.
+user: Lesson: always acquire locks in a consistent global order to avoid deadlocks.
+"
+            .to_string(),
+            expected_lessons: vec![
+                "consistent global order".to_string(),
+                "deadlock detected".to_string(),
+            ],
+            retrieval_cases: vec![
+                RetrievalCase::new("lock ordering deadlock", "consistent global order"),
+                RetrievalCase::new("auth cache session map deadlock", "deadlock detected"),
+            ],
+        },
     ]
 }
 
