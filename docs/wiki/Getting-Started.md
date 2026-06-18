@@ -52,7 +52,7 @@ accept and promote it.
 
 ## Next steps
 
-- [[How-To/Overview|How-To guides]] — import, review, promote, export context, skills.
-- [[Examples/Overview|Examples]] — a full opt-in → memory walkthrough.
+- [[How-To|How-To guides]] — import, review, promote, export context, skills.
+- [[Examples]] — a full opt-in → memory walkthrough.
 - [[Reference]] — the on-disk contract and the rest of the in-repo docs.
 - [[Troubleshooting]] — common problems and fixes.

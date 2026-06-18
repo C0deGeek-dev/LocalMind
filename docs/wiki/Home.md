@@ -9,8 +9,8 @@ Local-first learning engine: reviewed project memory and graph-connected knowled
 ## Start here
 
 - **[[Getting-Started]]** — install and first run.
-- **[[How-To/Overview|How-To guides]]** — task-oriented recipes.
-- **[[Examples/Overview|Examples]]** — runnable, copy-pasteable samples.
+- **[[How-To|How-To guides]]** — task-oriented recipes.
+- **[[Examples]]** — runnable, copy-pasteable samples.
 - **[[Reference]]** — index into the in-repo `docs/`.
 - **[[Troubleshooting]]** — common problems and fixes.
 
