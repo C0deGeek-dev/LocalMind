@@ -4,6 +4,39 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0014 — Loop-outcome lessons reuse the review-gated memory path; rejected outcomes are negative signals
+
+- **Date**: 2026-06-19
+- **Status**: accepted
+
+The host (LocalPilot) grows a human-gated developer-process self-improvement loop
+(its ADR-0034 is the single source of truth for the loop and its invariant). When
+a human approves or rejects a proposed patch, the outcome is written back as a
+durable LocalMind lesson so the next run retrieves it and stops repeating a
+mistake. This record fixes the engine-side commitment for that writeback; it is a
+pointer to the host ADR, not a second loop definition.
+
+The engine's commitment under that loop:
+
+- **Loop-outcome lessons enter through the existing review-gated path, not a new
+  store.** An approve/reject outcome becomes a candidate lesson carrying
+  `{ trigger, what, why, applies_to, outcome, provenance_ref }` over the existing
+  lesson/memory schema; promotion to accepted memory stays a human, review-gated
+  step (D-LM-0008/0011). No new durable store, no host-local memory implementation.
+- **A rejected outcome is a first-class negative signal**, not absence of a
+  lesson: it records *what was proposed and why it was rejected* so retrieval can
+  steer the next run away from it. This is the durable-memory realization of a
+  debt-ledger → negative-memory feed.
+- **Lessons carry provenance and outcome, and a bad lesson is curated, never
+  silently trusted** — the supersede/curation path (D-LM-0011) guards against
+  lesson-store pollution exactly as it does for any other accepted memory.
+
+Reason: the loop's learning arc is valuable only if it is durable and trustworthy;
+reusing the review-gated memory path means loop lessons inherit the same
+provenance, epistemic-status (D-LM-0012), and curation guarantees as every other
+accepted memory, and the engine stays host-neutral — it learns nothing about the
+host's loop beyond the lesson records it already understands.
+
 ## D-LM-0013 — LocalMind skills stay advisory/read-only under the host's skill model
 
 - **Date**: 2026-06-17
