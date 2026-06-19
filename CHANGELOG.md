@@ -7,6 +7,12 @@ Notable changes, newest first. Contract-relevant entries reference
 
 Coordinated LocalX beta release.
 
+### 2026-06-19 - Release hygiene
+
+- Stamped every crate's `Cargo.toml` package version at `0.3.0-beta.3` to match
+  the top-level `VERSION`; the coordinated cut had moved `VERSION` but left the
+  Rust packages a train behind.
+
 ### 2026-06-18 - Memory quality
 
 - Added a third golden extraction fixture (`lock-order-deadlock`) to
