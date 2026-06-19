@@ -7,6 +7,21 @@ Notable changes, newest first. Contract-relevant entries reference
 
 Coordinated LocalX beta release.
 
+### 2026-06-19 - Memory quality
+
+- Broadened the golden eval `default_fixtures` from three to eight, adding the
+  hard categories the small set missed: stale/superseded knowledge, contradictory
+  preferences, a failed-tool→recovery recipe, a long noisy transcript with a
+  single buried lesson, and a low-value close-out that must yield no durable
+  memory. All score precision/recall/recall@k 1.0.
+- The `golden_eval_meets_quality_threshold` gate now enforces **per-fixture
+  (per-category) minimums** and a negative-fixture zero-candidate check, so a
+  strong mean can no longer hide a weak category.
+- Reconciled the `vision.md` host-integration note, which still said extraction
+  quality was "not yet measured / until the quality eval lands" — it now states
+  the eval exists, is fixture-backed and per-category gated, and should keep
+  growing toward real-world coverage. Prose and status table now agree.
+
 ### 2026-06-19 - Release hygiene
 
 - Stamped every crate's `Cargo.toml` package version at `0.3.0-beta.3` to match

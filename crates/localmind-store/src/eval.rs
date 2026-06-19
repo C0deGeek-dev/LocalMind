@@ -339,8 +339,13 @@ pub fn run_eval_lift(
 }
 
 /// The built-in golden fixtures. Original to this repository (no captured
-/// workspace content). Seeded by the end-to-end loop fixture plus a negative
-/// case that mirrors the dumped-file content which previously flooded the queue.
+/// workspace content). Each targets a distinct extraction family and a real
+/// failure mode the engine must handle — positive lessons (explicit markers,
+/// failure→resolution, user corrections, supersede/conflict signals) plus
+/// negative cases (dumped content, low-value chatter) that must produce no
+/// durable memory. Breadth should keep growing toward real-world coverage; the
+/// gate (`golden_eval_meets_quality_threshold`) enforces per-fixture minimums so
+/// a strong mean cannot hide a weak category.
 pub fn default_fixtures() -> Vec<EvalFixture> {
     vec![
         EvalFixture {
@@ -396,6 +401,100 @@ user: Lesson: always acquire locks in a consistent global order to avoid deadloc
                 RetrievalCase::new("auth cache session map deadlock", "deadlock detected"),
             ],
         },
+        EvalFixture {
+            // Stale/superseded knowledge: an explicit lesson that retires a prior
+            // value. The conflict signal ("wrong"/"instead") routes it to a
+            // supersede suggestion; the lesson itself must still be extracted.
+            name: "stale-superseded-retry-budget".to_string(),
+            transcript: "\
+assistant: the uploader keeps timing out on large files with the current retry budget
+user: Lesson: the old retry budget of 3 was wrong; use 5 retries with backoff instead for the flaky uploader.
+assistant: updated the retry budget to 5
+"
+            .to_string(),
+            expected_lessons: vec![
+                "retry budget".to_string(),
+                "5 retries with backoff".to_string(),
+            ],
+            retrieval_cases: vec![
+                RetrievalCase::new("uploader retry budget", "retry budget"),
+                RetrievalCase::new("flaky upload backoff retries", "5 retries with backoff"),
+            ],
+        },
+        EvalFixture {
+            // Contradictory preference: a user correction that overrides what the
+            // assistant just proposed. A good extractor keeps it as a durable
+            // preference; the conflict signal routes it to supersede.
+            name: "contradictory-preference-tabs-spaces".to_string(),
+            transcript: "\
+assistant: I'll switch the formatter to use tabs for the new module
+user: actually, do not use tabs; the team standard is spaces for this repo, always.
+assistant: understood, using spaces
+"
+            .to_string(),
+            expected_lessons: vec![
+                "do not use tabs".to_string(),
+                "spaces for this repo".to_string(),
+            ],
+            retrieval_cases: vec![
+                RetrievalCase::new("indentation tabs or spaces preference", "spaces for this repo"),
+                RetrievalCase::new("team formatting standard", "do not use tabs"),
+            ],
+        },
+        EvalFixture {
+            // Failed tool / recovery sequence: a reported failure paired with the
+            // fix that resolved it — a debugging recipe worth keeping.
+            name: "failed-tool-recovery-enospc".to_string(),
+            transcript: "\
+assistant: error: ENOSPC: no space left on device
+assistant: Fixed: pruned the docker build cache with docker system prune; the build passes now.
+"
+            .to_string(),
+            expected_lessons: vec!["ENOSPC".to_string(), "docker system prune".to_string()],
+            retrieval_cases: vec![
+                RetrievalCase::new("no space left on device", "ENOSPC"),
+                RetrievalCase::new("docker system prune cache", "docker system prune"),
+            ],
+        },
+        EvalFixture {
+            // Long, noisy transcript: file paths, code, docs, and chatter around a
+            // single genuine lesson. Precision must hold — the noise produces no
+            // candidates, only the explicit lesson does.
+            name: "noisy-transcript-single-lesson".to_string(),
+            transcript: "\
+assistant: opening src/server/handlers/export.rs to inspect the streaming path
+assistant: // NOTE: pagination handled upstream
+assistant: ## Coverage report
+assistant: crates/exporter/src/writer.rs:204
+assistant: the function signature is fn export(req: Request) -> Result<Response, Error>
+user: ok, makes sense
+assistant: see docs/architecture.md for the data flow
+user: Lesson: stream the response body for large exports to keep memory usage flat.
+assistant: done, the export now streams
+"
+            .to_string(),
+            expected_lessons: vec!["stream the response body".to_string()],
+            retrieval_cases: vec![RetrievalCase::new(
+                "large export memory streaming",
+                "stream the response body",
+            )],
+        },
+        EvalFixture {
+            // Low-value session close-out: a health check and pleasantries with no
+            // durable lesson. A good extractor produces nothing — no false
+            // positives from "no"/command/status lines.
+            name: "low-value-closeout".to_string(),
+            transcript: "\
+user: hey, can you check whether the dev server is running?
+assistant: $ curl -s localhost:3000/health
+assistant: it returns 200 OK, so the dev server is up and healthy.
+user: great, that is all for now, thanks.
+assistant: sounds good, talk to you later.
+"
+            .to_string(),
+            expected_lessons: Vec::new(),
+            retrieval_cases: Vec::new(),
+        },
     ]
 }
 
@@ -425,9 +524,9 @@ mod tests {
     fn the_seed_fixtures_score_as_expected() {
         let work = work_root();
         let report = run_eval(&default_fixtures(), 5, work.path()).unwrap();
-        // Both seed fixtures are designed to score perfectly: the bugfix fixture
-        // surfaces its two lessons and answers both queries; the dumped-content
-        // fixture correctly produces nothing.
+        // Every golden fixture is designed to score perfectly: positive fixtures
+        // surface their lessons and answer their queries; negative fixtures
+        // (dumped content, low-value chatter) correctly produce nothing.
         assert_eq!(report.mean_extraction_precision, 1.0);
         assert_eq!(report.mean_extraction_recall, 1.0);
         assert_eq!(report.mean_retrieval_recall_at_k, 1.0);

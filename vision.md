@@ -40,15 +40,21 @@ behavior does not; "absent" means not started.
 | Hosts | standalone CLI; LocalPilot embeds via its adapter crate | `localmind-cli`; adapter lives in the host |
 
 **Host-integration note.** "Implemented (engine)" above means the behaviour is
-tested and usable *through the LocalMind engine / `localmind` CLI*. One honest
-caveat remains on the inference and lesson-extraction rows: extraction *quality*
-(precision of the candidates, usefulness of promoted memory) is **not yet
-measured** by any eval. (The earlier caveat — that the LocalPilot host drove the
-deterministic extractor only — no longer applies: the host now selects the
-configured model-backed path when `[inference]` is set, with the deterministic
-extractor as the default and the off-machine endpoint gated behind an explicit
-opt-in.) Until the quality eval lands, do not read "implemented" as "the primary
-host produces high-quality learning today."
+tested and usable *through the LocalMind engine / `localmind` CLI*. Extraction
+*quality* (precision of the candidates, usefulness of promoted memory) **is**
+measured: the golden eval (`run_eval` / `default_fixtures` in `eval.rs`) gates it
+through `golden_eval_meets_quality_threshold`, which holds mean precision/recall
+and retrieval recall@k ≥ 0.9 **with per-fixture (per-category) minimums** across
+explicit lesson markers, failure→resolution recipes, user corrections,
+supersede/conflict signals, a noisy transcript, and negative no-memory cases
+(dumped content, low-value chatter). The fixture set is deliberately small and
+**growing**: it proves the engine does not regress and covers the hard
+categories, not that every real session yields perfect memory — fixture breadth
+should keep expanding toward real-world coverage. (The earlier caveat that the
+LocalPilot host drove the deterministic extractor only no longer applies: the
+host selects the configured model-backed path when `[inference]` is set,
+deterministic by default, with the off-machine endpoint gated behind an explicit
+opt-in.)
 
 **Topology note.** `localmind-review` and `localmind-skills` stay as thin
 boundary crates while storage-backed behavior lives in `localmind-store`: they

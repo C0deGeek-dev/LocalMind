@@ -51,16 +51,57 @@ fn golden_eval_meets_quality_threshold() -> Result<(), Box<dyn std::error::Error
         report.mean_retrieval_recall_at_k
     );
 
-    // The negative fixture must produce no candidates (no false positives).
-    let negative = report
-        .scores
-        .iter()
-        .find(|s| s.name == "dumped-file-content")
-        .ok_or("missing negative fixture")?;
-    assert_eq!(
-        negative.candidate_count, 0,
-        "dumped file content produced false-positive candidates"
-    );
+    // Per-category (per-fixture) minimums: a strong mean must not hide a weak
+    // category. Every fixture clears the bar on its own, and a negative fixture
+    // (one that expects no lessons) must produce zero candidates — no false
+    // positives. This is what keeps the broadened fixture set honest as it grows.
+    for score in &report.scores {
+        let is_negative = score.expected_count == 0;
+        if is_negative {
+            assert_eq!(
+                score.candidate_count, 0,
+                "negative fixture '{}' produced {} false-positive candidate(s)",
+                score.name, score.candidate_count
+            );
+        } else {
+            assert!(
+                score.extraction_recall >= THRESHOLD,
+                "fixture '{}' extraction recall {:.3} below {THRESHOLD}",
+                score.name,
+                score.extraction_recall
+            );
+        }
+        assert!(
+            score.extraction_precision >= THRESHOLD,
+            "fixture '{}' extraction precision {:.3} below {THRESHOLD}",
+            score.name,
+            score.extraction_precision
+        );
+        assert!(
+            score.retrieval_recall_at_k >= THRESHOLD,
+            "fixture '{}' retrieval recall@k {:.3} below {THRESHOLD}",
+            score.name,
+            score.retrieval_recall_at_k
+        );
+    }
+
+    // The category set the broadened eval must keep covering: explicit markers,
+    // failure→resolution, user corrections, supersede/conflict signals, a noisy
+    // transcript, and low-value/dumped content that yields no durable memory.
+    for required in [
+        "exporter-bugfix",
+        "dumped-file-content",
+        "stale-superseded-retry-budget",
+        "contradictory-preference-tabs-spaces",
+        "failed-tool-recovery-enospc",
+        "noisy-transcript-single-lesson",
+        "low-value-closeout",
+    ] {
+        assert!(
+            report.scores.iter().any(|s| s.name == required),
+            "missing required fixture category: {required}"
+        );
+    }
 
     Ok(())
 }
