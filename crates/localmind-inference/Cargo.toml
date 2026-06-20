@@ -10,9 +10,17 @@ workspace = true
 
 [dependencies]
 localmind-core = { path = "../localmind-core" }
+# `idna_adapter` and `url` are not referenced directly in source — `ureq` pulls them
+# transitively. They are declared here (exact-pinned in the workspace) purely to hold
+# the url/idna/icu_normalizer version stack at an MSRV-1.82-safe resolution. Kept on
+# purpose; recorded in [package.metadata.cargo-machete] so the unused-dep gate is honest.
 idna_adapter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
 url = { workspace = true }
+
+[package.metadata.cargo-machete]
+# Resolution-only version pins (see the [dependencies] note): unused in source by design.
+ignored = ["idna_adapter", "url"]
