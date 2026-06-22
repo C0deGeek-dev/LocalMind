@@ -3,6 +3,13 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
+## Unreleased
+
+- `MemorySearchResult` now carries the matched memory's `category`, so a host can
+  gate or dedup context injection by category without a second store lookup. The
+  field is populated from the existing `memory_index.category` column — purely
+  additive to the search contract (D-LM-0015).
+
 ## v0.3.0-beta.3 - 2026-06-18
 
 Coordinated LocalX beta release.

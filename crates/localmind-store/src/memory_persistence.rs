@@ -29,6 +29,10 @@ pub struct MemorySearchResult {
     pub path: PathBuf,
     pub score: i64,
     pub snippet: String,
+    /// The memory's lesson category (e.g. `SecurityWarning`, `ProjectConvention`),
+    /// exposed at retrieval time so a caller can gate or dedup injection by
+    /// category without a second lookup.
+    pub category: String,
     /// Index timestamp of the entry, as stored (RFC-ish text).
     pub created_at: String,
     /// Flagged by change-aware invalidation: the code this memory was anchored to
@@ -527,7 +531,7 @@ impl MemoryPersistence {
             .prepare(
                 r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
-                       m.epistemic_status, m.contradicted, bm25(memory_fts) AS rank
+                       m.epistemic_status, m.contradicted, m.category, bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'
@@ -545,15 +549,25 @@ impl MemoryPersistence {
                     row.get::<_, i64>(4)? != 0,
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)? != 0,
-                    row.get::<_, f64>(7)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, f64>(8)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (memory_id, path, body, created_at, stale_candidate, epistemic, contradicted, rank) =
-                row.map_err(MemoryPersistenceError::Sqlite)?;
+            let (
+                memory_id,
+                path,
+                body,
+                created_at,
+                stale_candidate,
+                epistemic,
+                contradicted,
+                category,
+                rank,
+            ) = row.map_err(MemoryPersistenceError::Sqlite)?;
             // bm25 returns a more-negative value for better matches; expose a
             // positive bigger-is-better integer to keep the result contract.
             #[allow(clippy::cast_possible_truncation)] // bounded: bm25 magnitudes are small
@@ -563,6 +577,7 @@ impl MemoryPersistence {
                 path: PathBuf::from(path),
                 score: score.max(1),
                 snippet: body.chars().take(160).collect(),
+                category,
                 created_at,
                 stale_candidate,
                 epistemic_status: EpistemicStatus::from_token(&epistemic),

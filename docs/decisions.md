@@ -4,6 +4,20 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0015 — Memory search results expose the lesson category
+
+- **Date**: 2026-06-22
+- **Status**: accepted
+
+`MemorySearchResult` carries the matched memory's `category` (read from the
+existing `memory_index.category` column, no schema change). A host injection
+layer needs the category to gate or dedup what it injects — for example, to skip
+injecting a memory whose category restates guidance the host's rule engine
+already enforces — and forcing a second per-hit lookup would be wasteful and
+racy. Exposing it at retrieval keeps the engine host-neutral (it states a fact
+about the result; it does not decide injection policy) while letting the host
+decide. Purely additive to the search contract.
+
 ## D-LM-0014 — Loop-outcome lessons reuse the review-gated memory path; rejected outcomes are negative signals
 
 - **Date**: 2026-06-19
