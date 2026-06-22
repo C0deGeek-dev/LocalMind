@@ -5,6 +5,11 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- `flag_for_review(memory_id, reason)` generalizes the route-to-review staleness
+  flag to carry a caller-supplied reason, so outcome-aware down-weighting (a
+  lesson that didn't improve eval outcomes) and change-aware invalidation share
+  one audited, never-auto-delete path. `mark_stale_candidate` is now a thin
+  wrapper over it (unchanged behaviour). (D-LM-0016)
 - `MemorySearchResult` now carries the matched memory's `category`, so a host can
   gate or dedup context injection by category without a second store lookup. The
   field is populated from the existing `memory_index.category` column — purely

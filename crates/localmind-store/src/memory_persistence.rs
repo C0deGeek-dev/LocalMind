@@ -662,6 +662,23 @@ impl MemoryPersistence {
         &self,
         memory_id: &MemoryEntryId,
     ) -> Result<bool, MemoryPersistenceError> {
+        self.flag_for_review(memory_id, "anchored code changed")
+    }
+
+    /// Flag an active memory for review with a caller-supplied reason, without
+    /// deleting it — the route-to-review path shared by change-aware invalidation
+    /// (`mark_stale_candidate`) and outcome-aware down-weighting (a lesson that did
+    /// not improve eval outcomes). The memory stays active and retrievable; this
+    /// only sets the staleness flag and audits the reason. Returns whether an
+    /// active memory matched.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    pub fn flag_for_review(
+        &self,
+        memory_id: &MemoryEntryId,
+        reason: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
         let changed = self
             .connection
             .execute(
@@ -675,7 +692,7 @@ impl MemoryPersistence {
                 AuditEventKind::MemoryFlaggedStale,
                 "localmind",
                 memory_id.as_str(),
-                &serde_json::json!({ "reason": "anchored code changed" }),
+                &serde_json::json!({ "reason": reason }),
             )?;
         }
         Ok(changed > 0)

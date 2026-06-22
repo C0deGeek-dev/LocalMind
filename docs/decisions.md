@@ -4,6 +4,23 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0016 — One reasoned route-to-review flag for both invalidation and down-weighting
+
+- **Date**: 2026-06-22
+- **Status**: accepted
+
+Flagging an accepted memory for review (never deleting it) is the engine's
+response both when anchored code changes (change-aware invalidation) and when a
+host's learning loop finds a lesson did not improve outcomes (outcome-aware
+down-weighting). These are the same mechanism with different reasons, so the
+engine exposes one `flag_for_review(memory_id, reason)` that sets the staleness
+flag and audits the supplied reason; `mark_stale_candidate` becomes a thin
+wrapper passing `"anchored code changed"`. The engine still never auto-deletes —
+a human reviewer decides — and it does not itself judge outcomes; it only records
+the host's reasoned request. This keeps the down-weighting signal honest in the
+audit trail (the review queue shows *why* a memory needs review) without a second
+flag column or a parallel review path.
+
 ## D-LM-0015 — Memory search results expose the lesson category
 
 - **Date**: 2026-06-22
