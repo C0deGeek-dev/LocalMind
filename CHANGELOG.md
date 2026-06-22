@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Model-backed lesson extraction (`closeout` with `[inference]`) now tolerates the
+  output real local models actually produce. A reasoning model wraps its JSON in a
+  `<think>...</think>` block and a Markdown code fence, which made a raw parse fail at
+  column 1 and abort the whole closeout. The chat client gained
+  `extract_json_payload`, which strips the think block and fence and isolates the
+  outer JSON span; the extractor now also requests a JSON object via `response_format`
+  (retried once without it if the server rejects the constraint) and, on any extraction
+  or parse failure, falls back to the deterministic extractor instead of erroring.
 - `flag_for_review(memory_id, reason)` generalizes the route-to-review staleness
   flag to carry a caller-supplied reason, so outcome-aware down-weighting (a
   lesson that didn't improve eval outcomes) and change-aware invalidation share

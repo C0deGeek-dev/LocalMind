@@ -4,7 +4,9 @@ use localmind_core::{
     DigestSectionKind, EvidenceKind, EvidenceRef, LessonCategory, LessonId, ReviewAnnotation,
     SessionId, SessionSummary, SuggestedAction, ValidationStatus,
 };
-use localmind_inference::{ChatEndpoint, ChatMessage, InferenceCapability, InferenceError};
+use localmind_inference::{
+    extract_json_payload, ChatEndpoint, ChatMessage, InferenceCapability, InferenceError,
+};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -67,16 +69,23 @@ impl SessionExtractor for ModelBackedExtractor<'_> {
             "Extract durable LocalMind session memory as compact JSON. Return only JSON with fields summary_title, summary_body, key_points, and candidates. Each candidate needs summary, category, confidence, action. Transcript:\n{}",
             input.transcript
         );
-        let completion = match chat.complete(&[
+        let completion = match chat.complete_json(&[
             ChatMessage::system("You extract local development lessons. Return valid JSON only."),
             ChatMessage::user(prompt),
         ]) {
             Ok(completion) => completion,
             Err(_source) => return self.fallback.extract(input),
         };
-        let parsed: ModelExtraction =
-            serde_json::from_str(&completion.content).map_err(CloseoutError::ModelOutput)?;
-        parsed.into_output(input)
+        // Reasoning-capable local models wrap JSON in `<think>` blocks and code
+        // fences, so isolate the JSON span first. On any extraction or parse
+        // failure, fall back to the deterministic extractor rather than failing
+        // the whole closeout.
+        match extract_json_payload(&completion.content)
+            .and_then(|json| serde_json::from_str::<ModelExtraction>(json).ok())
+        {
+            Some(parsed) => parsed.into_output(input),
+            None => self.fallback.extract(input),
+        }
     }
 }
 
@@ -970,8 +979,6 @@ pub enum CloseoutError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Inference(#[from] InferenceError),
-    #[error("model extraction output was not valid LocalMind JSON: {0}")]
-    ModelOutput(serde_json::Error),
     #[error("failed to serialize session summary: {source}")]
     SerializeSummary { source: serde_json::Error },
     #[error("failed to serialize candidate lessons: {source}")]
@@ -1007,6 +1014,45 @@ mod tests {
             .extract(input)
             .expect("extraction never fails on text")
             .candidates
+    }
+
+    // --- Model-backed extraction: tolerate fenced / think-wrapped JSON ------
+    #[test]
+    fn fenced_think_wrapped_model_reply_parses_to_candidates() {
+        // The exact shape the live turboquant model returns: an empty <think>
+        // block, then the extraction JSON wrapped in a ```json fence. Before the
+        // fence/think-aware parse this failed with "expected value at line 1
+        // column 1" and aborted the whole closeout.
+        let reply = "<think>\n\n</think>\n\n```json\n{\
+\"summary_title\":\"Guarded the missing-argument case\",\
+\"summary_body\":\"Added a usage guard so a missing path prints to stderr and exits non-zero.\",\
+\"key_points\":[\"validate arguments before use\"],\
+\"candidates\":[{\"summary\":\"Validate command-line arguments before use and exit non-zero with a stderr usage message when one is missing.\",\"category\":\"project_convention\",\"confidence\":0.9,\"action\":\"promote_to_memory\"}]}\n```";
+
+        let json = extract_json_payload(reply).expect("payload isolated from fenced reply");
+        let parsed: ModelExtraction = serde_json::from_str(json).expect("fenced JSON parses");
+        let evidence = EvidenceRef::new(EvidenceKind::Transcript, "redacted transcript").redacted();
+        let input = ExtractionInput {
+            session_id: SessionId::new("session-test"),
+            transcript: "agent guarded the missing argument".to_string(),
+            transcript_evidence: evidence,
+        };
+        let output = parsed.into_output(input).expect("into_output succeeds");
+        assert!(
+            !output.candidates.is_empty(),
+            "fenced model reply should yield at least one candidate"
+        );
+    }
+
+    #[test]
+    fn non_json_model_reply_takes_deterministic_fallback() {
+        // A reply with no JSON span resolves to None, which is the signal the
+        // ModelBackedExtractor uses to fall back to the deterministic extractor
+        // instead of erroring the whole closeout.
+        let reply = "I could not produce JSON for this session.";
+        assert!(extract_json_payload(reply)
+            .and_then(|json| serde_json::from_str::<ModelExtraction>(json).ok())
+            .is_none());
     }
 
     // --- Rejection rule: bare file paths -----------------------------------

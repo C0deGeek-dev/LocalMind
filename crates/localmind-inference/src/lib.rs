@@ -99,10 +99,37 @@ impl ChatEndpoint {
     }
 
     pub fn complete(&self, messages: &[ChatMessage]) -> Result<ChatCompletion, InferenceError> {
+        self.complete_inner(messages, false)
+    }
+
+    /// Like [`ChatEndpoint::complete`], but asks the server for a JSON object via
+    /// the OpenAI `response_format` field. Some local servers reject the
+    /// constraint (e.g. a turboquant build returns HTTP 400 for structured
+    /// formats); on an HTTP error the request is retried once without it so a
+    /// caller that only needs best-effort JSON can still proceed and parse the
+    /// reply with [`extract_json_payload`].
+    pub fn complete_json(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<ChatCompletion, InferenceError> {
+        match self.complete_inner(messages, true) {
+            Err(InferenceError::Http { .. }) => self.complete_inner(messages, false),
+            other => other,
+        }
+    }
+
+    fn complete_inner(
+        &self,
+        messages: &[ChatMessage],
+        json_object: bool,
+    ) -> Result<ChatCompletion, InferenceError> {
         let request = ChatCompletionRequest {
             model: &self.model,
             messages,
             temperature: 0.0,
+            response_format: json_object.then_some(ResponseFormat {
+                kind: "json_object",
+            }),
         };
         let response = post_json(
             &format!("{}/v1/chat/completions", self.base_url),
@@ -221,6 +248,14 @@ struct ChatCompletionRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -292,6 +327,57 @@ fn validate_endpoint(base_url: &str) -> Result<(), InferenceError> {
     }
 }
 
+/// Best-effort extraction of a JSON object/array from a chat-model reply.
+///
+/// Reasoning-capable local models routinely wrap JSON in a `<think>...</think>`
+/// block and/or a Markdown code fence (```` ```json ... ``` ````), so a raw
+/// `serde_json::from_str` on the whole reply fails at column 1. This strips a
+/// leading think block, unwraps a single fenced block, then narrows to the
+/// outermost `{...}`/`[...]` span. Returns `None` when no JSON-looking span is
+/// present (e.g. prose-only), so the caller can fall back instead of erroring.
+#[must_use]
+pub fn extract_json_payload(reply: &str) -> Option<&str> {
+    let mut text = reply.trim();
+
+    // Drop a leading reasoning block (`<think> ... </think>`), keeping whatever
+    // follows. An empty `<think></think>` is common and handled the same way.
+    if let Some(end) = text.find("</think>") {
+        text = text[end + "</think>".len()..].trim_start();
+    }
+
+    // Unwrap a single Markdown code fence if present, skipping an optional
+    // language tag on the opening line (e.g. ```json).
+    if let Some(start) = text.find("```") {
+        let after = &text[start + 3..];
+        let after = match after.find('\n') {
+            Some(newline)
+                if !after[..newline].trim().is_empty()
+                    && after[..newline]
+                        .trim()
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric()) =>
+            {
+                &after[newline + 1..]
+            }
+            Some(newline) if after[..newline].trim().is_empty() => &after[newline + 1..],
+            _ => after,
+        };
+        text = match after.find("```") {
+            Some(close) => after[..close].trim(),
+            None => after.trim(),
+        };
+    }
+
+    // Narrow to the outermost JSON object/array span.
+    let start = text.find(['{', '['])?;
+    let end = text.rfind(['}', ']'])?;
+    if end < start {
+        return None;
+    }
+    let payload = text[start..=end].trim();
+    (!payload.is_empty()).then_some(payload)
+}
+
 #[derive(Debug, Error)]
 pub enum InferenceError {
     #[error("inference endpoint must be http(s): {url}")]
@@ -315,7 +401,7 @@ pub enum InferenceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEndpoint, ChatMessage, EmbeddingEndpoint};
+    use super::{extract_json_payload, ChatEndpoint, ChatMessage, EmbeddingEndpoint};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -344,6 +430,53 @@ mod tests {
 
         assert_eq!(vectors, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
         Ok(())
+    }
+
+    #[test]
+    fn extract_json_payload_handles_bare_object() {
+        assert_eq!(extract_json_payload("{\"ok\":true}"), Some("{\"ok\":true}"));
+    }
+
+    #[test]
+    fn extract_json_payload_unwraps_fenced_json() {
+        assert_eq!(
+            extract_json_payload("```json\n{\"ok\":true}\n```"),
+            Some("{\"ok\":true}")
+        );
+        assert_eq!(
+            extract_json_payload("```\n{\"ok\":true}\n```"),
+            Some("{\"ok\":true}")
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_strips_think_block() {
+        // The exact shape the live turboquant model returns: an empty think
+        // block, then fenced JSON.
+        assert_eq!(
+            extract_json_payload("<think>\n\n</think>\n\n```json\n{\"ok\": true}\n```"),
+            Some("{\"ok\": true}")
+        );
+        assert_eq!(
+            extract_json_payload("<think>reasoning here</think>{\"a\":1}"),
+            Some("{\"a\":1}")
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_narrows_to_outermost_span() {
+        assert_eq!(
+            extract_json_payload("Here is the result: {\"a\":1} -- done"),
+            Some("{\"a\":1}")
+        );
+        assert_eq!(extract_json_payload("[1,2,3]"), Some("[1,2,3]"));
+    }
+
+    #[test]
+    fn extract_json_payload_returns_none_for_prose() {
+        assert_eq!(extract_json_payload("no json here"), None);
+        assert_eq!(extract_json_payload("<think>only thinking</think>"), None);
+        assert_eq!(extract_json_payload(""), None);
     }
 
     fn one_response(body: &'static str) -> Result<String, Box<dyn std::error::Error>> {
