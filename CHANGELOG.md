@@ -3,7 +3,11 @@
 Notable changes, newest first. Contract-relevant entries reference
 `docs/on-disk-contract.md`.
 
-## Unreleased
+## v1.0.0 - 2026-06-24
+
+Coordinated LocalX 1.0 release. First stable: the on-disk contract and engine
+surface are now SemVer-stable. Validated cross-model (lesson-injection uplift
+holds on a second local model).
 
 - Model-backed lesson extraction (`closeout` with `[inference]`) now tolerates the
   output real local models actually produce. A reasoning model wraps its JSON in a
