@@ -16,6 +16,13 @@ The goal is to turn opted-in AI development sessions into reviewed project
 memory, graph-connected knowledge, and reusable skills without sending private
 work to external services by default.
 
+**The more an agent uses it, the better it gets.** In a controlled uplift eval
+(LocalBench `localbench-uplift-v1`), injecting accepted lessons lifted a held-out
+task suite's solve rate from **0% to 100%**, and the effect held on a second
+local model. All learning is **local-first and review-gated**: lessons are
+distilled from opted-in sessions, you approve what is remembered, and nothing
+leaves your machine by default.
+
 ## LocalX Ecosystem
 
 - [LocalStack](https://github.com/C0deGeek-dev/LocalStack) is the umbrella
