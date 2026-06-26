@@ -1,8 +1,11 @@
 # On-disk contract
 
 What LocalMind writes inside a project, precisely enough that a host other
-than the bundled CLI could integrate from this document alone. Everything
-lives under the project root; nothing is written outside it.
+than the bundled CLI could integrate from this document alone. Everything lives
+under the project root, with **one opt-in exception**: machine-wide
+*global-scope* memory, written only when a project lists `global_user` in
+`allowed_scopes`, lives in a per-user home store (`~/.localmind/memory` by
+default) so cross-project knowledge can be shared (see §Global-scope store).
 
 ## Opt-in configuration: `.localmind.toml`
 
@@ -12,7 +15,8 @@ Learning is off until this file exists at the project root:
 [learning]
 enabled = true                       # required; false refuses all writes
 memory_root = ".localmind/memory"    # optional; must stay inside the project
-allowed_scopes = ["project"]         # optional; scopes hosts may write
+allowed_scopes = ["project"]         # optional; add "global_user" to opt in to the machine-wide store
+global_memory_root = "/abs/path"     # optional; absolute; overrides ~/.localmind/memory (global only)
 
 [inference]
 chat_base_url = "http://127.0.0.1:8080"      # optional local OpenAI-compatible endpoint
@@ -73,6 +77,28 @@ offline, byte-identical to the no-rerank path.
 Only the redacted transcript is persisted. Redaction runs before any write
 (pattern table + entropy backstop; see `localmind-store/src/redaction.rs`
 module docs for the caught / not-caught guarantee).
+
+## Global-scope store (opt-in)
+
+When — and only when — a project's `allowed_scopes` includes `global_user`, a
+machine-wide store is opened alongside the project store, rooted at the per-user
+home (resolved cross-platform from `USERPROFILE`/`HOME`), or at an absolute
+`global_memory_root` override:
+
+```
+~/.localmind/
+  localmind.sqlite              # the global index, shared across every project
+  memory/
+    global/<memory-id>.md       # one Markdown file per accepted global memory
+```
+
+A `GlobalUser`-scoped memory is written here instead of under the project; every
+other scope stays project-rooted. The global database is shared by all opted-in
+projects, so a global lesson written in one project is retrievable in another.
+Retrieval merges the project and global indexes with **project precedence** (a
+project memory overrides a global one on conflict; a global memory surfaces when
+no project memory applies). A project that does not opt in opens no global store
+and is byte-for-byte unchanged. See D-LM-0017.
 
 ## Markdown memory format
 

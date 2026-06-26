@@ -3,8 +3,8 @@ use crate::{
     StoreConfigError,
 };
 use localmind_core::{
-    content_fingerprint, AuditEventKind, Confidence, EpistemicStatus, MemoryEntry, MemoryEntryId,
-    MemoryScope, MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
+    content_fingerprint, AuditEventKind, CandidateDestination, Confidence, EpistemicStatus,
+    MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
 };
 use localmind_inference::{InferenceCapability, InferenceError, TokenUsage};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -77,9 +77,21 @@ pub struct MemoryRecord {
     pub body: String,
 }
 
+/// The machine-wide global memory store: a separate SQLite index and Markdown
+/// root under the per-user home, shared by every project on the machine. Opened
+/// alongside the project store only when the project opts in to `GlobalUser`
+/// scope, so a global lesson is never written or read without consent.
+struct GlobalStore {
+    /// The global index/FTS/vector database, distinct from the project database.
+    /// The Markdown root is resolved from the project config's
+    /// `global_memory_root()`, so it is not duplicated here.
+    connection: Connection,
+}
+
 pub struct MemoryPersistence {
     config: ProjectConfig,
     connection: Connection,
+    global: Option<GlobalStore>,
 }
 
 impl MemoryPersistence {
@@ -99,9 +111,58 @@ impl MemoryPersistence {
                 path: db_path,
                 source,
             })?;
-        let persistence = Self { config, connection };
+        let global = Self::open_global(&config)?;
+        let persistence = Self {
+            config,
+            connection,
+            global,
+        };
         persistence.migrate()?;
         Ok(persistence)
+    }
+
+    /// Open the machine-wide global store when the project opts in. The global
+    /// database lives beside the global memory root's parent (`~/.localmind/`), so
+    /// it is shared across projects and resolved independently of any project.
+    fn open_global(config: &ProjectConfig) -> Result<Option<GlobalStore>, MemoryPersistenceError> {
+        if !config.allows_global() {
+            return Ok(None);
+        }
+        let Some(root) = config.global_memory_root() else {
+            return Ok(None);
+        };
+        // The DB sits in the global root's parent (the `.localmind/` state dir),
+        // mirroring the project layout (`project/.localmind/localmind.sqlite` with
+        // memory under `project/.localmind/memory`).
+        let state_dir = root.parent().unwrap_or(root.as_path()).to_path_buf();
+        fs::create_dir_all(&state_dir).map_err(|source| {
+            MemoryPersistenceError::CreateStateDir {
+                path: state_dir.clone(),
+                source,
+            }
+        })?;
+        let db_path = state_dir.join("localmind.sqlite");
+        let connection =
+            Connection::open(&db_path).map_err(|source| MemoryPersistenceError::OpenDatabase {
+                path: db_path,
+                source,
+            })?;
+        crate::schema::migrate(&connection).map_err(MemoryPersistenceError::Schema)?;
+        Ok(Some(GlobalStore { connection }))
+    }
+
+    /// The connection that owns an entry of the given scope: the global store for
+    /// `GlobalUser`, otherwise the project store. Errors when a global entry is
+    /// requested but the project did not open a global store.
+    fn connection_for(&self, scope: &MemoryScope) -> Result<&Connection, MemoryPersistenceError> {
+        match scope {
+            MemoryScope::GlobalUser => self
+                .global
+                .as_ref()
+                .map(|store| &store.connection)
+                .ok_or(MemoryPersistenceError::GlobalScopeDisabled),
+            _ => Ok(&self.connection),
+        }
     }
 
     pub fn migrate(&self) -> Result<(), MemoryPersistenceError> {
@@ -135,9 +196,23 @@ impl MemoryPersistence {
         // `Superseded` so retrieval (filtered to `status = 'active'`) stops
         // serving it.
         let target = item.supersede_target.clone();
+        // Route the promoted memory to the project or the machine-wide global
+        // store: an explicit `GlobalMemory` suggestion or the conservative
+        // category classifier asks for global, but only when the project opts in
+        // to the `GlobalUser` scope (otherwise it stays project — a safe
+        // fallback, never an error). The store that owns the scope owns the
+        // index, so a global lesson lands in the database every project reads.
+        let wants_global = item.candidate.suggested_destination.is_global()
+            || CandidateDestination::default_for_category(&item.candidate.category).is_global();
+        let scope = if wants_global && self.config.allows_global() {
+            MemoryScope::GlobalUser
+        } else {
+            MemoryScope::Project
+        };
+        let connection = self.connection_for(&scope)?;
         let entry = MemoryEntry {
             id: MemoryEntryId::new(item.candidate.id.as_str()),
-            scope: MemoryScope::Project,
+            scope,
             body,
             category: item.candidate.category.clone(),
             confidence: Confidence::new(item.candidate.confidence.value())?,
@@ -157,8 +232,7 @@ impl MemoryPersistence {
         // after the file write leaves an unindexed file that the next
         // promotion overwrites — never a half-indexed entry.
         let path = MemoryPathResolver::write_memory_file(&self.config, &entry)?;
-        let tx = self
-            .connection
+        let tx = connection
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::index_memory_with(&tx, &entry, &path)?;
@@ -186,7 +260,7 @@ impl MemoryPersistence {
             }),
         )?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
-        self.embed_memory_if_configured(&entry)?;
+        self.embed_memory_if_configured(connection, &entry)?;
         Ok(entry)
     }
 
@@ -218,14 +292,18 @@ impl MemoryPersistence {
         &self,
         entry: &MemoryEntry,
     ) -> Result<PathBuf, MemoryPersistenceError> {
+        // The Markdown path resolves to the global root for a `GlobalUser` entry
+        // and the project root otherwise; the index transaction goes to the store
+        // that owns the scope, so a global lesson lands in the machine-wide
+        // database that every project reads.
+        let connection = self.connection_for(&entry.scope)?;
         let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
-        let tx = self
-            .connection
+        let tx = connection
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::index_memory_with(&tx, entry, &path)?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
-        self.embed_memory_if_configured(entry)?;
+        self.embed_memory_if_configured(connection, entry)?;
         Ok(path)
     }
 
@@ -306,8 +384,17 @@ impl MemoryPersistence {
     }
 
     pub fn list_memory(&self) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
-        let mut statement = self
-            .connection
+        // Project memory, then global memory when the global store is open, so
+        // `memory list` shows every accepted memory the session can retrieve.
+        let mut records = Self::list_in(&self.connection)?;
+        if let Some(global) = &self.global {
+            records.extend(Self::list_in(&global.connection)?);
+        }
+        Ok(records)
+    }
+
+    fn list_in(connection: &Connection) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        let mut statement = connection
             .prepare(
                 r#"
                 SELECT memory_id, path, scope, category, status, body
@@ -410,13 +497,30 @@ impl MemoryPersistence {
         model: &str,
         vector: &[f32],
     ) -> Result<bool, MemoryPersistenceError> {
+        Self::upsert_memory_embedding_with(
+            &self.connection,
+            memory_id,
+            source_fingerprint,
+            model,
+            vector,
+        )
+    }
+
+    /// Upsert a memory's embedding on the given connection (project or global),
+    /// so a global memory's vector lands in the global database.
+    fn upsert_memory_embedding_with(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
         if vector.is_empty() {
             return Err(MemoryPersistenceError::InvalidVector {
                 detail: "vector must not be empty".to_string(),
             });
         }
-        let existing: Option<String> = self
-            .connection
+        let existing: Option<String> = connection
             .query_row(
                 "SELECT source_fingerprint FROM vector_index WHERE subject_kind = 'memory' AND subject_id = ?1",
                 params![memory_id.as_str()],
@@ -429,7 +533,7 @@ impl MemoryPersistence {
         }
 
         let blob = encode_vector(vector);
-        self.connection
+        connection
             .execute(
                 r#"
                 INSERT INTO vector_index
@@ -454,7 +558,8 @@ impl MemoryPersistence {
                 ],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
-        self.write_audit(
+        Self::write_audit_with(
+            connection,
             AuditEventKind::VectorIndexUpdated,
             "localmind",
             memory_id.as_str(),
@@ -523,11 +628,40 @@ impl MemoryPersistence {
     /// prefix phrases, so FTS5 operators in user input are inert text, not
     /// syntax. Higher `score` is a better match.
     pub fn search(&self, query: &str) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
+        // Merge project + global results with **project precedence**: project
+        // matches lead, then global matches that are not already present (deduped
+        // by memory id and by body), so a project lesson always overrides a
+        // global one on conflict while a global lesson still surfaces when no
+        // project lesson applies. Provenance survives in each result's `path`
+        // (a global path lives under the user-home store).
+        let mut results = Self::search_in(&self.connection, query)?;
+        if let Some(global) = &self.global {
+            let project_ids: std::collections::HashSet<String> = results
+                .iter()
+                .map(|r| r.memory_id.as_str().to_string())
+                .collect();
+            let project_bodies: std::collections::HashSet<String> =
+                results.iter().map(|r| r.snippet.clone()).collect();
+            for result in Self::search_in(&global.connection, query)? {
+                if !project_ids.contains(result.memory_id.as_str())
+                    && !project_bodies.contains(&result.snippet)
+                {
+                    results.push(result);
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Run the FTS5 memory search against one connection (project or global).
+    fn search_in(
+        connection: &Connection,
+        query: &str,
+    ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
         let Some(match_expression) = fts_match_expression(query) else {
             return Ok(Vec::new());
         };
-        let mut statement = self
-            .connection
+        let mut statement = connection
             .prepare(
                 r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
@@ -996,6 +1130,7 @@ impl MemoryPersistence {
 
     fn embed_memory_if_configured(
         &self,
+        connection: &Connection,
         entry: &MemoryEntry,
     ) -> Result<(), MemoryPersistenceError> {
         let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
@@ -1008,8 +1143,22 @@ impl MemoryPersistence {
                 detail: "embedding endpoint returned no vectors".to_string(),
             });
         };
-        self.record_inference_call("embeddings", "embedding", endpoint.model(), None)?;
-        self.upsert_memory_embedding(
+        // The inference audit and the vector both land in the same store that owns
+        // the memory (global vs project), so a global memory's vector is in the
+        // global database where global retrieval can find it.
+        Self::write_audit_with(
+            connection,
+            AuditEventKind::InferenceCallCompleted,
+            "localmind",
+            "embeddings",
+            &serde_json::json!({
+                "feature": "embeddings",
+                "endpoint_kind": "embedding",
+                "model": endpoint.model(),
+            }),
+        )?;
+        Self::upsert_memory_embedding_with(
+            connection,
             &entry.id,
             &content_fingerprint(entry.body.as_str()),
             endpoint.model(),
@@ -1171,6 +1320,8 @@ pub enum MemoryPersistenceError {
     },
     #[error("indexed memory path escapes LocalMind memory root: {path:?}")]
     UnsafeIndexedMemoryPath { path: PathBuf },
+    #[error("global-scope memory requires the project to allow the GlobalUser scope")]
+    GlobalScopeDisabled,
     #[error("failed to delete LocalMind memory file {path:?}: {source}")]
     DeleteMemoryFile {
         path: PathBuf,

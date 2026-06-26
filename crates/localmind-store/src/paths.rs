@@ -18,7 +18,15 @@ impl MemoryPathResolver {
             });
         }
 
-        let root = config.memory_root();
+        // Global-scope memory is machine-wide, so it is rooted at the per-user
+        // home store, resolved separately from the project store; every other
+        // scope lives under the project memory root.
+        let root = match scope {
+            MemoryScope::GlobalUser => config
+                .global_memory_root()
+                .ok_or(MemoryPathError::NoGlobalRoot)?,
+            _ => config.memory_root(),
+        };
         let relative = Path::new(scope_dir(scope)).join(format!("{}.md", safe_id(id.as_str())?));
         reject_unsafe_relative_path(&relative)?;
         let candidate = root.join(relative);
@@ -101,6 +109,8 @@ fn ensure_child_path(root: &Path, candidate: &Path) -> Result<(), MemoryPathErro
 pub enum MemoryPathError {
     #[error("memory scope is not allowed by project config: {scope}")]
     ScopeNotAllowed { scope: String },
+    #[error("global memory has no resolvable root (no home directory and no configured global_memory_root)")]
+    NoGlobalRoot,
     #[error("unsafe memory id: {id}")]
     UnsafeMemoryId { id: String },
     #[error("memory path escapes the configured root: {path:?}")]

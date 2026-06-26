@@ -26,6 +26,13 @@ pub struct LearningConfig {
     pub local_only: bool,
     #[serde(default = "default_memory_root")]
     pub memory_root: PathBuf,
+    /// Override the machine-wide global memory root (an absolute directory). When
+    /// unset, the global store lives under the per-OS user home
+    /// (`~/.localmind/memory`). Global-scope memory is shared across every project
+    /// on the machine, so it is resolved separately from the project store; it is
+    /// only used when `allowed_scopes` opts in to `GlobalUser`.
+    #[serde(default)]
+    pub global_memory_root: Option<PathBuf>,
     #[serde(default = "default_allowed_scopes")]
     pub allowed_scopes: Vec<MemoryScope>,
     #[serde(default)]
@@ -38,6 +45,7 @@ impl Default for LearningConfig {
             enabled: false,
             local_only: true,
             memory_root: default_memory_root(),
+            global_memory_root: None,
             allowed_scopes: default_allowed_scopes(),
             excluded_paths: Vec::new(),
         }
@@ -195,6 +203,22 @@ impl ProjectConfig {
             });
         }
 
+        // A configured global memory root is a machine-wide location, so it must
+        // be absolute (the opposite of `memory_root`, which is project-relative)
+        // and free of `..` traversal.
+        if let Some(global_root) = &learning.global_memory_root {
+            if !global_root.is_absolute()
+                || global_root
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(StoreConfigError::UnsafeGlobalMemoryRoot {
+                    path: self.config_path.clone(),
+                    global_memory_root: global_root.clone(),
+                });
+            }
+        }
+
         if let Some(inference) = &self.config.inference {
             validate_inference_endpoint(
                 &self.config_path,
@@ -228,6 +252,27 @@ impl ProjectConfig {
     #[must_use]
     pub fn memory_root(&self) -> PathBuf {
         self.project_root.join(&self.config.learning.memory_root)
+    }
+
+    /// The machine-wide global memory root, resolved separately from the project
+    /// store: the configured `global_memory_root` (absolute) when set, otherwise
+    /// `~/.localmind/memory` from the per-OS user home. `None` only when no home
+    /// directory is resolvable and no override is configured.
+    #[must_use]
+    pub fn global_memory_root(&self) -> Option<PathBuf> {
+        if let Some(root) = &self.config.learning.global_memory_root {
+            return Some(root.clone());
+        }
+        home_dir().map(|home| home.join(".localmind").join("memory"))
+    }
+
+    /// Whether the project opts in to machine-wide global-scope memory (its
+    /// `allowed_scopes` lists `GlobalUser`). Global memory is off by default — a
+    /// project must opt in so a global lesson is never written or read without
+    /// consent.
+    #[must_use]
+    pub fn allows_global(&self) -> bool {
+        self.allows_scope(&MemoryScope::GlobalUser)
     }
 
     #[must_use]
@@ -273,6 +318,23 @@ impl ProjectConfig {
     }
 }
 
+/// The per-OS user home directory, used to root the machine-wide global memory
+/// store. Resolved cross-platform (Windows `USERPROFILE`, Unix `HOME`); `None`
+/// when unset so the caller can fall back rather than panic.
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(not(windows))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
 fn validate_inference_endpoint(
     path: &Path,
     endpoint: Option<&str>,
@@ -313,6 +375,11 @@ pub enum StoreConfigError {
     RemoteLearningUnsupported { path: PathBuf },
     #[error("unsafe LocalMind memory root {memory_root:?} in {path:?}")]
     UnsafeMemoryRoot { path: PathBuf, memory_root: PathBuf },
+    #[error("global memory root {global_memory_root:?} in {path:?} must be an absolute path with no `..`")]
+    UnsafeGlobalMemoryRoot {
+        path: PathBuf,
+        global_memory_root: PathBuf,
+    },
     #[error("LocalMind config must allow at least one memory scope: {path:?}")]
     NoAllowedScopes { path: PathBuf },
     #[error("invalid inference endpoint {endpoint:?} in {path:?}; endpoint must be http(s)")]

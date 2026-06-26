@@ -4,6 +4,55 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0017 — Machine-wide global memory: a separate store, a scope classifier, and project-precedence merged retrieval
+
+- **Date**: 2026-06-27
+- **Status**: accepted
+
+The engine modelled a `GlobalUser` scope but never made it real: the memory root
+was always `project_root/.localmind/memory` (even the `global/` subdir lived under
+the project), `allowed_scopes` defaulted to `["project"]`, and the per-project
+SQLite index meant a "global" memory written in one project was invisible to
+every other. So "the more you use it the smarter it gets across projects" could
+not happen.
+
+Decision — three parts, all opt-in (global is off until a project lists
+`global_user` in `allowed_scopes`, so a global lesson is never written or read
+without consent):
+
+1. **A true machine-wide store.** A `GlobalUser` memory resolves to a per-user
+   home root (`~/.localmind/memory`, overridable by an absolute
+   `global_memory_root`), with its own SQLite index beside it — distinct from any
+   project store. The path resolver branches on scope; everything else stays
+   project-rooted. The home is resolved cross-platform (Windows `USERPROFILE`,
+   Unix `HOME`), so the path is tier-1.
+2. **A conservative scope classifier.** `CandidateDestination::default_for_category`
+   routes clearly cross-project categories (user preference, tool-use/tooling,
+   debugging recipe, process, anti-pattern) to global; everything project-specific
+   (conventions, architecture, code patterns, testing/deployment, security, docs,
+   skills, and `Other`) stays project. The review-gate promotion honours an
+   explicit `GlobalMemory` suggestion or this classifier, but **only** when the
+   project opts in — otherwise it falls back to project scope (a safe default,
+   never an error).
+3. **Merged retrieval with project precedence.** `search` queries the project
+   index, then the global index, and merges with project results leading and
+   global results that are not already present (deduped by id and body) appended —
+   so a project lesson always overrides a global one on conflict while a global
+   lesson still surfaces when no project lesson applies. Provenance survives in
+   each result's path (a global path lives under the user-home store).
+
+Consequences: cross-project learning is real and consent-gated. The change is
+additive — a project that never opts in is byte-for-byte unchanged (the default
+`allowed_scopes` stays `["project"]`, no global store is opened). `local_only`
+still holds; the global store is on the same machine, never remote. Reuses the
+existing scope enums, path resolver, FTS index, and review gate rather than a
+parallel memory system. Known first-cut bounds: cross-store *contradiction*
+detection and cross-store bm25 score normalisation are not attempted — precedence
+is by project-leads ordering, not a unified relevance score; and `memory delete`
+of a global entry is a documented follow-up (global memory is visible via
+`memory list` and retrieval today). Pointer: the host (LocalPilot) enables global
+per project by writing `allowed_scopes` in `.localmind.toml`.
+
 ## D-LM-0016 — One reasoned route-to-review flag for both invalidation and down-weighting
 
 - **Date**: 2026-06-22

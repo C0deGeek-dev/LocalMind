@@ -90,6 +90,43 @@ pub enum CandidateDestination {
     Ignore,
 }
 
+impl CandidateDestination {
+    /// The conservative default memory **scope** for a lesson category, used to
+    /// route a promoted lesson to the project store or the machine-wide global
+    /// store. Only clearly cross-project categories — a user preference, a
+    /// tool-use/tooling note, a debugging recipe, a process, an anti-pattern —
+    /// default to global; everything project-specific (conventions, architecture,
+    /// code patterns, testing/deployment, security, docs, skills) stays project.
+    /// Total over every category, conservative by construction: unknown/`Other`
+    /// stays project.
+    #[must_use]
+    pub fn default_for_category(category: &LessonCategory) -> Self {
+        match category {
+            LessonCategory::UserPreference
+            | LessonCategory::ToolingNote
+            | LessonCategory::ToolUse
+            | LessonCategory::DebuggingRecipe
+            | LessonCategory::Process
+            | LessonCategory::AntiPattern => CandidateDestination::GlobalMemory,
+            LessonCategory::ProjectConvention
+            | LessonCategory::ArchitectureRule
+            | LessonCategory::CodePattern
+            | LessonCategory::TestingStrategy
+            | LessonCategory::DeploymentRule
+            | LessonCategory::SecurityWarning
+            | LessonCategory::DocumentationUpdate
+            | LessonCategory::CandidateSkill
+            | LessonCategory::Other(_) => CandidateDestination::ProjectMemory,
+        }
+    }
+
+    /// Whether this destination is the machine-wide global memory store.
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        matches!(self, CandidateDestination::GlobalMemory)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 pub struct Confidence(f32);
 
@@ -338,6 +375,42 @@ mod tool_use_tests {
             last_verified: Some("2026-06-16T00:00:00Z".to_string()),
             invalidation: InvalidationRule::OnToolVersionBump,
             scope: LessonScope::Project,
+        }
+    }
+
+    #[test]
+    fn scope_classifier_routes_cross_project_categories_global_and_keeps_the_rest_project() {
+        use CandidateDestination::{GlobalMemory, ProjectMemory};
+        // Clearly cross-project: a tool-usage / debugging / process / anti-pattern
+        // / user-preference lesson defaults to the machine-wide global store.
+        for category in [
+            LessonCategory::ToolUse,
+            LessonCategory::ToolingNote,
+            LessonCategory::DebuggingRecipe,
+            LessonCategory::Process,
+            LessonCategory::AntiPattern,
+            LessonCategory::UserPreference,
+        ] {
+            assert_eq!(
+                CandidateDestination::default_for_category(&category),
+                GlobalMemory,
+                "{category:?} should classify global"
+            );
+        }
+        // Project-specific: a repo's conventions, architecture, code patterns stay
+        // project; the conservative default also keeps `Other` project.
+        for category in [
+            LessonCategory::ProjectConvention,
+            LessonCategory::ArchitectureRule,
+            LessonCategory::CodePattern,
+            LessonCategory::TestingStrategy,
+            LessonCategory::Other("custom".to_string()),
+        ] {
+            assert_eq!(
+                CandidateDestination::default_for_category(&category),
+                ProjectMemory,
+                "{category:?} should classify project"
+            );
         }
     }
 
