@@ -209,6 +209,72 @@ struct ModelCandidate {
     action: String,
 }
 
+/// Map a model-emitted lesson category to a [`LessonCategory`]. Canonical
+/// snake_case names match exactly; otherwise the free-text label a weaker model
+/// emits ("Python Best Practice", "Testing Strategy") is normalized and
+/// keyword-matched, so a genuinely cross-project lesson lands on a canonical
+/// category — and thus the correct project/global scope — instead of falling to
+/// `Other(_)`, which routes to the per-session project store and is discarded
+/// when that workspace is torn down. Project-domain keywords are checked before
+/// the broader cross-project ones (so "testing best practice" stays a testing
+/// strategy), and a generic "bug_fix" stays `Other` → project rather than
+/// globalizing a one-off typo.
+fn map_lesson_category(raw: &str) -> LessonCategory {
+    let norm = raw.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    match norm.as_str() {
+        "user_preference" => return LessonCategory::UserPreference,
+        "project_convention" => return LessonCategory::ProjectConvention,
+        "architecture_rule" => return LessonCategory::ArchitectureRule,
+        "code_pattern" => return LessonCategory::CodePattern,
+        "debugging_recipe" => return LessonCategory::DebuggingRecipe,
+        "tooling_note" => return LessonCategory::ToolingNote,
+        "testing_strategy" => return LessonCategory::TestingStrategy,
+        "deployment_rule" => return LessonCategory::DeploymentRule,
+        "anti_pattern" => return LessonCategory::AntiPattern,
+        "security_warning" => return LessonCategory::SecurityWarning,
+        "documentation_update" => return LessonCategory::DocumentationUpdate,
+        "candidate_skill" => return LessonCategory::CandidateSkill,
+        "process" => return LessonCategory::Process,
+        "tool_use" => return LessonCategory::ToolUse,
+        _ => {}
+    }
+    let s = norm.as_str();
+    if s.contains("convention") {
+        LessonCategory::ProjectConvention
+    } else if s.contains("architecture") {
+        LessonCategory::ArchitectureRule
+    } else if s.contains("security") {
+        LessonCategory::SecurityWarning
+    } else if s.contains("deploy") {
+        LessonCategory::DeploymentRule
+    } else if s.contains("test") {
+        LessonCategory::TestingStrategy
+    } else if s.contains("doc") {
+        LessonCategory::DocumentationUpdate
+    } else if s.contains("anti")
+        || s.contains("pitfall")
+        || s.contains("gotcha")
+        || s.contains("best_practice")
+        || s.contains("avoid")
+        || s.contains("mistake")
+    {
+        // Cross-project language/general best-practices and anti-patterns: global.
+        LessonCategory::AntiPattern
+    } else if s.contains("debug") || s.contains("recipe") || s.contains("troubleshoot") {
+        LessonCategory::DebuggingRecipe
+    } else if s.contains("tool") || s.contains("command") || s.contains("cli") {
+        LessonCategory::ToolingNote
+    } else if s.contains("process") || s.contains("workflow") {
+        LessonCategory::Process
+    } else if s.contains("preference") {
+        LessonCategory::UserPreference
+    } else if s.contains("pattern") {
+        LessonCategory::CodePattern
+    } else {
+        LessonCategory::Other(raw.trim().to_string())
+    }
+}
+
 impl ModelExtraction {
     fn into_output(self, input: ExtractionInput) -> Result<ExtractionOutput, CloseoutError> {
         let mut summary = SessionSummary::new(
@@ -222,22 +288,7 @@ impl ModelExtraction {
 
         let mut candidates = Vec::new();
         for candidate in self.candidates {
-            let category = match candidate.category.as_str() {
-                "user_preference" => LessonCategory::UserPreference,
-                "project_convention" => LessonCategory::ProjectConvention,
-                "architecture_rule" => LessonCategory::ArchitectureRule,
-                "code_pattern" => LessonCategory::CodePattern,
-                "debugging_recipe" => LessonCategory::DebuggingRecipe,
-                "tooling_note" => LessonCategory::ToolingNote,
-                "testing_strategy" => LessonCategory::TestingStrategy,
-                "deployment_rule" => LessonCategory::DeploymentRule,
-                "anti_pattern" => LessonCategory::AntiPattern,
-                "security_warning" => LessonCategory::SecurityWarning,
-                "documentation_update" => LessonCategory::DocumentationUpdate,
-                "candidate_skill" => LessonCategory::CandidateSkill,
-                "process" => LessonCategory::Process,
-                other => LessonCategory::Other(other.to_string()),
-            };
+            let category = map_lesson_category(&candidate.category);
             let action = match candidate.action.as_str() {
                 "create_skill_draft" => SuggestedAction::CreateSkillDraft,
                 "update_skill_draft" => SuggestedAction::UpdateSkillDraft,
@@ -1053,6 +1104,31 @@ mod tests {
         assert!(extract_json_payload(reply)
             .and_then(|json| serde_json::from_str::<ModelExtraction>(json).ok())
             .is_none());
+    }
+
+    // --- Category mapping: free-text -> canonical -> correct scope ---------
+    #[test]
+    fn free_text_category_routes_to_canonical_scope() {
+        use localmind_core::CandidateDestination;
+        // Canonical names still match exactly.
+        assert_eq!(
+            map_lesson_category("anti_pattern"),
+            LessonCategory::AntiPattern
+        );
+        // Spaced/capitalised labels normalize to the canonical category.
+        assert_eq!(
+            map_lesson_category("Testing Strategy"),
+            LessonCategory::TestingStrategy
+        );
+        // The warm-learning bug: a cross-project language lesson the model labelled
+        // loosely must land on a GLOBAL category, not Other -> project (discarded).
+        let lang = map_lesson_category("Python Best Practice");
+        assert_eq!(lang, LessonCategory::AntiPattern);
+        assert!(CandidateDestination::default_for_category(&lang).is_global());
+        // But a generic one-off fix stays project — don't globalize a typo.
+        let fix = map_lesson_category("bug_fix");
+        assert_eq!(fix, LessonCategory::Other("bug_fix".to_string()));
+        assert!(!CandidateDestination::default_for_category(&fix).is_global());
     }
 
     // --- Rejection rule: bare file paths -----------------------------------
