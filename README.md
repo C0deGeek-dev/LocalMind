@@ -1,141 +1,51 @@
-```
-╔═════╗   ╔═════╗		██╗      ██████╗  ██████╗ █████╗ ██╗     ███╗   ███╗██╗███╗   ██╗██████╗ 
-║ ███ ║═══║ ███ ║		██║     ██╔═══██╗██╔════╝██╔══██╗██║     ████╗ ████║██║████╗  ██║██╔══██╗
-║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ███████║██║     ██╔████╔██║██║██╔██╗ ██║██║  ██║
-║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ██╔══██║██║     ██║╚██╔╝██║██║██║╚██╗██║██║  ██║
-╚═════╝   ╚═════╝║		███████╗╚██████╔╝╚██████╗██║  ██║███████╗██║ ╚═╝ ██║██║██║ ╚████║██████╔╝
- ╚═══════════════╝		╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ 
-```                                                                                        
-# LocalMind
+<div align="center">
+  <h1>LocalMind</h1>
+  <p><strong>Turn reviewed AI sessions into useful project memory. Locally.</strong></p>
+  <p>
+    <a href="docs/wiki/Getting-Started.md">Getting started</a> ·
+    <a href="docs/on-disk-contract.md">On-disk contract</a> ·
+    <a href="vision.md">Vision</a> ·
+    <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
+  </p>
+  <p>
+    <a href="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg"></a>
+    <img alt="LocalX release train 1.0.0" src="https://img.shields.io/badge/release%20train-v1.0.0-69d987?style=flat-square">
+    <img alt="Markdown and SQLite storage" src="https://img.shields.io/badge/storage-Markdown%20%C2%B7%20SQLite-59636e?style=flat-square">
+  </p>
+</div>
 
-[![ci](https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg)](https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml)
+LocalMind is a local-first learning layer for AI-assisted development. It imports
+opted-in sessions, removes likely secrets, extracts candidate lessons, asks a
+human to review them, and stores accepted knowledge as readable project files.
 
-LocalMind is a local-first learning layer for AI-assisted development.
+| At a glance | |
+|---|---|
+| **Use it when** | Your agent keeps rediscovering the same fixes, decisions, and project conventions |
+| **It remembers** | Only lessons you explicitly accept or edit |
+| **It stores** | Readable Markdown memory plus a local SQLite audit/search index |
+| **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
+| **Cloud required** | No |
 
-The goal is to turn opted-in AI development sessions into reviewed project
-memory, graph-connected knowledge, and reusable skills without sending private
-work to external services by default.
+> [!IMPORTANT]
+> LocalMind is opt-in and review-gated. It refuses project memory writes until
+> `.localmind.toml` enables learning, and it never promotes a candidate lesson
+> automatically.
 
-**The more an agent uses it, the better it gets.** In a controlled uplift eval
-(LocalBench `localbench-uplift-v1`), injecting accepted lessons lifted a held-out
-task suite's solve rate from **0% to 100%**, and the effect held on a second
-local model. All learning is **local-first and review-gated**: lessons are
-distilled from opted-in sessions, you approve what is remembered, and nothing
-leaves your machine by default.
+## Quick start
 
-## LocalX Ecosystem
+Build the CLI:
 
-- [LocalStack](https://github.com/C0deGeek-dev/LocalStack) is the umbrella
-  ecosystem for the LocalX tools.
-- [LocalBox](https://github.com/C0deGeek-dev/LocalBox) is the model runtime
-  and launcher for local GGUF models.
-- [LocalMind](https://github.com/C0deGeek-dev/LocalMind) is this local-first
-  learning engine for reviewed project memory, graph-connected knowledge,
-  reusable skills, and agent context.
-- [LocalBench](https://github.com/C0deGeek-dev/LocalBench) is the benchmarking
-  and evaluation companion for local model/runtime choices.
-- [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) is the local CLI
-  coding agent that embeds LocalMind natively.
-
-## Architecture Posture
-
-LocalMind is implemented as an extracted, host-neutral learning engine. The core
-contracts live in Rust library crates so host runtimes can embed the same engine
-without calling a separate service.
-
-LocalPilot is the first native host: it should bundle LocalMind-backed learning
-as built-in memory, review, context, and skill behavior. LocalMind core never
-depends on LocalPilot; LocalPilot maps its session bundles, tool events, diffs,
-test results, and recovery events into LocalMind contracts through an adapter.
-
-The standalone `localmind` CLI is the shell around the same engine for generic
-transcripts, Claude Code, OpenAI Codex, and MCP clients. The MCP query and
-active-skill contracts are **implemented** in `localmind-mcp`; what remains
-future is a standalone MCP *server host* that exposes them as a long-running
-process.
-
-## Repository Role
-
-This repository is the implementation home for the system described in
-`vision.md`.
-
-The companion repository `c0degeek-ai` remains the reusable workflow asset
-repository for prompts, planning templates, review checklists, and `SKILL.md`
-files. LocalMind should consume, generate, and operationalize those kinds of
-assets, not turn the workflow asset repository into an application codebase.
-
-## Documentation
-
-- `vision.md` — the product vision, including the **Implementation Status**
-  table mapping each component to what actually exists in code today.
-- `docs/on-disk-contract.md` — the on-disk contract (config, directory
-  layout, Markdown memory format, database schema, versioning) for host
-  authors.
-- `CHANGELOG.md` — notable changes; release tags mark contract-relevant
-  snapshots.
-
-Note on extraction: the current extractor is deterministic — explicit
-`Lesson:` markers plus heuristics for failure→resolution pairs, repeated
-commands, and user corrections. There is no model in the loop yet; the
-`SessionExtractor` trait is the seam where an LLM-backed extractor lands.
-
-## Starting Point
-
-Initial MVP target:
-
-- Import session transcripts manually.
-- Redact likely secrets before storage.
-- Generate a session summary.
-- Extract candidate lessons.
-- Review lessons in a terminal queue.
-- Save accepted lessons to Markdown memory files.
-- Keep a SQLite audit log.
-- Support basic search.
-- Suggest `SKILL.md` files for repeated workflows.
-
-Current workspace layout:
-
-- `crates/localmind-core` — neutral session, evidence, lesson, review, memory,
-  context, skill, audit, and host-adapter contracts.
-- `crates/localmind-store` — Markdown memory plus queue/audit/index storage
-  boundary.
-- `crates/localmind-review` — manual review workflow boundary.
-- `crates/localmind-search` — retrieval/search boundary.
-- `crates/localmind-skills` — skill draft generation and maintenance boundary.
-- `crates/localmind-cli` — standalone CLI entry point.
-- `crates/localmind-mcp` — MCP surface: graph-query tools and active-skill
-  listing/fetch contracts (implemented); a standalone server host is future.
-
-## Development
-
-The local gate mirrors CI (`rust-toolchain.toml` pins the same toolchain CI
-uses, so local clippy matches the CI clippy contract):
-
-```powershell
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo check --workspace
+```sh
+git clone https://github.com/C0deGeek-dev/LocalMind.git
+cd LocalMind
+cargo build -p localmind-cli
 cargo run -p localmind-cli -- --help
 ```
 
-Aliases for the CI steps live in `.cargo/config.toml`: `cargo ci-fmt`,
-`cargo ci-lint`, `cargo ci-test` (nextest, as in CI), `cargo ci-doctest`.
-
-Memory quality has a regression gate: `localmind eval` scores extraction
-precision/recall and retrieval recall@k against a golden fixture set (`-k` sets
-the retrieval cutoff; `--json` emits machine-readable output).
-
-The MVP remains local-first and opt-in. No cloud dependency, autonomous memory
-write, hidden transcript capture, or host-specific dependency belongs in
-`localmind-core`.
-
-## Project Opt-In
-
-LocalMind refuses project memory writes unless the repository contains an
-enabled `.localmind.toml` file:
+Enable local-only learning in the project you want LocalMind to serve:
 
 ```toml
+# .localmind.toml
 [learning]
 enabled = true
 local_only = true
@@ -144,116 +54,149 @@ allowed_scopes = ["project"]
 excluded_paths = ["target/**", ".git/**"]
 ```
 
-The default memory root is inside `.localmind/memory`, and write paths are
-validated so accepted memory files stay inside that root. Durable memory is
-serialized as readable Markdown with front matter for scope, category,
-confidence, source session, evidence, related files/entities, and supersession
-metadata.
+Import a transcript, close the session out, and inspect the review queue:
 
-## Transcript Import
-
-Opted-in projects can import local transcript files manually:
-
-```powershell
-localmind import .\session.txt --project . --source open-ai-codex
+```sh
+localmind import ./session.txt --project . --source open-ai-codex
+localmind closeout <session-id> --project .
+localmind review list --project .
 ```
 
-Supported first-pass sources are `generic`, `claude-code`, `open-ai-codex`, and
-`localpilot`. Supported first-pass formats are `plain-text`, `json-lines`, and
-`markdown`; all are currently persisted as redacted raw transcript material for
-later summary/extraction stages.
+Accept one durable lesson, then promote and find it:
 
-Imports write deterministic, content-derived session folders under
+```sh
+localmind review accept <lesson-id> --project . --reviewer <your-name>
+localmind promote <lesson-id> --project .
+localmind search "deterministic fixtures" --project .
+```
+
+If you are running from the checkout instead of an installed binary, prefix a
+command with `cargo run -p localmind-cli --`.
+
+## The learning loop
+
+```text
+opted-in session
+      │
+      ▼
+redact ──> summarize ──> candidate lessons ──> human review
+                                                   │
+                               accepted only ──────┘
+                                      │
+                                      ▼
+                         Markdown memory + local index
+                                      │
+                                      ▼
+                           context for a later session
+```
+
+The current extractor is deterministic: explicit `Lesson:` markers plus
+heuristics for failure-and-resolution pairs, repeated commands, and user
+corrections. `SessionExtractor` is the seam for future model-backed extraction;
+cloud inference is not the default.
+
+## Review is the safety boundary
+
+| Command | What happens |
+|---|---|
+| `localmind review list` | Show pending candidates |
+| `localmind review inspect <id>` | Read the evidence before deciding |
+| `localmind review accept <id>` | Mark the lesson as durable enough to keep |
+| `localmind review edit <id> "…"` | Correct the lesson before accepting it |
+| `localmind review reject <id>` | Reject it, optionally with a note |
+| `localmind review defer <id>` | Leave it for later |
+| `localmind promote <id>` | Write an accepted lesson to project memory |
+| `localmind audit` | Inspect the local decision history |
+
+Promotion writes readable Markdown below `.localmind/memory/project/`, updates
+the local search and relationship index, and records an audit event in
+`.localmind/localmind.sqlite`.
+
+## What gets written
+
+An imported session receives a deterministic folder under
 `.localmind/sessions/<session-id>/`:
 
-- `transcript.redacted.txt`
-- `metadata.json`
-
-Likely API keys, bearer tokens, password/token assignments, connection-string
-passwords, private keys, and configured sensitive paths are redacted before
-those artifacts are written.
-
-Imported sessions can be closed out into a deterministic summary and candidate
-lesson set:
-
-```powershell
-localmind closeout session-1234 --project .
+```text
+transcript.redacted.txt
+metadata.json
+summary.json
+candidates.json
 ```
 
-The first extractor is local and deterministic. It writes `summary.json` and
-`candidates.json` beside the imported transcript, validates candidate confidence
-and malformed output, and deduplicates repeated lesson text. Model-backed
-extraction can be added later behind the same extractor trait without making
-cloud calls the default.
+Likely API keys, bearer tokens, token/password assignments, connection-string
+passwords, private keys, and configured sensitive paths are redacted before the
+transcript is persisted.
 
-Candidate lessons are queued in `.localmind/localmind.sqlite` for terminal
-review. Closeout enqueues candidates idempotently; no durable memory write
-happens until a later promotion stage consumes accepted review items.
+## Context and skill drafts
 
-```powershell
-localmind review list --project .
-localmind review inspect lesson-1234 --project .
-localmind review accept lesson-1234 --project . --reviewer david
-localmind review reject lesson-1234 --project . --note "not durable"
-localmind review edit lesson-1234 "Prefer deterministic fixtures." --project .
-localmind review defer lesson-1234 --project .
-```
+Accepted memory can be packaged for different agent hosts:
 
-Accepted or edited review items can then be promoted into Markdown project
-memory. Promotion writes the memory file, updates the local search index and
-relationship metadata, and records a SQLite audit event:
-
-```powershell
-localmind promote lesson-1234 --project .
-localmind search "deterministic fixtures" --project .
-localmind audit --project .
-```
-
-Review decisions also write audit rows through the CLI. The audit log and search
-index live in `.localmind/localmind.sqlite`; the durable accepted memory remains
-readable Markdown below `.localmind/memory/project/`.
-
-## Context Export And Skill Drafts
-
-LocalMind can render accepted memory and disabled skill suggestions as concise
-agent context:
-
-```powershell
-localmind context export "deterministic fixtures" --target open-ai-codex --project .
+```sh
 localmind context export "release checklist" --target localpilot --project .
+localmind context export "deterministic fixtures" --target open-ai-codex --project .
 ```
 
-Targets are `generic`, `claude-code`, `open-ai-codex`, and `localpilot`. The
-LocalPilot target is a native-host fixture surface: LocalPilot can map its
-session bundle into LocalMind contracts and render the returned context as
-built-in learning behavior without requiring users to install LocalMind
-separately.
+Repeated workflows can become disabled `SKILL.md` drafts:
 
-Accepted review items that describe a repeated workflow or candidate skill can
-generate disabled `SKILL.md` drafts under `.localmind/skill-drafts/`:
-
-```powershell
+```sh
 localmind skills generate --project .
 localmind skills list --project .
-localmind skills inspect skill-lesson-1234 --project .
-localmind skills export skill-lesson-1234 --project .
+localmind skills inspect <skill-id> --project .
+localmind skills export <skill-id> --project .
 ```
 
-Generated drafts include a disabled front matter flag, name, description,
-trigger conditions, workflow steps, constraints, verification steps, related
-memories, source agents, and last-reviewed metadata. LocalMind never installs or
-activates generated skills automatically.
+LocalMind never installs or activates a generated skill by itself.
 
-## Planning
+## Evidence so far
 
-Before implementation, run the plan template from `c0degeek-ai` against this
-repository and use the notes in `docs/planning-handoff.md` as seed context.
+In the controlled `localbench-uplift-v1` evaluation, injecting accepted lessons
+lifted a deliberately headroom-rich held-out suite from **0% to 100%**. The
+effect held on a second local model. This is evidence that reviewed memory can
+change outcomes, not a claim that every task becomes solvable.
 
-The existing Captain Hindsight workflow in `c0degeek-ai` is an early primitive
-for LocalMind's close-out review and lesson extraction flow. LocalMind should
-eventually make that kind of review repeatable, reviewable, auditable, and
-connected to durable memory.
+## Architecture for host authors
 
-## Vision
+The learning engine is split into host-neutral Rust crates. LocalPilot embeds it
+through an adapter; the core never depends on LocalPilot. The standalone CLI
+uses the same contracts for generic transcripts and other agent hosts.
 
-See `vision.md`.
+| Area | Start here |
+|---|---|
+| Product scope and implementation status | [Vision](vision.md) |
+| Files, schema, versioning, and host contracts | [On-disk contract](docs/on-disk-contract.md) |
+| Architecture decisions | [Decisions](docs/decisions.md) |
+| Research ingestion and distillation | [Research distillation](docs/research-distillation.md) |
+| Full documentation map | [Docs index](docs/README.md) |
+| Release history | [Changelog](CHANGELOG.md) |
+
+<details>
+<summary><strong>Developing LocalMind</strong></summary>
+
+The local gate mirrors CI:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo check --workspace
+cargo run -p localmind-cli -- --help
+```
+
+CI aliases live in `.cargo/config.toml`: `cargo ci-fmt`, `cargo ci-lint`,
+`cargo ci-test`, and `cargo ci-doctest`. `localmind eval` runs the memory-quality
+regression suite and can emit JSON with `--json`.
+
+</details>
+
+## LocalX
+
+LocalMind is the learning layer in the
+[LocalX toolchain](https://c0degeek-dev.github.io/LocalStack/):
+
+| Project | Role |
+|---|---|
+| [LocalBox](https://github.com/C0deGeek-dev/LocalBox) | Run local models |
+| [LocalBench](https://github.com/C0deGeek-dev/LocalBench) | Find fast, stable settings |
+| [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) | Code through the agent harness |
+| **LocalMind** | Turn reviewed sessions into reusable project memory |
