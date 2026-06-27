@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Portable memory bundle (format v1).** Accepted memory can be exported to a
+  portable, versioned, self-describing JSON pack (`MemoryBundle`) and parsed back,
+  the basis for moving knowledge across your own machines and sharing it. The
+  bundle is built from the Markdown source of truth via the new
+  `MarkdownMemoryFormat::parse` (the inverse of `serialize`), reusing the
+  canonical model serde — no second serialization of a lesson. Export is
+  accepted-only, scope-selectable (`project`/`global`/`both`), re-redacted with a
+  pre-export `SecretScanReport` seam, and deterministic/content-addressable; a
+  reader rejects an unknown newer `format_version`. Signing/verify and the
+  import/merge path layer on top (later changes). Contract:
+  `docs/on-disk-contract.md` §Portable memory bundle.
+
 - **Machine-wide global memory (on by default).** The modelled-but-dormant
   `GlobalUser` scope is now real and on by default: `allowed_scopes` defaults to
   `["project", "global_user"]`, so cross-project knowledge accumulates in a

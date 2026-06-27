@@ -151,10 +151,57 @@ Markdown memory or graph state and may be rebuilt. Inference audit rows record
 feature, endpoint kind, model id, and token counts when available; raw prompt
 or response content is never written to `audit_events`.
 
+## Portable memory bundle
+
+A **bundle** is a portable, self-describing JSON pack of *accepted* memory that
+can be moved to another machine or shared with another person and re-imported —
+unlike a context export (`localmind context export`), which renders memory as
+prose for a prompt and is one-way. The bundle is built from the Markdown source
+of truth (parsed back into entries via `MarkdownMemoryFormat::parse`), so it
+reuses the canonical model serde and is **not** a second serialization of a
+lesson.
+
+Shape (`format_version` **1**):
+
+```json
+{
+  "format_version": 1,
+  "metadata": {
+    "created_by": "<author id, or \"anonymous\">",
+    "scope_selection": "project | global | both",
+    "entry_count": <n>,
+    "redaction_count": <total redaction hits applied on export>
+  },
+  "entries": [ <MemoryEntry>, ... ]
+}
+```
+
+- **Accepted-only.** Only `status = active` memory is exported; the selected
+  scope (`project`, `global`, or `both`) filters which entries are included.
+- **Redacted on export.** Each entry's body and evidence labels/URIs are run
+  through the same `Redactor` again (defense in depth on top of capture-time
+  redaction); `metadata.redaction_count` and the returned `SecretScanReport` are
+  the seam a caller uses to require an explicit confirm before sharing.
+- **Deterministic + content-addressable.** Entries are ordered by id and the
+  canonical bytes (entries sorted by id, compact JSON) are stable across runs and
+  machines, so a digest/signature over them is reproducible.
+- **Versioned.** A reader rejects a bundle whose `format_version` is newer than
+  it understands, with a reason — old packs keep importing across upgrades.
+- **Relationship to seed packs.** A seed pack (`localmind`/`localpilot learning
+  seed`) is *author-curated input* (a `SeedLesson` list) written directly into
+  accepted memory at authoring time; a bundle is *exported output* — a faithful,
+  signed round-trip of memory the store already accepted. Seeds remain valid and
+  unchanged; the bundle is the new re-importable, attributable format.
+
+Signing/verification (a content digest + an Ed25519 signature + trust
+classification) layer on top of the canonical bytes; see the signing section /
+`D-LM` decision once it lands.
+
 ## Versioning
 
 - Database schema: `PRAGMA user_version` stepper (above).
 - Graph payload: `graph_meta.format_version`.
+- Portable bundle: `format_version` (currently **1**).
 - Crate/API versions: workspace version + `CHANGELOG.md`; release tags
   (`v<workspace version>`) mark contract-relevant changes. Hosts pinning a
   commit (e.g. a git submodule) get the contract as of that commit.

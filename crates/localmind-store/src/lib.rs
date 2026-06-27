@@ -4,6 +4,7 @@
 //! and index state. This crate owns that persistence behavior and establishes
 //! the host → engine dependency direction.
 
+mod bundle;
 mod config;
 mod context_export;
 mod dedup;
@@ -21,6 +22,10 @@ mod review_queue;
 mod schema;
 mod skill_drafts;
 
+pub use bundle::{
+    BundleError, BundleMetadata, BundleScope, ExportOutcome, MemoryBundle, MemoryBundleExporter,
+    SecretScanReport, MEMORY_BUNDLE_FORMAT_VERSION,
+};
 pub use config::{
     LearningConfig, LocalMindConfig, ProjectConfig, RetrievalConfig, ReviewConfig,
     ReviewModeConfig, StoreConfigError,
@@ -41,7 +46,7 @@ pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
-pub use markdown::MarkdownMemoryFormat;
+pub use markdown::{MarkdownMemoryFormat, MarkdownParseError};
 pub use memory_persistence::{
     AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryProvenance, MemoryRecord,
     MemorySearchResult, VectorSearchResult,
