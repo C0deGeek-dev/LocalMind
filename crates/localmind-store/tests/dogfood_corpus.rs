@@ -65,7 +65,7 @@ fn reextract_corpus_reports_clean_candidates() -> Result<(), Box<dyn std::error:
         let temp_dir = tempfile::tempdir()?;
         fs::write(
             temp_dir.path().join(".localmind.toml"),
-            "[learning]\nenabled = true\n",
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
         )?;
         let config = ProjectConfig::discover(temp_dir.path())?;
         let import = TranscriptImporter::import_text(

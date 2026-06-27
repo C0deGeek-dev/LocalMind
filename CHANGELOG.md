@@ -5,18 +5,21 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
-- **Machine-wide global memory (opt-in).** The modelled-but-dormant `GlobalUser`
-  scope is now real: a project that lists `global_user` in `allowed_scopes` gets a
-  separate, per-user-home store (`~/.localmind/memory`, overridable by an absolute
-  `global_memory_root`) with its own index, shared across every opted-in project.
-  A conservative scope classifier
+- **Machine-wide global memory (on by default).** The modelled-but-dormant
+  `GlobalUser` scope is now real and on by default: `allowed_scopes` defaults to
+  `["project", "global_user"]`, so cross-project knowledge accumulates in a
+  separate per-user-home store (`~/.localmind/memory`, overridable by an absolute
+  `global_memory_root` or the `LOCALMIND_GLOBAL_ROOT` env — `@project` roots it
+  under each project for hermetic tests) with its own index, shared across
+  projects. A conservative scope classifier
   (`CandidateDestination::default_for_category`) routes clearly cross-project
   lessons (tool-use, debugging recipe, process, anti-pattern, user preference) to
-  global and keeps project-specific lessons project; the review-gate promotion
-  honours it only when the project opts in. Retrieval merges project + global with
-  **project precedence**. Off by default — a project that never opts in is
-  unchanged, `local_only` still holds (the global store is same-machine, never
-  remote). Contract: `docs/on-disk-contract.md` §Global-scope store; D-LM-0017.
+  global and keeps project-specific lessons project; promotion stays review-gated.
+  Retrieval merges project + global with **project precedence**, and
+  `delete_memory` is now scope-aware. `local_only` still holds (same-machine,
+  never remote). A project that wants project-only memory sets
+  `allowed_scopes = ["project"]`. Contract: `docs/on-disk-contract.md`
+  §Global-scope store; D-LM-0017.
 
 ## v1.0.0 - 2026-06-24
 

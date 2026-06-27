@@ -16,9 +16,11 @@ SQLite index meant a "global" memory written in one project was invisible to
 every other. So "the more you use it the smarter it gets across projects" could
 not happen.
 
-Decision — three parts, all opt-in (global is off until a project lists
-`global_user` in `allowed_scopes`, so a global lesson is never written or read
-without consent):
+Decision — three parts. Global scope is **on by default**: `allowed_scopes`
+defaults to `["project", "global_user"]`, so cross-project knowledge accumulates
+out of the box. A project that wants project-only memory narrows `allowed_scopes`
+to `["project"]`. It stays `local_only` (same-machine, never remote). The three
+parts:
 
 1. **A true machine-wide store.** A `GlobalUser` memory resolves to a per-user
    home root (`~/.localmind/memory`, overridable by an absolute
@@ -41,17 +43,20 @@ without consent):
    lesson still surfaces when no project lesson applies. Provenance survives in
    each result's path (a global path lives under the user-home store).
 
-Consequences: cross-project learning is real and consent-gated. The change is
-additive — a project that never opts in is byte-for-byte unchanged (the default
-`allowed_scopes` stays `["project"]`, no global store is opened). `local_only`
-still holds; the global store is on the same machine, never remote. Reuses the
-existing scope enums, path resolver, FTS index, and review gate rather than a
-parallel memory system. Known first-cut bounds: cross-store *contradiction*
-detection and cross-store bm25 score normalisation are not attempted — precedence
-is by project-leads ordering, not a unified relevance score; and `memory delete`
-of a global entry is a documented follow-up (global memory is visible via
-`memory list` and retrieval today). Pointer: the host (LocalPilot) enables global
-per project by writing `allowed_scopes` in `.localmind.toml`.
+Consequences: cross-project learning is real and on by default, so the engine
+gets smarter across a user's projects without configuration. `local_only` still
+holds; the global store is on the same machine, never remote. Reuses the existing
+scope enums, path resolver, FTS index, review gate, and `delete_memory` (now
+scope-aware) rather than a parallel memory system. The global store root is the
+per-user home (`~/.localmind/memory`), overridable by an absolute
+`global_memory_root` config or the `LOCALMIND_GLOBAL_ROOT` env — the special value
+`@project` roots it under each project, which keeps tests/CI hermetic now that
+global is default-on (each project's global store is its own; an installed binary
+leaves the env unset and uses the home default). Known bound: cross-store
+*contradiction* detection and cross-store bm25 score normalisation are not
+attempted — precedence is project-leads ordering, not a unified relevance score.
+A project that wants the old project-only behaviour sets
+`allowed_scopes = ["project"]`.
 
 ## D-LM-0016 — One reasoned route-to-review flag for both invalidation and down-weighting
 

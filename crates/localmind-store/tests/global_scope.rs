@@ -81,12 +81,13 @@ fn a_global_memory_persists_outside_the_project_and_survives_its_deletion() {
 }
 
 #[test]
-fn global_scope_is_opt_in_a_project_that_does_not_allow_it_refuses_a_global_write() {
+fn a_project_can_narrow_to_project_only_and_then_a_global_write_is_refused() {
     let project = tempfile::tempdir().unwrap();
-    // No `global_user` in allowed_scopes (the default): global is off.
+    // Global is on by default; a project that wants project-only memory narrows
+    // `allowed_scopes` to `["project"]`, after which a global write is refused.
     std::fs::write(
         project.path().join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )
     .unwrap();
     let persistence = MemoryPersistence::open_project(project.path()).unwrap();
@@ -95,8 +96,30 @@ fn global_scope_is_opt_in_a_project_that_does_not_allow_it_refuses_a_global_writ
         .unwrap_err();
     assert!(
         matches!(err, MemoryPersistenceError::GlobalScopeDisabled),
-        "a global write without opt-in must be refused, got {err:?}"
+        "a project narrowed to project-only must refuse a global write, got {err:?}"
     );
+}
+
+#[test]
+fn global_scope_is_on_by_default_no_opt_in_needed() {
+    let global = tempfile::tempdir().unwrap();
+    let global_root = global.path().join("memory");
+    let project = tempfile::tempdir().unwrap();
+    // A bare config (only `enabled = true`) — global is allowed by default. The
+    // global root is pinned to a temp dir so the test never touches the real home.
+    std::fs::write(
+        project.path().join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nglobal_memory_root = '{}'\n",
+            global_root.display()
+        ),
+    )
+    .unwrap();
+    let persistence = MemoryPersistence::open_project(project.path()).unwrap();
+    let path = persistence
+        .persist_memory_entry(&entry("g1", "use ripgrep", MemoryScope::GlobalUser))
+        .expect("global write is allowed by default");
+    assert!(path.starts_with(&global_root));
 }
 
 #[test]

@@ -119,7 +119,11 @@ fn default_memory_root() -> PathBuf {
 }
 
 fn default_allowed_scopes() -> Vec<MemoryScope> {
-    vec![MemoryScope::Project]
+    // Global-scope memory is on by default: cross-project knowledge (tool-use
+    // patterns, debugging recipes, durable preferences) accumulates in the
+    // machine-wide store out of the box. It stays `local_only` (same-machine), and
+    // a project that wants project-only memory narrows this to `["project"]`.
+    vec![MemoryScope::Project, MemoryScope::GlobalUser]
 }
 
 fn default_trusted_threshold() -> f32 {
@@ -262,6 +266,21 @@ impl ProjectConfig {
     pub fn global_memory_root(&self) -> Option<PathBuf> {
         if let Some(root) = &self.config.learning.global_memory_root {
             return Some(root.clone());
+        }
+        // `LOCALMIND_GLOBAL_ROOT` redirects the machine-wide store away from the
+        // home directory. The special value `@project` roots it under *this*
+        // project (`<project>/.localmind-global`) — per-project isolation that
+        // keeps tests/CI hermetic now that global scope is on by default (each
+        // test's global store is its own and is cleaned with its workspace);
+        // production leaves it unset and uses the home default. Any other value is
+        // an explicit absolute override.
+        if let Some(env_root) = std::env::var_os("LOCALMIND_GLOBAL_ROOT") {
+            if !env_root.is_empty() {
+                if env_root == "@project" {
+                    return Some(self.project_root.join(".localmind-global"));
+                }
+                return Some(PathBuf::from(env_root));
+            }
         }
         home_dir().map(|home| home.join(".localmind").join("memory"))
     }

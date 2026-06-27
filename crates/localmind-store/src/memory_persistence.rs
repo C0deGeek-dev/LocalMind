@@ -428,12 +428,24 @@ impl MemoryPersistence {
         memory_id: &MemoryEntryId,
         actor: &str,
     ) -> Result<bool, MemoryPersistenceError> {
-        let path = self.memory_path(memory_id)?;
-        let Some(path) = path else {
-            return Ok(false);
-        };
+        // The memory may live in the project store or the machine-wide global
+        // store; resolve which one holds it (project first), along with that
+        // store's connection and root for the containment check.
+        let (connection, root, path) =
+            if let Some(path) = Self::memory_path_in(&self.connection, memory_id)? {
+                (&self.connection, self.config.memory_root(), path)
+            } else if let (Some(global), Some(global_root)) =
+                (&self.global, self.config.global_memory_root())
+            {
+                match Self::memory_path_in(&global.connection, memory_id)? {
+                    Some(path) => (&global.connection, global_root, path),
+                    None => return Ok(false),
+                }
+            } else {
+                return Ok(false);
+            };
 
-        if !path_is_under_root(&self.config.memory_root(), &path) {
+        if !path_is_under_root(&root, &path) {
             return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
         }
 
@@ -455,8 +467,7 @@ impl MemoryPersistence {
 
         // Relationships, FTS, index, and the audit row commit atomically: no
         // crash point can leave the database referencing half a memory.
-        let tx = self
-            .connection
+        let tx = connection
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
         tx.execute(
@@ -929,12 +940,14 @@ impl MemoryPersistence {
         Ok(relationships)
     }
 
-    fn memory_path(
-        &self,
+    /// The on-disk path of an active memory in the given store, or `None` when the
+    /// id is unknown there — used to locate a memory across the project and global
+    /// stores before deleting it.
+    fn memory_path_in(
+        connection: &Connection,
         memory_id: &MemoryEntryId,
     ) -> Result<Option<PathBuf>, MemoryPersistenceError> {
-        let mut statement = self
-            .connection
+        let mut statement = connection
             .prepare("SELECT path FROM memory_index WHERE memory_id = ?1 AND status = 'active'")
             .map_err(MemoryPersistenceError::Sqlite)?;
         match statement.query_row(params![memory_id.as_str()], |row| {

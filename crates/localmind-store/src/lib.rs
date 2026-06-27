@@ -878,9 +878,13 @@ mod tests {
         project_root: &std::path::Path,
         lesson_text: &str,
     ) -> Result<ReviewItemId, Box<dyn std::error::Error>> {
+        // This fixture exercises project-store mechanics (promote / list / delete /
+        // audit), so it pins memory to the project scope — global memory is on by
+        // default and would route a cross-project category (e.g. `Process`) to the
+        // machine-wide store, which these project-path assertions do not cover.
         fs::write(
             project_root.join(".localmind.toml"),
-            "[learning]\nenabled = true\n",
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
         )?;
         let config = ProjectConfig::discover(project_root)?;
         let import = TranscriptImporter::import_text(

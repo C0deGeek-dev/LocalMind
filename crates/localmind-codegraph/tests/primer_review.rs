@@ -10,7 +10,12 @@ use std::fs;
 use std::path::Path;
 
 fn project(root: &Path) {
-    if fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").is_err() {
+    if fs::write(
+        root.join(".localmind.toml"),
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+    )
+    .is_err()
+    {
         unreachable!("config write must succeed");
     }
 }

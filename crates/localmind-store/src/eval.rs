@@ -159,7 +159,10 @@ fn score_fixture<E: SessionExtractor>(
     })?;
     fs::write(
         project.join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        // The golden eval measures project-store retrieval/recall deterministically;
+        // pin to project scope so global-on-by-default does not route a fixture to
+        // the shared machine-wide store.
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )
     .map_err(|source| EvalError::Workspace {
         path: project.clone(),

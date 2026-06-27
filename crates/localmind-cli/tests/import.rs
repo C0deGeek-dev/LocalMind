@@ -11,7 +11,7 @@ fn import_command_writes_redacted_transcript() -> Result<(), Box<dyn std::error:
     )?;
     fs::write(
         temp_dir.path().join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )?;
 
     let mut command = Command::cargo_bin("localmind")?;
@@ -47,7 +47,7 @@ fn closeout_command_writes_summary_and_candidates() -> Result<(), Box<dyn std::e
     )?;
     fs::write(
         temp_dir.path().join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )?;
 
     let import_output = Command::cargo_bin("localmind")?
@@ -145,7 +145,7 @@ fn localpilot_fixture_exports_context_and_skill_draft() -> Result<(), Box<dyn st
     )?;
     fs::write(
         temp_dir.path().join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )?;
 
     let import_output = Command::cargo_bin("localmind")?

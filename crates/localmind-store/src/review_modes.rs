@@ -382,7 +382,7 @@ mod tests {
         let root = dir.path();
         std::fs::write(
             root.join(".localmind.toml"),
-            "[learning]\nenabled = true\n\n[review]\nmode = \"automatic\"\n",
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"automatic\"\n",
         )
         .unwrap();
 
@@ -465,7 +465,7 @@ mod tests {
         let root = dir.path();
         std::fs::write(
             root.join(".localmind.toml"),
-            "[learning]\nenabled = true\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\n",
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\n",
         )
         .unwrap();
 
@@ -520,7 +520,7 @@ mod tests {
         let root = dir.path();
         std::fs::write(
             root.join(".localmind.toml"),
-            "[learning]\nenabled = true\n\n[review]\nmode = \"manual\"\n",
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"manual\"\n",
         )
         .unwrap();
         let persistence = MemoryPersistence::open_project(root).unwrap();
