@@ -4,6 +4,66 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0018 — Portable memory bundles are signed; verify is fail-closed and local-trust; verified author ≠ verified content
+
+- **Date**: 2026-06-27
+- **Status**: accepted
+
+LocalMind can now export accepted memory to a portable bundle (D-LM-0018 builds
+on the bundle format) and import it elsewhere. Moving knowledge across machines —
+and especially *importing from other people* — is unsafe without integrity and
+attribution: a pack could be tampered with in transit or forged. But over-trust
+is the opposite failure: a valid signature must never be mistaken for "this
+content is correct."
+
+Decision — four parts.
+
+1. **Cryptography (vetted, pinned, pure-Rust).** Bundles are signed with
+   **Ed25519** (`ed25519-dalek =2.1.1`, pulling the audited `curve25519-dalek
+   4.1.3` that closed RUSTSEC-2024-0344) over a **SHA-256** (`sha2 =0.10.8`)
+   digest of the bundle's deterministic canonical bytes; the signing-key seed is
+   drawn from the OS CSPRNG (`getrandom =0.2.15`). No bespoke crypto. The crates
+   are pinned, MSRV-1.82-compatible, and `cargo deny check`-clean (advisories /
+   bans / licenses / sources). `#![forbid(unsafe_code)]` holds — unsafe lives only
+   inside the vendored crates.
+
+2. **Local trust, no PKI (D002).** Trust is a local keypair plus a manual trust
+   list — there is no key-distribution service, registry, or network. The author
+   is a *key-bound fingerprint* (`sha256(public_key)[..16]`), so an author cannot
+   be spoofed with a different key.
+
+3. **Fail-closed verification with three outcomes.** On import the digest is
+   recomputed, the signature verified, and the schema/version validated. Any
+   doubt → **`Rejected`** (bad digest, bad signature, malformed key/signature,
+   author/key mismatch, or unsupported schema/version). A valid signature by a
+   *known* key (your own, or one you added to the trust list) → **`Trusted`**; a
+   valid signature by an *unknown* key → **`Untrusted`** (allowed, but flagged for
+   heavier review). A `Rejected` bundle never reaches the store.
+
+4. **Verified author ≠ verified content.** A signature attests integrity and
+   authorship only. Imported memory is *still* routed through the existing human
+   review queue (D001 / D-LM-0006/0007) — never auto-promoted. The trust UX must
+   say this plainly.
+
+**Key handling.** The signing key is stored with the BYOK pattern (host ADR-0042):
+a `0600` owner-only file under the per-user home, beside the machine-wide global
+store (`<home>/.localmind/keys/`). Because the engine is host-neutral it cannot
+depend on the host's keychain crate, so this `0600`-file tier is the engine floor;
+the OS-keychain tier is a documented host enhancement. The private key never
+leaves the keystore's audited write call — it is never serialized into a bundle,
+logged, or `Debug`-printed (pinned by a test).
+
+**Security review (recorded).** Crypto dependency: standard, audited, pinned,
+pure-Rust; `cargo deny`/`machete` clean; the only `cargo audit` finding is the
+*pre-existing* `time 0.3.37` RUSTSEC-2026-0009, already documented-ignored in the
+workspace `deny.toml` — its fix (time ≥ 0.3.47) needs edition 2024 / Rust 1.88,
+above MSRV 1.82, and its DoS vector is RFC-2822 parsing, which LocalMind never
+does (timestamps are RFC-3339, including in imported bundles). Threat model: a
+poisoned/forged/oversized/schema-invalid pack cannot reach active memory —
+verification is fail-closed and content is review-gated even when `Trusted`.
+Residual: redaction-on-export is best-effort (documented); a human tech-lead
+sign-off on this review is mirrored in the plan's manual actions.
+
 ## D-LM-0017 — Machine-wide global memory: a separate store, a scope classifier, and project-precedence merged retrieval
 
 - **Date**: 2026-06-27

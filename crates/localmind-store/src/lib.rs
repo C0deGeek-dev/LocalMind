@@ -20,6 +20,7 @@ mod research;
 mod review_modes;
 mod review_queue;
 mod schema;
+mod signing;
 mod skill_drafts;
 
 pub use bundle::{
@@ -59,6 +60,11 @@ pub use review_queue::{
     ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary, REVIEW_DB_FILE_NAME,
 };
 pub use schema::SchemaError;
+pub use signing::{
+    author_fingerprint, digest_hex, sign_bundle, verify_signed, KeyStore, RejectReason,
+    SignatureEnvelope, SignedBundle, SigningError, TrustClass, VerificationOutcome,
+    SIGNATURE_SCHEMA_VERSION,
+};
 pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};

@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Signed, fail-closed-verified bundles.** A bundle can be signed (Ed25519 over
+  a SHA-256 digest of its canonical bytes) and verified on the way in: a tampered
+  byte, bad signature, malformed key, author/key mismatch, or unsupported version
+  is `Rejected` and never imported; a valid unknown-key bundle is `Untrusted`
+  (heavier review); your own/trusted key is `Trusted`. A verified author is **not**
+  verified content — imported memory is still review-gated. Trust is local — an
+  Ed25519 keypair in a `0600` file under `~/.localmind/keys/` (the BYOK pattern,
+  host ADR-0042) plus a manual trust list; no PKI or network. The private key is
+  never serialized into a bundle or logged. New crypto deps (`ed25519-dalek`,
+  `sha2`, `getrandom`) are pinned + `cargo deny`-clean. Decision: D-LM-0018;
+  contract: `docs/on-disk-contract.md` §Signed bundle.
+
 - **Portable memory bundle (format v1).** Accepted memory can be exported to a
   portable, versioned, self-describing JSON pack (`MemoryBundle`) and parsed back,
   the basis for moving knowledge across your own machines and sharing it. The

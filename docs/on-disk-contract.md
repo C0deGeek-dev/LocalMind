@@ -193,9 +193,43 @@ Shape (`format_version` **1**):
   signed round-trip of memory the store already accepted. Seeds remain valid and
   unchanged; the bundle is the new re-importable, attributable format.
 
-Signing/verification (a content digest + an Ed25519 signature + trust
-classification) layer on top of the canonical bytes; see the signing section /
-`D-LM` decision once it lands.
+### Signed bundle
+
+A bundle is made tamper-evident and attributable by wrapping it in a signature
+envelope (`SignedBundle`), the on-disk shared/portable form:
+
+```json
+{
+  "bundle": { <MemoryBundle> },
+  "signature": {
+    "alg": "ed25519",
+    "digest_alg": "sha256",
+    "schema_version": 1,
+    "digest": "<hex sha256 of the bundle canonical bytes>",
+    "signature": "<hex ed25519 signature (64 bytes)>",
+    "public_key": "<hex ed25519 public key (32 bytes)>",
+    "author": "<sha256(public_key)[..16] fingerprint>"
+  }
+}
+```
+
+- **Signing.** Ed25519 over the SHA-256 digest's input — the bundle's canonical
+  bytes (entries sorted by id, compact JSON). The envelope carries only public
+  material; the private key never appears in it.
+- **Verification is fail-closed**, yielding one of:
+  - `Rejected` — bad digest, bad signature, malformed key/signature,
+    author/key mismatch, or unsupported schema/bundle version. Never imported.
+  - `Untrusted` — a valid signature by an *unknown* key (heavier review).
+  - `Trusted` — a valid signature by a *known* key (your own, or one in the
+    local trust list).
+- **Verified author ≠ verified content.** A signature attests integrity and
+  authorship only; imported memory is still routed through the review queue,
+  never auto-promoted.
+- **Keys.** A local Ed25519 keypair under `<home>/.localmind/keys/signing.json`
+  (`0600`, owner-only — the BYOK pattern, host ADR-0042), with a manual trust
+  list in `trusted.json`. Trust is local: no PKI, registry, or network (D002).
+  The author is a key-bound fingerprint, so it cannot be spoofed with another
+  key. See `docs/decisions.md` D-LM-0018.
 
 ## Versioning
 
