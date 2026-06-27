@@ -251,6 +251,17 @@ fn auto_decide(
     })?;
     persistence.record_review_item_audit(&decided)?;
     persistence.write_mode_audit(mode, item_id.as_str(), true)?;
+    // A queue decision only *marks* the item accepted; writing the durable memory
+    // (with project/global scope routing) is a separate promote step. Automatic
+    // and trusted modes must promote here — otherwise auto-accept reports success
+    // while nothing is persisted or retrievable. Only an accepted/edited (incl.
+    // supersede) decision is promotable; anything else is left as decided.
+    if matches!(
+        decided.state,
+        localmind_core::ReviewState::Accepted | localmind_core::ReviewState::Edited
+    ) {
+        persistence.promote_review_item(item_id)?;
+    }
     Ok(true)
 }
 
