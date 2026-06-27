@@ -1,7 +1,7 @@
 //! Sign a memory bundle on export and verify it on import (fail-closed).
 //!
-//! A bundle (subject "portable bundle") is made tamper-evident and attributable
-//! by a content digest plus an Ed25519 signature over its canonical bytes. On
+//! A portable memory bundle is made tamper-evident and attributable by a content
+//! digest plus an Ed25519 signature over its canonical bytes. On
 //! import, verification recomputes the digest, checks the signature, and
 //! validates the schema/version, then classifies the result:
 //!
@@ -13,7 +13,7 @@
 //!
 //! A verified signature attests the **author/integrity**, never the *content* —
 //! imported memory is still review-gated downstream. Trust is local: a local
-//! keypair and a manual trust list, no PKI or network (D002).
+//! keypair and a manual trust list, no PKI or network.
 //!
 //! Key storage follows the BYOK pattern (ADR-0042): a `0600` owner-only file
 //! under the per-user home (beside the machine-wide global store). The private

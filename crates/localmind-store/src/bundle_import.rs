@@ -2,20 +2,19 @@
 //!
 //! Importing is the safety-critical half of the round-trip. It is gated twice:
 //!
-//! 1. **Cryptographic verify** (subject "sign and verify"): a `Rejected` bundle
-//!    never reaches the store; an `Untrusted` bundle (valid signature, unknown
-//!    key) is allowed but flagged for heavier review; a `Trusted` bundle proceeds.
-//! 2. **Human review** (D001): every entry is enqueued as a *review candidate* —
-//!    never written straight to active memory. The existing dedup ladder makes a
+//! 1. **Cryptographic verify**: a `Rejected` bundle never reaches the store; an
+//!    `Untrusted` bundle (valid signature, unknown key) is allowed but flagged for
+//!    heavier review; a `Trusted` bundle proceeds.
+//! 2. **Human review**: every entry is enqueued as a *review candidate* — never
+//!    written straight to active memory. The existing dedup ladder makes a
 //!    re-import idempotent, and a reviewer's supersede decision retires a stale
 //!    target through the existing path.
 //!
 //! Entries are routed by scope: a project entry → the project store, a global
-//! entry → the machine-wide global store (HarnessConvergence 05 / D-LM-0017), via
-//! the candidate's `suggested_destination`. Import provenance (origin author,
-//! trust class, bundle digest) rides along as evidence + the review session id.
-//! A `--dry-run` (the default in the CLI) reports what *would* change without
-//! writing anything.
+//! entry → the machine-wide global store (D-LM-0017), via the candidate's
+//! `suggested_destination`. Import provenance (origin author, trust class, bundle
+//! digest) rides along as evidence + the review session id. A `--dry-run` (the
+//! default in the CLI) reports what *would* change without writing anything.
 
 use crate::{
     dedup, verify_signed, KeyStore, ReviewQueue, ReviewQueueError, SignedBundle, SigningError,

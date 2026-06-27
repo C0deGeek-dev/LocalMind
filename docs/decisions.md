@@ -9,8 +9,8 @@ of which host embeds the engine.
 - **Date**: 2026-06-27
 - **Status**: accepted
 
-LocalMind can now export accepted memory to a portable bundle (D-LM-0018 builds
-on the bundle format) and import it elsewhere. Moving knowledge across machines —
+LocalMind can now export accepted memory to a portable bundle and import it
+elsewhere. Moving knowledge across machines —
 and especially *importing from other people* — is unsafe without integrity and
 attribution: a pack could be tampered with in transit or forged. But over-trust
 is the opposite failure: a valid signature must never be mistaken for "this
@@ -27,7 +27,7 @@ Decision — four parts.
    bans / licenses / sources). `#![forbid(unsafe_code)]` holds — unsafe lives only
    inside the vendored crates.
 
-2. **Local trust, no PKI (D002).** Trust is a local keypair plus a manual trust
+2. **Local trust, no PKI.** Trust is a local keypair plus a manual trust
    list — there is no key-distribution service, registry, or network. The author
    is a *key-bound fingerprint* (`sha256(public_key)[..16]`), so an author cannot
    be spoofed with a different key.
@@ -42,7 +42,7 @@ Decision — four parts.
 
 4. **Verified author ≠ verified content.** A signature attests integrity and
    authorship only. Imported memory is *still* routed through the existing human
-   review queue (D001 / D-LM-0006/0007) — never auto-promoted. The trust UX must
+   review queue (D-LM-0006/0007) — never auto-promoted. The trust UX must
    say this plainly.
 
 **Key handling.** The signing key is stored with the BYOK pattern (host ADR-0042):

@@ -10,7 +10,7 @@ Notable changes, newest first. Contract-relevant entries reference
   entry routed by scope (project → project store, global → the machine-wide global
   store, D-LM-0017) and **enqueued as a review candidate** carrying import
   provenance (origin author, trust class, bundle digest) — never written straight
-  to active memory (D001). The existing dedup ladder makes a re-import idempotent,
+  to active memory. The existing dedup ladder makes a re-import idempotent,
   and a `--dry-run` (the CLI default) reports added/duplicate/rejected counts
   without writing. Rollback is the existing path: discard un-reviewed candidates
   with `review purge`, or remove a promoted memory with `memory delete`.

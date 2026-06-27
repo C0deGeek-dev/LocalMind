@@ -227,7 +227,7 @@ envelope (`SignedBundle`), the on-disk shared/portable form:
   never auto-promoted.
 - **Keys.** A local Ed25519 keypair under `<home>/.localmind/keys/signing.json`
   (`0600`, owner-only — the BYOK pattern, host ADR-0042), with a manual trust
-  list in `trusted.json`. Trust is local: no PKI, registry, or network (D002).
+  list in `trusted.json`. Trust is local: no PKI, registry, or network.
   The author is a key-bound fingerprint, so it cannot be spoofed with another
   key. See `docs/decisions.md` D-LM-0018.
 

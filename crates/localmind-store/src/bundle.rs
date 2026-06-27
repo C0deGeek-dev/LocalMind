@@ -15,7 +15,7 @@
 //! redaction already applied at capture time); the returned [`SecretScanReport`]
 //! is the seam a caller uses to require an explicit confirm before sharing.
 //!
-//! Signing/verification layers on top in `signing` (subject 02); this module is
+//! Signing/verification layers on top in the `signing` module; this module is
 //! signature-agnostic and produces the canonical bytes that get signed.
 
 use crate::{
@@ -87,7 +87,7 @@ pub struct MemoryBundle {
 impl MemoryBundle {
     /// Deterministic, content-addressable bytes for hashing and signing: entries
     /// sorted by id, compact JSON. Identical content yields identical bytes across
-    /// runs and machines, so the digest/signature in subject 02 are stable.
+    /// runs and machines, so the digest/signature over them are stable.
     ///
     /// # Errors
     /// [`BundleError::Serialize`] if serialization fails.
