@@ -6,8 +6,9 @@ use localmind_core::{
     SessionRecord, SessionSource,
 };
 use localmind_store::{
-    CloseoutProcessor, ContextExportTarget, ContextExporter, MemoryPersistence, ReviewQueue,
-    SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
+    sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
+    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, ReviewQueue,
+    SignedBundle, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -78,6 +79,11 @@ enum Command {
     Context {
         #[command(subcommand)]
         command: ContextCommand,
+    },
+    /// Portable signed memory bundles: export accepted memory, import a verified pack.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
     },
     /// Generate and inspect disabled skill suggestions.
     Skills {
@@ -169,6 +175,57 @@ enum ContextCommand {
         #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
         target: ContextTargetArg,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Export accepted memory to a portable, signed bundle file.
+    Export {
+        /// Destination file for the signed bundle.
+        #[arg(long)]
+        out: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Which scopes to include.
+        #[arg(long, value_enum, default_value_t = ScopeArg::Both)]
+        scope: ScopeArg,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a signed bundle: verify, then (with --apply) enqueue for review.
+    Import {
+        /// Signed bundle file to import.
+        input: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Write the imported entries as review candidates. Without it this is a
+        /// dry run that reports what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ScopeArg {
+    Project,
+    Global,
+    Both,
+}
+
+impl From<ScopeArg> for localmind_store::BundleScope {
+    fn from(value: ScopeArg) -> Self {
+        match value {
+            ScopeArg::Project => Self::Project,
+            ScopeArg::Global => Self::Global,
+            ScopeArg::Both => Self::Both,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -473,6 +530,20 @@ fn main() -> Result<()> {
                 println!("{}", export.body_markdown);
             }
         },
+        Command::Memory { command } => match command {
+            MemoryCommand::Export {
+                out,
+                project,
+                scope,
+                json,
+            } => memory_export(&out, &project, scope.into(), json)?,
+            MemoryCommand::Import {
+                input,
+                project,
+                apply,
+                json,
+            } => memory_import(&input, &project, apply, json)?,
+        },
         Command::Skills { command } => match command {
             SkillsCommand::Generate { project } => {
                 let store = SkillDraftStore::open_project(project)?;
@@ -618,6 +689,104 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// `memory export`: export accepted memory to a portable, signed bundle file.
+fn memory_export(out: &PathBuf, project: &PathBuf, scope: BundleScope, json: bool) -> Result<()> {
+    let exporter = MemoryBundleExporter::open_project(project)?;
+    // The signing key's fingerprint is the author identity; generate it the first
+    // time so an export is always attributable.
+    let signing_key = KeyStore::open(project)?.load_or_generate()?;
+    let author = localmind_store::author_fingerprint(&signing_key.verifying_key().to_bytes());
+    let outcome = exporter.export(scope, &author)?;
+    let signed = sign_bundle(&outcome.bundle, &signing_key)?;
+    fs::write(out, signed.to_pretty_json()?)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "output": out.display().to_string(),
+                "entries": outcome.bundle.entries.len(),
+                "redactions": outcome.scan.redactions,
+                "author": author,
+                "digest": signed.signature.digest,
+            }))?
+        );
+    } else {
+        println!(
+            "Exported {} accepted memor{} to {}",
+            outcome.bundle.entries.len(),
+            if outcome.bundle.entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            out.display()
+        );
+        println!(
+            "Signed by author {author} (digest {})",
+            signed.signature.digest
+        );
+        if outcome.scan.found_secrets() {
+            println!(
+                "Redacted {} apparent secret(s) across {} entr{} before export.",
+                outcome.scan.redactions,
+                outcome.scan.entries_with_redactions,
+                if outcome.scan.entries_with_redactions == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `memory import`: verify a signed bundle, then (with `--apply`) enqueue its
+/// entries for review. The default is a dry run that writes nothing.
+fn memory_import(input: &PathBuf, project: &PathBuf, apply: bool, json: bool) -> Result<()> {
+    let signed = SignedBundle::from_json(&fs::read_to_string(input)?)?;
+    let report = BundleImporter::new(project).import(&signed, apply)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    match &report.trust {
+        ImportTrust::Rejected(reason) => {
+            println!("Rejected: {reason}. Nothing was imported.");
+            return Ok(());
+        }
+        ImportTrust::Trusted => println!("Verified: trusted author."),
+        ImportTrust::Untrusted => {
+            println!(
+                "Verified: UNTRUSTED author (valid signature, unknown key) — review carefully."
+            );
+        }
+    }
+    println!(
+        "{} {} entr{}: {} new, {} duplicate.",
+        if report.applied {
+            "Enqueued for review from"
+        } else {
+            "Dry run over"
+        },
+        report.total,
+        if report.total == 1 { "y" } else { "ies" },
+        report.added,
+        report.duplicate
+    );
+    // The honest trust UX: a signature attests the author, not the content.
+    println!(
+        "A verified author is not verified content — imported memory is reviewed before it is used."
+    );
+    if !report.applied {
+        println!("Re-run with --apply to enqueue these for review.");
+    }
     Ok(())
 }
 

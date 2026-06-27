@@ -25,11 +25,13 @@ use localmind_core::{
     CandidateDestination, CandidateLesson, EvidenceKind, EvidenceRef, LessonId, MemoryScope,
     ReviewState, SessionId, SuggestedAction,
 };
+use serde::Serialize;
 use std::path::Path;
 use thiserror::Error;
 
 /// The trust class an import settled on.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImportTrust {
     /// Valid signature by a known key.
     Trusted,
@@ -40,7 +42,7 @@ pub enum ImportTrust {
 }
 
 /// What an import did (or, on a dry run, would do).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BundleImportReport {
     /// The trust class verification settled on.
     pub trust: ImportTrust,
