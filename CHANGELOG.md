@@ -5,6 +5,16 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Scope-aware, review-gated bundle import.** A verified bundle can be imported:
+  a `Rejected` bundle never reaches the store; a `Trusted`/`Untrusted` one has each
+  entry routed by scope (project → project store, global → the machine-wide global
+  store, D-LM-0017) and **enqueued as a review candidate** carrying import
+  provenance (origin author, trust class, bundle digest) — never written straight
+  to active memory (D001). The existing dedup ladder makes a re-import idempotent,
+  and a `--dry-run` (the CLI default) reports added/duplicate/rejected counts
+  without writing. Rollback is the existing path: discard un-reviewed candidates
+  with `review purge`, or remove a promoted memory with `memory delete`.
+
 - **Signed, fail-closed-verified bundles.** A bundle can be signed (Ed25519 over
   a SHA-256 digest of its canonical bytes) and verified on the way in: a tampered
   byte, bad signature, malformed key, author/key mismatch, or unsupported version

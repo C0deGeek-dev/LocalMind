@@ -5,6 +5,7 @@
 //! the host → engine dependency direction.
 
 mod bundle;
+mod bundle_import;
 mod config;
 mod context_export;
 mod dedup;
@@ -27,6 +28,7 @@ pub use bundle::{
     BundleError, BundleMetadata, BundleScope, ExportOutcome, MemoryBundle, MemoryBundleExporter,
     SecretScanReport, MEMORY_BUNDLE_FORMAT_VERSION,
 };
+pub use bundle_import::{BundleImportError, BundleImportReport, BundleImporter, ImportTrust};
 pub use config::{
     LearningConfig, LocalMindConfig, ProjectConfig, RetrievalConfig, ReviewConfig,
     ReviewModeConfig, StoreConfigError,
