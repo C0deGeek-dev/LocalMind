@@ -4,6 +4,32 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0019 — Learning is on by default (machine-wide, local-only, review-gated)
+
+- **Date**: 2026-06-27
+- **Status**: accepted
+
+`LearningConfig.enabled` now defaults to **`true`** (was `false`), so a project
+accumulates reviewed memory out of the box and the machine-wide global store
+(D-LM-0017) fills with cross-project lessons — language idioms, tool-use and
+shell patterns, build recipes, and their anti-patterns — from ordinary use. The
+prior opt-in default left the learning loop dormant for anyone who never wrote a
+`.localmind.toml`, which is the common case; the value of accumulated lessons
+compounds with use, so on-by-default is the right posture.
+
+Safety is unchanged and load-bearing: the store stays **`local_only`**
+(same-machine, never remote), every captured lesson is a **review candidate**
+(redacted), never auto-active memory, and a project opts out with
+`[learning] enabled = false`. `allowed_scopes` already defaults to
+`["project", "global_user"]` (D-LM-0017), so global scope rides the same flip.
+
+**Clean-room measurement caveat (host concern).** A capability measurement that
+must read/write *no* accumulated memory has to disable learning explicitly
+(`enabled = false`) or isolate the store. The host's clean-room solver path is
+expected to stay opt-in to writeback (see the host CHANGELOG / `eval --learn`):
+the default flip changes *interactive and agentic* runs, not a measurement that
+deliberately turns learning off.
+
 ## D-LM-0018 — Portable memory bundles are signed; verify is fail-closed and local-trust; verified author ≠ verified content
 
 - **Date**: 2026-06-27

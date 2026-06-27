@@ -20,7 +20,7 @@ pub struct LocalMindConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct LearningConfig {
-    #[serde(default)]
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default = "default_local_only")]
     pub local_only: bool,
@@ -42,7 +42,7 @@ pub struct LearningConfig {
 impl Default for LearningConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_enabled(),
             local_only: true,
             memory_root: default_memory_root(),
             global_memory_root: None,
@@ -108,6 +108,15 @@ pub enum ReviewModeConfig {
     Assisted,
     Trusted,
     Automatic,
+}
+
+fn default_enabled() -> bool {
+    // Learning is on by default: a project accumulates reviewed, machine-wide
+    // memory (good *and* anti-pattern lessons about languages, tooling, shell,
+    // and builds) out of the box. It stays `local_only` (same-machine, never
+    // remote) and review-gated — sessions yield lesson *candidates*, never
+    // auto-active memory — and a project opts out with `[learning] enabled = false`.
+    true
 }
 
 fn default_local_only() -> bool {

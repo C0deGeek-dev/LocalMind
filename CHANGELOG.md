@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Learning is on by default.** `[learning] enabled` now defaults to **`true`**
+  (was `false`), so a project accumulates reviewed memory — and the machine-wide
+  global store (D-LM-0017) fills with cross-project lessons (language/tooling/
+  shell/build patterns and their anti-patterns) — out of the box. It stays
+  `local_only` and review-gated (candidates, never auto-active memory); opt out
+  with `[learning] enabled = false`. A measurement that must touch no accumulated
+  memory disables learning explicitly. See `docs/on-disk-contract.md` and D-LM-0019.
+
 - **Scope-aware, review-gated bundle import.** A verified bundle can be imported:
   a `Rejected` bundle never reaches the store; a `Trusted`/`Untrusted` one has each
   entry routed by scope (project → project store, global → the machine-wide global

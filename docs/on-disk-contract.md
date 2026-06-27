@@ -7,13 +7,15 @@ memory — on by default — lives in a per-user home store (`~/.localmind/memor
 so cross-project knowledge is shared (see §Global-scope store). A project that
 wants project-only memory narrows `allowed_scopes` to `["project"]`.
 
-## Opt-in configuration: `.localmind.toml`
+## Configuration: `.localmind.toml`
 
-Learning is off until this file exists at the project root:
+Learning is **on by default** (`local_only`, review-gated). This file is optional
+— it overrides the defaults at the project root, and is where you opt out
+(`enabled = false`) or tune the engine:
 
 ```toml
 [learning]
-enabled = true                       # required; false refuses all writes
+enabled = true                       # the default; `false` opts out (refuses all writes)
 memory_root = ".localmind/memory"    # optional; must stay inside the project
 allowed_scopes = ["project", "global_user"]  # optional; the default — narrow to ["project"] for project-only memory
 global_memory_root = "/abs/path"     # optional; absolute; overrides ~/.localmind/memory (also the LOCALMIND_GLOBAL_ROOT env, or @project for under-project)
@@ -42,9 +44,11 @@ rerank = false               # opt in to the embedding rerank stage; off = deter
 rerank_window = 20           # how many top blended hits rerank may reorder
 ```
 
-A missing file, `enabled = false`, malformed TOML, or a `memory_root` that
-escapes the project root are all hard, typed errors — never silent fallbacks.
-When `[inference]` is absent, model-backed extraction, embeddings, review
+A **missing file uses the defaults** (learning on, `local_only`, `["project",
+"global_user"]` scope); `enabled = false` opts out (refuses all writes). Malformed
+TOML, or a `memory_root` that escapes the project root, are hard, typed errors —
+never silent fallbacks. When `[inference]` is absent, model-backed extraction,
+embeddings, review
 annotation, skill writing, research, and distillation are disabled and the
 deterministic paths remain active.
 
