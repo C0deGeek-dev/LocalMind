@@ -38,6 +38,7 @@ research = true
 [review]
 mode = "manual"              # manual, assisted, trusted, or automatic
 trusted_threshold = 0.82     # trusted auto-accept threshold
+semantic_dedup = false       # opt in to embedding-cosine dedup of accepted memory; off = lexical only
 
 [retrieval]
 rerank = false               # opt in to the embedding rerank stage; off = deterministic blend only
@@ -69,6 +70,15 @@ memory still persists (the Markdown file and index row are already durable); the
 failure is recorded as an `InferenceCallFailed` audit row and the memory simply
 carries no vector until it is re-embedded. A promotion never fails because
 embedding could not run.
+
+`[review].semantic_dedup` is opt-in and inert on its own (same gate shape as
+rerank): when it is on **and** an `[inference]` embedding endpoint is configured,
+the review-mode dedup of a candidate against accepted memory adds an
+embedding-cosine pass after the lexical one — lexical token-overlap stays the
+cheap first pass and the no-embeddings fallback, then a candidate the lexical
+pass did not already flag is embedded and compared by cosine to accepted-memory
+vectors, and a match at cosine ≥ 0.86 flags `duplicate_of` → routed to review,
+never auto-deleted. Without both, dedup is byte-identical to the lexical contract.
 
 ## Directory layout
 
