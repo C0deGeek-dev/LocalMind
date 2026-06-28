@@ -152,7 +152,7 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **7**); every component steps the schema on open and refuses
+(currently **8**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
@@ -160,7 +160,7 @@ databases newer than it understands. Tables:
 | `schema_migrations(version, applied_at)` | human-readable migration ledger | duplicate of user_version for inspection |
 | `review_items(id, session_id, candidate_json, state, reviewer_action, reviewer, note, replacement_summary, created_at, updated_at)` | review queue | `candidate_json` is a serialized `CandidateLesson` |
 | `audit_events(id, kind, actor, subject, metadata_json, happened_at)` | audit log | `metadata_json` is always valid JSON (serde-built) |
-| `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval |
+| `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language, hit_count, last_used_at)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval; `hit_count` (default 0) and `last_used_at` (NULL = never) are the **runtime usage signal** — bumped post-turn when a memory is injected, used by the freshness pass to surface never-retrieved dead weight. Unlike the other columns these two are **not** rebuildable from the Markdown source of truth: a reindex resets them to zero-usage (the same state as a pre-v8 upgrade), which is acceptable for a best-effort signal |
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |
 | `memory_relationships(memory_id, relation_kind, target)` | typed relations | kinds: `category`, `session`, `file`, `entity`, `contradicts` |
 | `vector_index(subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)` | rebuildable semantic index | f32 little-endian BLOBs; exact cosine in Rust |
@@ -173,7 +173,9 @@ delete) commit atomically; the Markdown file write precedes the indexing
 transaction, and deletion removes the file before the database rows so an
 interrupted delete heals on retry.
 `vector_index`, relationships, FTS, and memory index rows are all derived from
-Markdown memory or graph state and may be rebuilt. Inference audit rows record
+Markdown memory or graph state and may be rebuilt — except the `hit_count` /
+`last_used_at` usage columns, which are runtime-accumulated and reset to
+zero-usage on a rebuild. Inference audit rows record
 feature, endpoint kind, model id, and token counts when available; raw prompt
 or response content is never written to `audit_events`.
 

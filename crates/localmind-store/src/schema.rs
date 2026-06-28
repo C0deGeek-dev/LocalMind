@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 7;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 8;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -57,6 +57,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 7 {
         apply_v7(&tx)?;
+    }
+    if current < 8 {
+        apply_v8(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -243,6 +246,25 @@ fn apply_v7(connection: &Connection) -> Result<(), SchemaError> {
         .map_err(SchemaError::Sqlite)
 }
 
+/// Proactive-lifecycle usage tracking: per-memory injection counters so the
+/// freshness pass can surface never-retrieved dead weight and high-value
+/// lessons. `hit_count` defaults to 0 and `last_used_at` is nullable, so every
+/// pre-v8 row upgrades cleanly and reads as zero-usage. Unlike the other index
+/// columns these are **runtime-accumulated**, not derived from the Markdown
+/// source of truth — a reindex/rebuild resets them to zero-usage, which is the
+/// same state as a fresh upgrade and is acceptable for a best-effort usage
+/// signal.
+fn apply_v8(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE memory_index ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE memory_index ADD COLUMN last_used_at TEXT;
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error(
@@ -302,6 +324,40 @@ mod tests {
         )?;
         assert_eq!(tagged.as_deref(), Some("rust"));
         assert_eq!(untagged, None);
+        Ok(())
+    }
+
+    #[test]
+    fn v8_adds_defaulted_usage_columns() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        // A row that omits the usage columns reads as zero-usage (hit_count
+        // defaulted to 0, last_used_at NULL), proving pre-v8 rows upgrade clean.
+        connection.execute(
+            "INSERT INTO memory_index(memory_id, path, scope, category, body, status, created_at)
+             VALUES('unused', 'p', 's', 'c', 'b', 'active', 'now')",
+            [],
+        )?;
+        let (hits, last): (i64, Option<String>) = connection.query_row(
+            "SELECT hit_count, last_used_at FROM memory_index WHERE memory_id = 'unused'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(hits, 0);
+        assert_eq!(last, None);
+        // And an explicit usage value round-trips.
+        connection.execute(
+            "INSERT INTO memory_index(memory_id, path, scope, category, body, status, created_at, hit_count, last_used_at)
+             VALUES('used', 'p', 's', 'c', 'b', 'active', 'now', 3, 'then')",
+            [],
+        )?;
+        let (hits, last): (i64, Option<String>) = connection.query_row(
+            "SELECT hit_count, last_used_at FROM memory_index WHERE memory_id = 'used'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(hits, 3);
+        assert_eq!(last.as_deref(), Some("then"));
         Ok(())
     }
 

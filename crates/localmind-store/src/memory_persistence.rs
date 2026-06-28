@@ -45,6 +45,10 @@ pub struct MemorySearchResult {
     /// True when this memory is in a `contradicts` relationship with another, so
     /// the agent can flag the conflict instead of asserting one side blindly.
     pub contradicted: bool,
+    /// How many times this memory has been injected into a turn (the usage
+    /// signal; 0 = never retrieved). Exposed read-only at retrieval; the bump is
+    /// post-turn, never on this read path (D003).
+    pub hit_count: i64,
 }
 
 /// The provenance answer for one memory — "why do you think that?". Source
@@ -75,6 +79,11 @@ pub struct MemoryRecord {
     pub category: String,
     pub status: String,
     pub body: String,
+    /// How many times this memory has been injected into a turn (the usage
+    /// signal; 0 = never retrieved). Runtime-accumulated, best-effort.
+    pub hit_count: i64,
+    /// When this memory was last injected (RFC-ish text), or `None` if never.
+    pub last_used_at: Option<String>,
 }
 
 /// The machine-wide global memory store: a separate SQLite index and Markdown
@@ -403,7 +412,7 @@ impl MemoryPersistence {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT memory_id, path, scope, category, status, body
+                SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at
                 FROM memory_index
                 WHERE status = 'active'
                 ORDER BY created_at, memory_id
@@ -419,6 +428,8 @@ impl MemoryPersistence {
                     category: row.get(3)?,
                     status: row.get(4)?,
                     body: row.get(5)?,
+                    hit_count: row.get(6)?,
+                    last_used_at: row.get(7)?,
                 })
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
@@ -426,6 +437,40 @@ impl MemoryPersistence {
         for row in rows {
             records.push(row.map_err(MemoryPersistenceError::Sqlite)?);
         }
+        Ok(records)
+    }
+
+    /// Active memories never injected into a turn (`hit_count = 0`) — the
+    /// dead-weight candidates the freshness pass and the operator surface review.
+    /// Spans the project **and** global stores.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn list_never_retrieved(&self) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        Ok(self
+            .list_memory()?
+            .into_iter()
+            .filter(|record| record.hit_count == 0)
+            .collect())
+    }
+
+    /// The most-injected active memories first (ties broken by id), capped at
+    /// `limit`. Spans the project **and** global stores. A `limit` of 0 returns
+    /// nothing.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn list_most_used(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        let mut records = self.list_memory()?;
+        records.sort_by(|a, b| {
+            b.hit_count
+                .cmp(&a.hit_count)
+                .then_with(|| a.memory_id.as_str().cmp(b.memory_id.as_str()))
+        });
+        records.truncate(limit);
         Ok(records)
     }
 
@@ -723,7 +768,8 @@ impl MemoryPersistence {
         let statement_sql = format!(
             r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
-                       m.epistemic_status, m.contradicted, m.category, bm25(memory_fts) AS rank
+                       m.epistemic_status, m.contradicted, m.category, m.hit_count,
+                       bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'{language_clause}
@@ -743,7 +789,8 @@ impl MemoryPersistence {
                 row.get::<_, String>(5)?,
                 row.get::<_, i64>(6)? != 0,
                 row.get::<_, String>(7)?,
-                row.get::<_, f64>(8)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, f64>(9)?,
             ))
         };
         let rows = if let Some(language) = language {
@@ -764,6 +811,7 @@ impl MemoryPersistence {
                 epistemic,
                 contradicted,
                 category,
+                hit_count,
                 rank,
             ) = row.map_err(MemoryPersistenceError::Sqlite)?;
             // bm25 returns a more-negative value for better matches; expose a
@@ -780,6 +828,7 @@ impl MemoryPersistence {
                 stale_candidate,
                 epistemic_status: EpistemicStatus::from_token(&epistemic),
                 contradicted,
+                hit_count,
             });
         }
         Ok(results)
@@ -938,6 +987,60 @@ impl MemoryPersistence {
             ));
         }
         Ok(ids)
+    }
+
+    /// Record a usage hit for each of `memory_ids`: bump `hit_count` by one and
+    /// stamp `last_used_at`, across the project **and** global stores (a memory's
+    /// dead-weight signal is only meaningful where the memory lives, and the
+    /// global store holds the non-code-anchored lessons). Driven from the
+    /// post-turn `memories_used` audit, never the retrieval read path (D003).
+    ///
+    /// Idempotent-per-call: a distinct id is bumped at most once per call (the
+    /// ids are deduped first), so one turn's injection counts as one hit. Ids
+    /// that match no active row — the synthetic repository-primer id, ingest
+    /// chunk ids, an unknown id — are silently ignored. Returns the number of
+    /// memory rows updated.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when an update fails.
+    pub fn record_memory_usage(
+        &self,
+        memory_ids: &[MemoryEntryId],
+    ) -> Result<usize, MemoryPersistenceError> {
+        let distinct: std::collections::BTreeSet<&str> =
+            memory_ids.iter().map(MemoryEntryId::as_str).collect();
+        if distinct.is_empty() {
+            return Ok(0);
+        }
+        let now = OffsetDateTime::now_utc().to_string();
+        let mut updated = Self::record_memory_usage_in(&self.connection, &distinct, &now)?;
+        if let Some(global) = &self.global {
+            updated += Self::record_memory_usage_in(&global.connection, &distinct, &now)?;
+        }
+        Ok(updated)
+    }
+
+    /// Bump usage for a set of ids on one connection (project or global). A
+    /// non-matching id is a no-op, so the same id set is safe to run against both
+    /// stores.
+    fn record_memory_usage_in(
+        connection: &Connection,
+        memory_ids: &std::collections::BTreeSet<&str>,
+        now: &str,
+    ) -> Result<usize, MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "UPDATE memory_index SET hit_count = hit_count + 1, last_used_at = ?2 \
+                 WHERE memory_id = ?1 AND status = 'active'",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut updated = 0;
+        for id in memory_ids {
+            updated += statement
+                .execute(params![id, now])
+                .map_err(MemoryPersistenceError::Sqlite)?;
+        }
+        Ok(updated)
     }
 
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>, MemoryPersistenceError> {

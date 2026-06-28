@@ -5,6 +5,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Accepted memory now tracks usage (schema v8).** `memory_index` gains
+  `hit_count` (default 0) and `last_used_at` (NULL = never), bumped post-turn
+  when a memory is injected into context, so never-retrieved dead weight and
+  high-value lessons are both visible. The bump is best-effort and never on the
+  retrieval read path; the columns are runtime-accumulated (a reindex resets them
+  to zero-usage). New store queries surface never-retrieved and most-used
+  memories, and search results expose the count. Pre-v8 databases upgrade cleanly
+  (rows read as zero-usage). See `docs/on-disk-contract.md`.
+
 - **Language detection is whole-word and covers more languages.** Keyword
   matching was substring-based, so "cpp" matched a project name like `llama.cpp`
   and bare names risked colliding with English; and Go-by-name, C#, PowerShell,
