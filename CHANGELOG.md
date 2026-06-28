@@ -5,6 +5,21 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Accepted memory is tagged with a programming language and retrieval filters
+  by it.** A lesson clearly about one language ("In Python, …") is noise in a
+  task in another — a Python idiom injected into a Rust task degrades the
+  solution. The single language a lesson names is now detected once at write
+  time from the full body (new shared `language` module — the same table drives
+  the host's workspace-language detection so the two cannot drift) and stored on
+  `memory_index.language` (**schema v7**, see `docs/on-disk-contract.md`). The
+  column is **nullable**: a lesson that names no single language (general) or
+  several (cross-cutting) stays untagged and eligible for every task, and every
+  pre-v7 row upgrades cleanly (treated as agnostic until a reindex re-detects
+  it). `MemoryPersistence::search_lang(query, language)` excludes off-language
+  memories **inside the FTS query**, so retrieval returns rows that are already
+  language-relevant instead of ranking N and dropping the off-language ones
+  afterward. `search` is unchanged (no filter).
+
 - **Learning is on by default.** `[learning] enabled` now defaults to **`true`**
   (was `false`), so a project accumulates reviewed memory — and the machine-wide
   global store (D-LM-0017) fills with cross-project lessons (language/tooling/

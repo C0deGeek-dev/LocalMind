@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 6;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 7;
 
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
@@ -54,6 +54,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 6 {
         apply_v6(&tx)?;
+    }
+    if current < 7 {
+        apply_v7(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -222,6 +225,24 @@ fn apply_v6(connection: &Connection) -> Result<(), SchemaError> {
         .map_err(SchemaError::Sqlite)
 }
 
+/// Language-relevance support: the single programming language an accepted
+/// memory is about, so retrieval can filter off-language lessons inside the
+/// query instead of dropping them after the fact. Nullable — a general or
+/// cross-cutting lesson stays `NULL` and is eligible for every task — so every
+/// pre-existing row upgrades cleanly (treated as language-agnostic until a
+/// reindex re-detects it from the body). The index keeps the added filter cheap.
+fn apply_v7(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE memory_index ADD COLUMN language TEXT;
+            CREATE INDEX IF NOT EXISTS idx_memory_index_language
+                ON memory_index(language);
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error(
@@ -250,6 +271,37 @@ mod tests {
              VALUES('m', 'p', 's', 'c', 'b', 'active', 'now')",
             [],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v7_adds_a_nullable_language_column() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        // A tagged row round-trips, and a row that omits the column is NULL —
+        // proving the column is nullable so pre-v7 rows upgrade cleanly.
+        connection.execute(
+            "INSERT INTO memory_index(memory_id, path, scope, category, body, status, created_at, language)
+             VALUES('tagged', 'p', 's', 'c', 'b', 'active', 'now', 'rust')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO memory_index(memory_id, path, scope, category, body, status, created_at)
+             VALUES('untagged', 'p', 's', 'c', 'b', 'active', 'now')",
+            [],
+        )?;
+        let tagged: Option<String> = connection.query_row(
+            "SELECT language FROM memory_index WHERE memory_id = 'tagged'",
+            [],
+            |row| row.get(0),
+        )?;
+        let untagged: Option<String> = connection.query_row(
+            "SELECT language FROM memory_index WHERE memory_id = 'untagged'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(tagged.as_deref(), Some("rust"));
+        assert_eq!(untagged, None);
         Ok(())
     }
 

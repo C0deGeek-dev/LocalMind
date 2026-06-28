@@ -639,13 +639,27 @@ impl MemoryPersistence {
     /// prefix phrases, so FTS5 operators in user input are inert text, not
     /// syntax. Higher `score` is a better match.
     pub fn search(&self, query: &str) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
+        self.search_lang(query, None)
+    }
+
+    /// Like [`search`](Self::search) but restricting matches to a programming
+    /// language: when `language` is `Some`, a memory tagged with a *different*
+    /// language is excluded, while a `NULL`-tagged (general / cross-cutting)
+    /// memory always remains eligible. `None` applies no language filter. The
+    /// filter runs inside the FTS query so retrieval returns rows that are
+    /// already language-relevant rather than dropping them after ranking.
+    pub fn search_lang(
+        &self,
+        query: &str,
+        language: Option<&str>,
+    ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
         // Merge project + global results with **project precedence**: project
         // matches lead, then global matches that are not already present (deduped
         // by memory id and by body), so a project lesson always overrides a
         // global one on conflict while a global lesson still surfaces when no
         // project lesson applies. Provenance survives in each result's `path`
         // (a global path lives under the user-home store).
-        let mut results = Self::search_in(&self.connection, query)?;
+        let mut results = Self::search_in(&self.connection, query, language)?;
         if let Some(global) = &self.global {
             let project_ids: std::collections::HashSet<String> = results
                 .iter()
@@ -653,7 +667,7 @@ impl MemoryPersistence {
                 .collect();
             let project_bodies: std::collections::HashSet<String> =
                 results.iter().map(|r| r.snippet.clone()).collect();
-            for result in Self::search_in(&global.connection, query)? {
+            for result in Self::search_in(&global.connection, query, language)? {
                 if !project_ids.contains(result.memory_id.as_str())
                     && !project_bodies.contains(&result.snippet)
                 {
@@ -665,40 +679,56 @@ impl MemoryPersistence {
     }
 
     /// Run the FTS5 memory search against one connection (project or global).
+    /// When `language` is `Some`, off-language memories are excluded in the query
+    /// (`NULL`-tagged memories always pass).
     fn search_in(
         connection: &Connection,
         query: &str,
+        language: Option<&str>,
     ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
         let Some(match_expression) = fts_match_expression(query) else {
             return Ok(Vec::new());
         };
-        let mut statement = connection
-            .prepare(
-                r#"
+        // A single statement string keeps the prepared shape stable; the language
+        // clause is appended only when filtering so the unfiltered path is byte
+        // for byte what it was before.
+        let language_clause = if language.is_some() {
+            " AND (m.language = ?2 OR m.language IS NULL)"
+        } else {
+            ""
+        };
+        let statement_sql = format!(
+            r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
                        m.epistemic_status, m.contradicted, m.category, bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
-                WHERE memory_fts MATCH ?1 AND m.status = 'active'
+                WHERE memory_fts MATCH ?1 AND m.status = 'active'{language_clause}
                 ORDER BY rank, m.memory_id
                 "#,
-            )
+        );
+        let mut statement = connection
+            .prepare(&statement_sql)
             .map_err(MemoryPersistenceError::Sqlite)?;
-        let rows = statement
-            .query_map(params![match_expression], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)? != 0,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)? != 0,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f64>(8)?,
-                ))
-            })
-            .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)? != 0,
+                row.get::<_, String>(7)?,
+                row.get::<_, f64>(8)?,
+            ))
+        };
+        let rows = if let Some(language) = language {
+            statement.query_map(params![match_expression, language], map_row)
+        } else {
+            statement.query_map(params![match_expression], map_row)
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -968,13 +998,17 @@ impl MemoryPersistence {
         path: &Path,
     ) -> Result<(), MemoryPersistenceError> {
         let epistemic_status = EpistemicStatus::from_category(&entry.category);
+        // The single language this lesson is about (or NULL for a general /
+        // cross-cutting one), detected once here from the full body so retrieval
+        // can filter off-language lessons inside the query.
+        let language = crate::language::lesson_language(entry.body.as_str());
         connection
             .execute(
                 r#"
                 INSERT INTO memory_index
                 (memory_id, path, scope, category, body, source_session, status, created_at,
-                 epistemic_status, confidence)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9)
+                 epistemic_status, confidence, language)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     path = excluded.path,
                     scope = excluded.scope,
@@ -984,6 +1018,7 @@ impl MemoryPersistence {
                     status = excluded.status,
                     epistemic_status = excluded.epistemic_status,
                     confidence = excluded.confidence,
+                    language = excluded.language,
                     -- Re-promoting a memory refreshes it, clearing any prior
                     -- change-aware staleness flag.
                     stale_candidate = 0
@@ -1001,6 +1036,7 @@ impl MemoryPersistence {
                     OffsetDateTime::now_utc().to_string(),
                     epistemic_status.as_str(),
                     entry.confidence.value(),
+                    language,
                 ],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;

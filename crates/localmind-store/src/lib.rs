@@ -13,6 +13,7 @@ mod eval;
 mod extraction;
 mod graph_store;
 mod import;
+mod language;
 mod markdown;
 mod memory_persistence;
 mod paths;
@@ -49,6 +50,7 @@ pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
+pub use language::{language_for_extension, lesson_language};
 pub use markdown::{MarkdownMemoryFormat, MarkdownParseError};
 pub use memory_persistence::{
     AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryProvenance, MemoryRecord,
@@ -787,6 +789,52 @@ mod tests {
             .iter()
             .any(|result| result.memory_id == weaker_entry.id));
         assert!(filtered.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn search_lang_excludes_off_language_lessons_but_keeps_general(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let py = accepted_fixture_item(
+            temp_dir.path(),
+            "In Python, prefer list comprehensions for mapping data.",
+        )?;
+        let rs = accepted_fixture_item(
+            temp_dir.path(),
+            "In Rust, prefer iterators for mapping data.",
+        )?;
+        let general = accepted_fixture_item(
+            temp_dir.path(),
+            "Always run the tests before mapping out a release.",
+        )?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        let py_entry = persistence.promote_review_item(&py)?;
+        let rs_entry = persistence.promote_review_item(&rs)?;
+        let general_entry = persistence.promote_review_item(&general)?;
+
+        // A Rust task: the Python lesson is excluded inside the query; the Rust
+        // and the language-agnostic (untagged) lessons stay eligible.
+        let rust_hits = persistence.search_lang("mapping", Some("rust"))?;
+        let ids: Vec<String> = rust_hits
+            .iter()
+            .map(|result| result.memory_id.as_str().to_string())
+            .collect();
+        assert!(
+            ids.contains(&rs_entry.id.as_str().to_string()),
+            "the same-language lesson must be retrieved"
+        );
+        assert!(
+            ids.contains(&general_entry.id.as_str().to_string()),
+            "an untagged general lesson must stay eligible for every task"
+        );
+        assert!(
+            !ids.contains(&py_entry.id.as_str().to_string()),
+            "an off-language lesson must not be retrieved"
+        );
+
+        // With no language filter, all three match the shared term.
+        assert_eq!(persistence.search("mapping")?.len(), 3);
         Ok(())
     }
 
