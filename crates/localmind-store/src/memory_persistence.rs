@@ -84,6 +84,10 @@ pub struct MemoryRecord {
     pub hit_count: i64,
     /// When this memory was last injected (RFC-ish text), or `None` if never.
     pub last_used_at: Option<String>,
+    /// Flagged for review (change-aware staleness or the freshness pass).
+    pub stale_candidate: bool,
+    /// In a `contradicts` relationship with another memory.
+    pub contradicted: bool,
 }
 
 /// The machine-wide global memory store: a separate SQLite index and Markdown
@@ -412,7 +416,8 @@ impl MemoryPersistence {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at
+                SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at,
+                       stale_candidate, contradicted
                 FROM memory_index
                 WHERE status = 'active'
                 ORDER BY created_at, memory_id
@@ -430,6 +435,8 @@ impl MemoryPersistence {
                     body: row.get(5)?,
                     hit_count: row.get(6)?,
                     last_used_at: row.get(7)?,
+                    stale_candidate: row.get::<_, i64>(8)? != 0,
+                    contradicted: row.get::<_, i64>(9)? != 0,
                 })
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
@@ -1074,9 +1081,10 @@ impl MemoryPersistence {
     /// Run the deterministic, offline freshness pass over accepted memory:
     /// select review candidates by age, never-retrieved-after-grace, and
     /// version-sensitivity, and (unless `dry_run`) route each via the existing
-    /// route-to-review flag — across the project **and** global stores, since the
-    /// non-code-anchored lessons the change-aware flag misses live in the global
-    /// store. Never deletes and never re-ranks (D001); a per-run cap keeps a pass
+    /// route-to-review flag. `scope` chooses the project store, the global store,
+    /// or both (the default) — the non-code-anchored lessons the change-aware flag
+    /// misses live in the global store. Never deletes and never re-ranks (D001);
+    /// a per-run cap keeps a pass
     /// from flooding review (the most-actionable reasons survive it). `now` is
     /// injected so the pass is deterministic in tests. An already-flagged memory
     /// is skipped, so re-running the pass is idempotent.
@@ -1087,6 +1095,22 @@ impl MemoryPersistence {
     pub fn freshness_pass(
         &self,
         thresholds: &crate::freshness::FreshnessThresholds,
+        scope: crate::freshness::FreshnessScope,
+        dry_run: bool,
+    ) -> Result<crate::freshness::FreshnessReport, MemoryPersistenceError> {
+        self.freshness_pass_at(thresholds, scope, dry_run, OffsetDateTime::now_utc())
+    }
+
+    /// [`freshness_pass`](Self::freshness_pass) with an injected clock, so the
+    /// pass is deterministic in tests. Production callers use `freshness_pass`.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn freshness_pass_at(
+        &self,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        scope: crate::freshness::FreshnessScope,
         dry_run: bool,
         now: OffsetDateTime,
     ) -> Result<crate::freshness::FreshnessReport, MemoryPersistenceError> {
@@ -1095,23 +1119,27 @@ impl MemoryPersistence {
         let mut scanned = 0usize;
         // (is_global, flag) so a flagged candidate is acted on its owning store.
         let mut candidates: Vec<(bool, FreshnessFlag)> = Vec::new();
-        Self::collect_freshness(
-            &self.connection,
-            false,
-            thresholds,
-            now,
-            &mut scanned,
-            &mut candidates,
-        )?;
-        if let Some(global) = &self.global {
+        if scope.includes_project() {
             Self::collect_freshness(
-                &global.connection,
-                true,
+                &self.connection,
+                false,
                 thresholds,
                 now,
                 &mut scanned,
                 &mut candidates,
             )?;
+        }
+        if scope.includes_global() {
+            if let Some(global) = &self.global {
+                Self::collect_freshness(
+                    &global.connection,
+                    true,
+                    thresholds,
+                    now,
+                    &mut scanned,
+                    &mut candidates,
+                )?;
+            }
         }
 
         let mut report = crate::freshness::FreshnessReport {

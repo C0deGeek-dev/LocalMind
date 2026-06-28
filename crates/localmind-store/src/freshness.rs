@@ -95,6 +95,43 @@ impl FreshnessReason {
     }
 }
 
+/// Which store(s) a freshness pass examines. The default `Both` honours the
+/// project's existing scope model (D-LM-0017): a project that allows global sees
+/// its project memory and the shared global lessons; `Project`/`Global` narrow it
+/// for a focused groom (e.g. only the machine-wide global store).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FreshnessScope {
+    #[default]
+    Both,
+    Project,
+    Global,
+}
+
+impl FreshnessScope {
+    /// Whether the project store is in scope.
+    #[must_use]
+    pub fn includes_project(self) -> bool {
+        matches!(self, FreshnessScope::Both | FreshnessScope::Project)
+    }
+
+    /// Whether the global store is in scope.
+    #[must_use]
+    pub fn includes_global(self) -> bool {
+        matches!(self, FreshnessScope::Both | FreshnessScope::Global)
+    }
+
+    /// Parse a CLI token (`project`/`global`/`both`), case-insensitively.
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        match token.to_ascii_lowercase().as_str() {
+            "both" => Some(FreshnessScope::Both),
+            "project" => Some(FreshnessScope::Project),
+            "global" => Some(FreshnessScope::Global),
+            _ => None,
+        }
+    }
+}
+
 /// One memory the pass selected for review, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreshnessFlag {

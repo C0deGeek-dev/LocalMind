@@ -11,7 +11,7 @@ use localmind_core::{
     Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope,
     MemoryStatus, SessionId,
 };
-use localmind_store::{FreshnessReason, FreshnessThresholds, MemoryPersistence};
+use localmind_store::{FreshnessReason, FreshnessScope, FreshnessThresholds, MemoryPersistence};
 use time::{Duration, OffsetDateTime};
 
 fn project_with_global(global_root: &Path) -> tempfile::TempDir {
@@ -97,7 +97,12 @@ fn each_heuristic_flags_the_right_memory_and_evergreen_is_safe() {
     // under the max age (365). version-sensitive + unused flag; the used evergreen
     // does not.
     let report = persistence
-        .freshness_pass(&FreshnessThresholds::default(), true, future(200))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            true,
+            future(200),
+        )
         .unwrap();
     assert_eq!(report.scanned, 3);
     let reason = |id: &str| {
@@ -121,7 +126,12 @@ fn a_fresh_store_flags_nothing() {
         .unwrap();
     // 10 days on: under every floor.
     let report = persistence
-        .freshness_pass(&FreshnessThresholds::default(), true, future(10))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            true,
+            future(10),
+        )
         .unwrap();
     assert!(
         report.flagged.is_empty(),
@@ -144,7 +154,12 @@ fn dry_run_writes_nothing_then_apply_flags_for_review() {
 
     // Dry run reports the candidate but writes nothing.
     let dry = persistence
-        .freshness_pass(&FreshnessThresholds::default(), true, future(120))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            true,
+            future(120),
+        )
         .unwrap();
     assert_eq!(dry.flagged.len(), 1);
     assert!(dry.dry_run);
@@ -155,7 +170,12 @@ fn dry_run_writes_nothing_then_apply_flags_for_review() {
 
     // Applying flags it for review (sets stale_candidate); the memory stays.
     let applied = persistence
-        .freshness_pass(&FreshnessThresholds::default(), false, future(120))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            false,
+            future(120),
+        )
         .unwrap();
     assert_eq!(applied.flagged.len(), 1);
     let flagged = persistence.list_stale_candidates().unwrap();
@@ -169,7 +189,12 @@ fn dry_run_writes_nothing_then_apply_flags_for_review() {
 
     // Re-running is idempotent: the already-flagged memory is not re-scanned.
     let again = persistence
-        .freshness_pass(&FreshnessThresholds::default(), false, future(120))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            false,
+            future(120),
+        )
         .unwrap();
     assert_eq!(again.scanned, 0, "an already-flagged memory is skipped");
     assert!(again.flagged.is_empty());
@@ -201,7 +226,7 @@ fn the_per_run_cap_bounds_the_flags_and_keeps_the_most_actionable() {
         ..FreshnessThresholds::default()
     };
     let report = persistence
-        .freshness_pass(&thresholds, true, future(200))
+        .freshness_pass_at(&thresholds, FreshnessScope::Both, true, future(200))
         .unwrap();
     assert!(report.capped, "more candidates than the cap");
     assert_eq!(report.flagged.len(), 2, "bounded by the cap");
@@ -233,7 +258,12 @@ fn the_pass_reaches_the_global_store() {
         .unwrap();
 
     let report = persistence
-        .freshness_pass(&FreshnessThresholds::default(), false, future(120))
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            false,
+            future(120),
+        )
         .unwrap();
     assert_eq!(report.scanned, 1);
     assert_eq!(report.flagged.len(), 1);
@@ -243,4 +273,62 @@ fn the_pass_reaches_the_global_store() {
     let flagged = persistence.list_stale_candidates().unwrap();
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].as_str(), "g-old");
+}
+
+#[test]
+fn scope_narrows_the_pass_to_one_store() {
+    let global = tempfile::tempdir().unwrap();
+    let global_root = global.path().join("memory");
+    let project = project_with_global(&global_root);
+    let persistence = MemoryPersistence::open_project(project.path()).unwrap();
+    persistence
+        .persist_memory_entry(&entry(
+            "p-old",
+            "an old project lesson",
+            MemoryScope::Project,
+        ))
+        .unwrap();
+    persistence
+        .persist_memory_entry(&entry(
+            "g-old",
+            "an old global lesson",
+            MemoryScope::GlobalUser,
+        ))
+        .unwrap();
+
+    // Project-only scope sees just the project lesson.
+    let project_only = persistence
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Project,
+            true,
+            future(120),
+        )
+        .unwrap();
+    assert_eq!(project_only.scanned, 1);
+    assert_eq!(project_only.flagged.len(), 1);
+    assert_eq!(project_only.flagged[0].memory_id, "p-old");
+
+    // Global-only scope sees just the global lesson.
+    let global_only = persistence
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Global,
+            true,
+            future(120),
+        )
+        .unwrap();
+    assert_eq!(global_only.scanned, 1);
+    assert_eq!(global_only.flagged[0].memory_id, "g-old");
+
+    // Both sees the pair.
+    let both = persistence
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            true,
+            future(120),
+        )
+        .unwrap();
+    assert_eq!(both.scanned, 2);
 }

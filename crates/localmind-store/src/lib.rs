@@ -47,7 +47,9 @@ pub use extraction::{
     CloseoutError, CloseoutProcessor, CloseoutReport, DeterministicExtractor, ExtractionInput,
     ExtractionOutput, ModelBackedExtractor, SessionExtractor,
 };
-pub use freshness::{FreshnessFlag, FreshnessReason, FreshnessReport, FreshnessThresholds};
+pub use freshness::{
+    FreshnessFlag, FreshnessReason, FreshnessReport, FreshnessScope, FreshnessThresholds,
+};
 pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
