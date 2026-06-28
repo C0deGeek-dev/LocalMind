@@ -5,6 +5,20 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Accepted-memory dedup is now semantic, not just lexical (opt-in,
+  review-routed).** A candidate that means the same thing as an accepted lesson
+  but shares few words (token overlap ~0.33, under the 0.6 lexical bar) used to
+  slip through and promote a near-duplicate. When `review.semantic_dedup` is on
+  **and** an embedding endpoint is configured, dedup now layers: lexical overlap
+  stays the cheap first pass and the no-embeddings fallback; if it does not
+  already flag a duplicate, the candidate is embedded and compared by cosine to
+  accepted-memory vectors, and a nearest match at **cosine ≥ 0.86** (fixed,
+  conservative, test-pinned) flags `duplicate_of` → routed to review like any
+  duplicate, **never auto-deleted**. With embeddings unavailable the behaviour is
+  byte-identical to the lexical contract (pinned by a no-regression test), and the
+  vector path is best-effort. Decision **D-LM-0020** (refines D-LM-0007, reuses
+  D-LM-0010's embeddings).
+
 - **Accepted memory is embedded into `vector_index`, best-effort.** When an
   `[inference]` embedding endpoint **and** `embedding_model` are configured, each
   accepted memory is embedded at promotion/persist time (keyed by a content

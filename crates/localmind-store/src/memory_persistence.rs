@@ -523,6 +523,23 @@ impl MemoryPersistence {
         )
     }
 
+    /// Embed an ad-hoc query string against the configured embedding endpoint —
+    /// for comparing a not-yet-stored candidate against stored memory vectors
+    /// (semantic dedup). Returns `Ok(None)` when embeddings are not configured
+    /// **or** the endpoint is unreachable, so a semantic feature degrades to the
+    /// lexical contract rather than failing the caller (best-effort, mirroring
+    /// memory embedding at promotion).
+    pub fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(None);
+        };
+        match endpoint.embed(std::slice::from_ref(&text.to_string())) {
+            Ok(vectors) => Ok(vectors.into_iter().next()),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Upsert a memory's embedding on the given connection (project or global),
     /// so a global memory's vector lands in the global database.
     fn upsert_memory_embedding_with(

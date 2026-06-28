@@ -4,6 +4,50 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0020 — Accepted-memory dedup is embedding-backed: lexical pre-filter → vector cosine, opt-in, review-routed
+
+- **Date**: 2026-06-28
+- **Status**: accepted
+
+The review-mode dedup of a candidate against **accepted memory** was
+lexical-only — an FTS recall plus a token-set overlap ≥ 0.6 (`DUPLICATE_SIMILARITY`).
+That misses paraphrases that mean the same thing but share few words ("a failed
+edit should rewrite the whole file" vs "replace the entire file when an edit
+operation fails" — overlap ~0.33), so near-duplicate lessons both promote and the
+warm store accumulates restatements.
+
+Decision: when `review.semantic_dedup` is on **and** an `[inference]` embedding
+endpoint is configured (`ProjectConfig::semantic_dedup_active`), the dedup is a
+layered ladder rather than lexical-only:
+
+- **Lexical stays the cheap first pass and the no-embeddings fallback.** The FTS
+  + token-overlap check runs first; an overlap ≥ 0.6 is a duplicate exactly as
+  before, with no embedding call.
+- **Vector cosine is the semantic confirmation.** Only when lexical did *not*
+  already flag a duplicate, the candidate's summary is embedded and compared by
+  cosine to accepted-memory vectors (`vector_index`, via the existing
+  `vector_search`). A nearest match at **cosine ≥ 0.86** — a fixed, conservative,
+  test-pinned constant, not a learned threshold — flags `duplicate_of`.
+- **A flag routes to review, never deletes.** A semantic duplicate takes the same
+  path as a lexical one: it sets `duplicate_of` on the review annotation and is
+  held for a human (or blocked from auto-accept in trusted/automatic mode). The
+  candidate is never silently merged or removed, so the cost of a wrong cut is
+  bounded.
+
+Safety and reproducibility hold: with embeddings unavailable the behaviour is
+byte-identical to the lexical contract (pinned by a no-regression test), and the
+vector path is **best-effort** — a down endpoint, an empty index, or an embed
+failure degrades to lexical and never errors the closeout. The threshold is
+conservative because normalized embeddings put genuine paraphrases high
+(~0.85–0.95) and distinct technical lessons well below (~0.3–0.6).
+
+This refines **D-LM-0007** (which named the accepted-memory duplication path as
+the review-mode `duplicate_of` annotation and left embedding dedup as an opt-in
+not yet wired) and reuses the same embeddings as **D-LM-0010**'s rerank, so a
+single configured local embedding model lifts both dedup and retrieval. Dedup is
+scoped to the project vector store (the existing `vector_search` primitive);
+broadening to global vectors is a later step.
+
 ## D-LM-0019 — Learning is on by default (machine-wide, local-only, review-gated)
 
 - **Date**: 2026-06-27

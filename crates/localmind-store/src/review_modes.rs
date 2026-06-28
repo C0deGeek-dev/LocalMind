@@ -14,6 +14,13 @@ const DUPLICATE_SIMILARITY: f32 = 0.6;
 /// Lower overlap above which an existing memory is "on the same topic" — used to
 /// decide whether a corrective/negating candidate actually contradicts it.
 const CONFLICT_TOPIC_OVERLAP: f32 = 0.3;
+/// Cosine ≥ this is treated as a semantic duplicate of an existing accepted
+/// memory. Conservative on purpose: normalized embeddings put genuine
+/// paraphrases high (~0.85–0.95) and distinct technical lessons well below
+/// (~0.3–0.6), so a high cut catches restatements without merging distinct
+/// lessons. A match only *flags* `duplicate_of` (routes to review); it never
+/// deletes, so the cost of a wrong cut is bounded.
+const VECTOR_DUPLICATE_SIMILARITY: f32 = 0.86;
 
 /// Very common words carry no topic signal; dropping them keeps similarity
 /// keyed on the substantive terms.
@@ -111,10 +118,21 @@ impl ReviewModeProcessor {
                     best = Some((hit, sim));
                 }
             }
-            let duplicate = best
+            // Lexical overlap is the cheap first pass and the no-embeddings
+            // fallback. When semantic dedup is active (the `review.semantic_dedup`
+            // opt-in plus a configured embedding endpoint) and lexical did not
+            // already flag a duplicate, confirm against accepted-memory vectors:
+            // this catches paraphrases that mean the same thing but share few
+            // words. With embeddings unavailable, behaviour is exactly the lexical
+            // contract. A semantic match only *flags* `duplicate_of` → routed to
+            // review like a lexical duplicate, never auto-deleted.
+            let mut duplicate_of = best
                 .as_ref()
                 .filter(|(_, sim)| *sim >= DUPLICATE_SIMILARITY)
-                .map(|(hit, _)| hit.clone());
+                .map(|(hit, _)| hit.memory_id.to_string());
+            if duplicate_of.is_none() && config.semantic_dedup_active() {
+                duplicate_of = vector_duplicate_of(&persistence, summary)?;
+            }
             // A genuine contradiction: a corrective/negating statement that
             // overlaps an existing memory's topic (it likely reverses it), or an
             // explicit "no longer"/"contradicts" assertion on its own.
@@ -131,9 +149,9 @@ impl ReviewModeProcessor {
             let conflict = is_contradiction(summary, related);
             item.candidate.review_annotation = Some(ReviewAnnotation {
                 score: Confidence::new(confidence)?,
-                duplicate_of: duplicate.as_ref().map(|hit| hit.memory_id.to_string()),
+                duplicate_of: duplicate_of.clone(),
                 conflict,
-                notes: if duplicate.is_some() {
+                notes: if duplicate_of.is_some() {
                     "Similar accepted memory found; human review recommended.".to_string()
                 } else {
                     "No close duplicate found in accepted memory.".to_string()
@@ -167,7 +185,7 @@ impl ReviewModeProcessor {
                                 "trusted mode auto-superseded a contradicted memory",
                                 "trusted",
                             )?,
-                            (false, _) if duplicate.is_none() => auto_decide(
+                            (false, _) if duplicate_of.is_none() => auto_decide(
                                 &queue,
                                 &persistence,
                                 &item.id,
@@ -204,7 +222,7 @@ impl ReviewModeProcessor {
                             "automatic mode auto-superseded a contradicted memory",
                             "automatic",
                         )?,
-                        (false, _) if duplicate.is_none() => auto_decide(
+                        (false, _) if duplicate_of.is_none() => auto_decide(
                             &queue,
                             &persistence,
                             &item.id,
@@ -263,6 +281,25 @@ fn auto_decide(
         persistence.promote_review_item(item_id)?;
     }
     Ok(true)
+}
+
+/// The id of an accepted memory whose embedding is a semantic duplicate of
+/// `summary` (cosine ≥ [`VECTOR_DUPLICATE_SIMILARITY`]), or `None`. Best-effort:
+/// with no embedding endpoint, an unreachable one, or no stored vectors, this
+/// returns `None` and dedup falls back to the lexical contract — it never errors
+/// the closeout on an embedding hiccup.
+fn vector_duplicate_of(
+    persistence: &MemoryPersistence,
+    summary: &str,
+) -> Result<Option<String>, ReviewModeError> {
+    let Some(vector) = persistence.embed_query(summary)? else {
+        return Ok(None);
+    };
+    let nearest = persistence.vector_search(&vector, 1)?;
+    Ok(nearest
+        .into_iter()
+        .find(|hit| hit.subject_kind == "memory" && hit.score >= VECTOR_DUPLICATE_SIMILARITY)
+        .map(|hit| hit.subject_id))
 }
 
 trait ReviewModeAudit {
