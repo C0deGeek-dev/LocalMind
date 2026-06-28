@@ -926,8 +926,23 @@ impl MemoryPersistence {
         memory_id: &MemoryEntryId,
         reason: &str,
     ) -> Result<bool, MemoryPersistenceError> {
-        let changed = self
-            .connection
+        Self::flag_for_review_in(&self.connection, memory_id, reason)
+    }
+
+    /// Flag an active memory for review on a specific store connection (project
+    /// or global), without deleting it — the connection-scoped core shared by
+    /// [`flag_for_review`](Self::flag_for_review) and the freshness pass, which
+    /// must reach the **global** store where the non-code-anchored lessons live.
+    /// Idempotent: a memory already flagged is a no-op (and not re-audited).
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    fn flag_for_review_in(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+        reason: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let changed = connection
             .execute(
                 "UPDATE memory_index SET stale_candidate = 1 \
                  WHERE memory_id = ?1 AND status = 'active' AND stale_candidate = 0",
@@ -935,7 +950,8 @@ impl MemoryPersistence {
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
         if changed > 0 {
-            self.write_audit(
+            Self::write_audit_with(
+                connection,
                 AuditEventKind::MemoryFlaggedStale,
                 "localmind",
                 memory_id.as_str(),
@@ -970,8 +986,20 @@ impl MemoryPersistence {
     /// # Errors
     /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
     pub fn list_stale_candidates(&self) -> Result<Vec<MemoryEntryId>, MemoryPersistenceError> {
-        let mut statement = self
-            .connection
+        // Span the project **and** global stores: the freshness pass flags the
+        // non-code-anchored global lessons too, so the review list must surface
+        // them (mirrors `list_memory`).
+        let mut ids = Self::list_stale_candidates_in(&self.connection)?;
+        if let Some(global) = &self.global {
+            ids.extend(Self::list_stale_candidates_in(&global.connection)?);
+        }
+        Ok(ids)
+    }
+
+    fn list_stale_candidates_in(
+        connection: &Connection,
+    ) -> Result<Vec<MemoryEntryId>, MemoryPersistenceError> {
+        let mut statement = connection
             .prepare(
                 "SELECT memory_id FROM memory_index \
                  WHERE status = 'active' AND stale_candidate = 1 ORDER BY memory_id",
@@ -1041,6 +1069,132 @@ impl MemoryPersistence {
                 .map_err(MemoryPersistenceError::Sqlite)?;
         }
         Ok(updated)
+    }
+
+    /// Run the deterministic, offline freshness pass over accepted memory:
+    /// select review candidates by age, never-retrieved-after-grace, and
+    /// version-sensitivity, and (unless `dry_run`) route each via the existing
+    /// route-to-review flag — across the project **and** global stores, since the
+    /// non-code-anchored lessons the change-aware flag misses live in the global
+    /// store. Never deletes and never re-ranks (D001); a per-run cap keeps a pass
+    /// from flooding review (the most-actionable reasons survive it). `now` is
+    /// injected so the pass is deterministic in tests. An already-flagged memory
+    /// is skipped, so re-running the pass is idempotent.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn freshness_pass(
+        &self,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        dry_run: bool,
+        now: OffsetDateTime,
+    ) -> Result<crate::freshness::FreshnessReport, MemoryPersistenceError> {
+        use crate::freshness::{FreshnessFlag, FreshnessReason};
+
+        let mut scanned = 0usize;
+        // (is_global, flag) so a flagged candidate is acted on its owning store.
+        let mut candidates: Vec<(bool, FreshnessFlag)> = Vec::new();
+        Self::collect_freshness(
+            &self.connection,
+            false,
+            thresholds,
+            now,
+            &mut scanned,
+            &mut candidates,
+        )?;
+        if let Some(global) = &self.global {
+            Self::collect_freshness(
+                &global.connection,
+                true,
+                thresholds,
+                now,
+                &mut scanned,
+                &mut candidates,
+            )?;
+        }
+
+        let mut report = crate::freshness::FreshnessReport {
+            scanned,
+            dry_run,
+            ..Default::default()
+        };
+        // Per-reason counts over every match, before the cap.
+        for (_, flag) in &candidates {
+            match flag.reason {
+                FreshnessReason::VersionSensitive => report.version_sensitive += 1,
+                FreshnessReason::Unused => report.unused += 1,
+                FreshnessReason::Age => report.age += 1,
+            }
+        }
+        // Most-actionable first, then bound to the per-run cap.
+        candidates.sort_by(|a, b| crate::freshness::cap_order(&a.1, &b.1));
+        report.capped = candidates.len() > thresholds.max_flags;
+        candidates.truncate(thresholds.max_flags);
+
+        if !dry_run {
+            for (is_global, flag) in &candidates {
+                let connection = if *is_global {
+                    match &self.global {
+                        Some(global) => &global.connection,
+                        // A global candidate with no global store cannot occur
+                        // (it was read from one), but stay total rather than panic.
+                        None => continue,
+                    }
+                } else {
+                    &self.connection
+                };
+                Self::flag_for_review_in(
+                    connection,
+                    &MemoryEntryId::new(flag.memory_id.clone()),
+                    flag.reason.audit_reason(),
+                )?;
+            }
+        }
+        report.flagged = candidates.into_iter().map(|(_, flag)| flag).collect();
+        Ok(report)
+    }
+
+    /// Examine one store's active, not-already-flagged memory and append the
+    /// freshness candidates it yields. Pure selection — no writes here.
+    fn collect_freshness(
+        connection: &Connection,
+        is_global: bool,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        now: OffsetDateTime,
+        scanned: &mut usize,
+        candidates: &mut Vec<(bool, crate::freshness::FreshnessFlag)>,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id, created_at, hit_count, body FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 0",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        for row in rows {
+            let (memory_id, created_at, hit_count, body) =
+                row.map_err(MemoryPersistenceError::Sqlite)?;
+            *scanned += 1;
+            if let Some(reason) =
+                crate::freshness::classify(&created_at, hit_count, &body, now, thresholds)
+            {
+                candidates.push((
+                    is_global,
+                    crate::freshness::FreshnessFlag { memory_id, reason },
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>, MemoryPersistenceError> {
