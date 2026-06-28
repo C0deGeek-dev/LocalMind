@@ -4,6 +4,50 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0021 — Accepted memory has a proactive lifecycle: usage-tracked, freshness-flagged, review-gated, never auto-deleted
+
+- **Date**: 2026-06-28
+- **Status**: accepted
+
+The store accumulated and was semantic-deduped and language-tagged, but had no
+*proactive* lifecycle: a lesson about a deprecated flag/API lived forever unless
+something contradicted it, and the change-aware staleness flag only fires for
+memory anchored to a project's code — so the ~140 non-code-anchored global lessons
+(language idioms, tooling notes) were never re-checked, and there was no usage
+signal to surface dead weight. This adds the missing freshness/relevance half.
+
+Decision — three additive pieces, all routing through the **existing** review gate
+(`flag_for_review` → review queue), **never auto-deleting** (precedent D-LM-0016):
+
+- **Usage tracking (schema v8).** `memory_index` gains `hit_count` (default 0) and
+  `last_used_at`, bumped when a memory is injected into a turn. The bump is
+  best-effort and **post-turn, never on the retrieval read path** — retrieval stays
+  read-only and fast. The columns are runtime-accumulated (a reindex resets them to
+  zero-usage); pre-v8 rows upgrade as zero-usage.
+- **A deterministic, offline freshness pass.** It flags accepted memory for review
+  by three independent, conservative heuristics — age, never-retrieved-after-a-grace
+  (the grace is essential since every memory starts at zero usage), and a
+  version-sensitive keyword/semver heuristic — across the **project and global**
+  stores, covering the non-code-anchored lessons the change-aware flag misses. It
+  only *flags for review*; it never deletes, never re-ranks, and a per-run cap plus
+  a dry-run keep it from flooding the queue. The selection logic is pure and
+  fully offline-testable.
+- **Optional source re-validation (opt-in, default-off, disclosed).** A sampled
+  pass asks the configured model whether version-sensitive lessons are still
+  current and routes a "no longer true" verdict to review. It is the deeper,
+  network-touching check; the offline freshness pass is the default. Egress is the
+  caller's explicit, disclosed choice (a preview contacts nothing). The
+  sample→check→flag logic is decoupled from the model by a verdict-source trait, so
+  it is offline-testable with a fixture; the live run is opportunistic.
+
+A human (or the existing automatic-review mode) decides every flagged lesson;
+retirement is supersede (reversible, D-LM-0008) or an explicit delete. Nothing in
+the lifecycle silently loses a lesson, and nothing slows a turn. Operator-invoked
+via the host CLI (no background daemon). Acceptance is the deterministic offline
+suite; a live re-validation run is opportunistic (egress policy, offline-bar
+policy). Refines D-LM-0011 (extends staleness to non-code-anchored lessons) and
+reuses D-LM-0016's one route-to-review path.
+
 ## D-LM-0020 — Accepted-memory dedup is embedding-backed: lexical pre-filter → vector cosine, opt-in, review-routed
 
 - **Date**: 2026-06-28

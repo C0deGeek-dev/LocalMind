@@ -6,12 +6,12 @@
 //! check: sample version-sensitive lessons and ask a verdict source whether each
 //! still holds, routing a "no longer true" verdict to the existing review gate.
 //!
-//! It is **default-off and disclosed** (policy D007): the offline heuristic is the
-//! default; this is the network-touching pass, only run on an explicit operator
-//! action. The sample → check → flag logic is decoupled from any model by the
+//! It is **default-off and disclosed**: the offline heuristic is the default;
+//! this is the network-touching pass, only run on an explicit operator action.
+//! The sample → check → flag logic is decoupled from any model by the
 //! [`VerdictSource`] trait, so it is fully offline-testable with a fixture (the
-//! acceptance bar, D008); the live model run is opportunistic. A verdict only ever
-//! *flags for review* — it never deletes (D001).
+//! offline acceptance bar); the live model run is opportunistic. A verdict only
+//! ever *flags for review* — it never deletes.
 
 use crate::freshness::is_version_sensitive;
 

@@ -1,7 +1,7 @@
 //! Opt-in source re-validation: the sample → check → flag pipeline is offline-
 //! testable with a fixture verdict source (no model, no network) — the acceptance
-//! bar (D008). A "no longer true" verdict routes to the existing review gate and
-//! never deletes (D001); `Unknown` never flags; the sample is bounded.
+//! bar. A "no longer true" verdict routes to the existing review gate and never
+//! deletes; `Unknown` never flags; the sample is bounded.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use localmind_core::{

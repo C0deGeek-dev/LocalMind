@@ -14,6 +14,22 @@ Notable changes, newest first. Contract-relevant entries reference
   memories, and search results expose the count. Pre-v8 databases upgrade cleanly
   (rows read as zero-usage). See `docs/on-disk-contract.md`.
 
+- **A proactive freshness pass flags stale memory for review (D-LM-0021).** A
+  deterministic, offline pass (`freshness_pass`) selects accepted memory for
+  review by age, never-retrieved-after-a-grace, and a version-sensitive
+  keyword/semver heuristic — across the project **and** global stores, covering
+  the non-code-anchored global lessons the change-aware staleness flag never
+  reaches. It only routes to the existing review gate (it never deletes or
+  re-ranks), with conservative configurable thresholds, a per-run cap, and a
+  dry-run; re-runs are idempotent. `list_stale_candidates` now spans both stores.
+
+- **Optional source re-validation (opt-in, default-off).** `revalidate_sources`
+  samples version-sensitive lessons and asks a `VerdictSource` whether each still
+  holds, routing a "no longer true" verdict to review (never deletes); an
+  `Unknown` verdict never flags. The logic is model-agnostic (offline-testable
+  with a fixture); `revalidate_with_model` drives it with the configured chat
+  model, best-effort (degrades to unavailable when none is configured).
+
 - **Language detection is whole-word and covers more languages.** Keyword
   matching was substring-based, so "cpp" matched a project name like `llama.cpp`
   and bare names risked colliding with English; and Go-by-name, C#, PowerShell,

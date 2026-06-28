@@ -53,7 +53,7 @@ pub struct MemorySearchResult {
     pub contradicted: bool,
     /// How many times this memory has been injected into a turn (the usage
     /// signal; 0 = never retrieved). Exposed read-only at retrieval; the bump is
-    /// post-turn, never on this read path (D003).
+    /// post-turn, never on this read path.
     pub hit_count: i64,
 }
 
@@ -1034,7 +1034,7 @@ impl MemoryPersistence {
     /// stamp `last_used_at`, across the project **and** global stores (a memory's
     /// dead-weight signal is only meaningful where the memory lives, and the
     /// global store holds the non-code-anchored lessons). Driven from the
-    /// post-turn `memories_used` audit, never the retrieval read path (D003).
+    /// post-turn `memories_used` audit, never the retrieval read path.
     ///
     /// Idempotent-per-call: a distinct id is bumped at most once per call (the
     /// ids are deduped first), so one turn's injection counts as one hit. Ids
@@ -1089,9 +1089,9 @@ impl MemoryPersistence {
     /// version-sensitivity, and (unless `dry_run`) route each via the existing
     /// route-to-review flag. `scope` chooses the project store, the global store,
     /// or both (the default) — the non-code-anchored lessons the change-aware flag
-    /// misses live in the global store. Never deletes and never re-ranks (D001);
-    /// a per-run cap keeps a pass
-    /// from flooding review (the most-actionable reasons survive it). `now` is
+    /// misses live in the global store. Never deletes and never re-ranks; a
+    /// per-run cap keeps a pass from flooding review (the most-actionable reasons
+    /// survive it). `now` is
     /// injected so the pass is deterministic in tests. An already-flagged memory
     /// is skipped, so re-running the pass is idempotent.
     ///
@@ -1235,8 +1235,8 @@ impl MemoryPersistence {
     /// source: sample version-sensitive accepted lessons (across the project and
     /// global stores), ask the source whether each still holds, and (unless
     /// `dry_run`) route a "no longer true" verdict to the existing review gate.
-    /// Never deletes (D001); an `Unknown` verdict never flags. The source is
-    /// abstracted so this is fully offline-testable with a fixture (D008) — the
+    /// Never deletes; an `Unknown` verdict never flags. The source is
+    /// abstracted so this is fully offline-testable with a fixture — the
     /// live model path is [`revalidate_with_model`](Self::revalidate_with_model).
     ///
     /// # Errors
@@ -1292,10 +1292,10 @@ impl MemoryPersistence {
     }
 
     /// [`revalidate_sources`](Self::revalidate_sources) driven by the configured
-    /// chat model. **Opt-in, network-touching** (policy D007): the caller invokes
-    /// it explicitly. Returns `Ok(None)` when no chat endpoint is configured (so
-    /// the feature degrades to "not available" rather than erroring), mirroring
-    /// the best-effort embedding path. The live run is opportunistic (D008).
+    /// chat model. **Opt-in, network-touching**: the caller invokes it
+    /// explicitly. Returns `Ok(None)` when no chat endpoint is configured (so the
+    /// feature degrades to "not available" rather than erroring), mirroring the
+    /// best-effort embedding path. The live run is opportunistic.
     ///
     /// # Errors
     /// Returns [`MemoryPersistenceError`] when inference settings are malformed or
