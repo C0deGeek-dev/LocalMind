@@ -4,6 +4,47 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0022 — Ingested chunk knowledge is semantically retrievable: language-tagged, embedded, hybrid-retrieved — lifting the keyword-only-v1 deferral
+
+- **Date**: 2026-06-28
+- **Status**: accepted
+
+The ingest chunk store behind a host's `knowledge_search` was keyword-only
+(FTS5 + bm25). Chunk embeddings were deferred in the IngestKnowledgeHardening
+work — **D009 (2026-06-17): "Subject 05 (gap C, ingest chunk embeddings)
+ABANDONED"**, on YAGNI / no-evidence grounds (the D005 evidence bar — a fixture
+showing keyword-only ranking a semantically-relevant chunk below the budget
+cutoff where an embed would surface it — was unmet), with the explicit clause
+*"Gap C may be reopened as a fresh plan if recall proves insufficient at scale."*
+
+That reopen clause is now exercised, and the precondition has changed: the
+SemanticMemoryEmbeddings work (D-LM-0020) stood up a reusable CPU embedding
+server and the full embed/vector/language infrastructure for accepted memory.
+So ingested chunk knowledge becomes semantically retrievable by **reusing the
+engine's existing primitives**, not by building a second path:
+
+- **Language tag** each chunk by its file extension via `language_for_extension`
+  (the same map accepted-memory tagging uses), and filter retrieval to the
+  workspace's dominant language (`detect_workspace_language`), `NULL` always
+  eligible — mirroring accepted-memory `search_lang`.
+- **Embed** each chunk best-effort into a chunk vector index that mirrors the
+  `vector_index` shape (D-LM-0003: rebuildable SQLite LE-f32 BLOB, exact cosine
+  in Rust), reusing the embedding endpoint and the `InferenceCapability` gate, and
+  content-fingerprinted so an unchanged chunk is not re-embedded.
+- **Hybrid retrieval**: blend keyword (bm25) and cosine over the stored chunk
+  vectors. Keyword stays the **floor** — a keyword hit always outranks a
+  vector-only hit; cosine only sub-orders and adds recall. This is the same
+  additive-over-deterministic posture as D-LM-0010, applied to the ingest layer.
+
+This **supersedes** the IngestKnowledgeHardening D009 deferral. The guarantees of
+the deferred-from state are preserved: embeddings are opt-in (only active when an
+embedding model is configured) and best-effort (a down/unconfigured endpoint
+writes no vectors and never fails ingest), and with embeddings absent the keyword
+contract is byte-identical to before. The chunk store and `knowledge_search` are
+host-side (LocalPilot); this decision records the **engine-pattern reuse** that
+makes the lift correct — one embedding path, the `vector_index`/cosine pattern,
+and the language map shared across accepted memory and ingest.
+
 ## D-LM-0021 — Accepted memory has a proactive lifecycle: usage-tracked, freshness-flagged, review-gated, never auto-deleted
 
 - **Date**: 2026-06-28
