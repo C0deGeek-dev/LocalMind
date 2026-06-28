@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Language detection is whole-word and covers more languages.** Keyword
+  matching was substring-based, so "cpp" matched a project name like `llama.cpp`
+  and bare names risked colliding with English; and Go-by-name, C#, PowerShell,
+  and Bash lessons were never tagged at all (only `golang` was a Go keyword). The
+  matcher now requires whole-word boundaries (`contains_word`) so "go" matches
+  "Go:" but not "going"/"cargo", "java" never matches inside "javascript", and
+  `llama.cpp` is not read as C++; and the table adds **Go** (via `goroutine`/`go
+  build`/`go:` markers, not the ambiguous bare token), **C#** (`c#`/`dotnet`),
+  **PowerShell** (`pwsh`/`cmdlet`), and **Bash** (`pipefail`) for both prose tags
+  and `.cs`/`.ps1`/`.sh` workspace detection. Tagging stays conservative — a
+  lesson naming zero or several languages is left untagged.
+
 - **Accepted-memory dedup is now semantic, not just lexical (opt-in,
   review-routed).** A candidate that means the same thing as an accepted lesson
   but shares few words (token overlap ~0.33, under the 0.6 lexical bar) used to

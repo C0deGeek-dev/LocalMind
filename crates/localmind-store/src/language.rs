@@ -29,37 +29,95 @@ use localmind_core::LessonCategory;
 
 /// The languages recognised for memory tagging and workspace detection: the
 /// canonical name, the source extensions that signal it in a workspace, and the
-/// lowercase prose keywords that name it in a lesson body. Deliberately small
-/// and unambiguous — bare "go"/"c" are not matched (too many false positives in
-/// prose), and "java" is disambiguated from "javascript" at match time.
+/// lowercase prose keywords that name it in a lesson body. Keywords are matched
+/// **whole-word** (see [`contains_word`]), so bare ambiguous names are safe — "go"
+/// matches "Go:" but not "going", "java" never matches inside "javascript", and a
+/// project name like "llama.cpp" does not read as C++. Distinctive markers
+/// disambiguate the English-word languages (Go via `goroutine`/`go build`/`go:`,
+/// C++ via `c++`/`g++`, not the bare token).
 const LANGS: &[(&str, &[&str], &[&str])] = &[
-    ("python", &["py"], &["python"]),
-    ("rust", &["rs"], &["rust"]),
+    (
+        "python",
+        &["py", "pyi", "pyw"],
+        &["python", "python3", "pytest", "virtualenv"],
+    ),
+    (
+        "rust",
+        &["rs"],
+        &["rust", "cargo", "rustc", "clippy", "rustup"],
+    ),
     (
         "javascript",
         &["js", "mjs", "cjs", "jsx"],
-        &["javascript", "node.js", "nodejs"],
+        &["javascript", "node.js", "nodejs", "npm"],
     ),
-    ("typescript", &["ts", "tsx"], &["typescript"]),
-    ("go", &["go"], &["golang"]),
-    ("cpp", &["cpp", "cc", "cxx", "hpp", "hh"], &["c++", "cpp"]),
+    ("typescript", &["ts", "tsx"], &["typescript", "tsc"]),
+    (
+        "go",
+        &["go"],
+        &[
+            "golang",
+            "goroutine",
+            "go.mod",
+            "go build",
+            "go test",
+            "go vet",
+            "go run",
+            "go mod",
+            "go fmt",
+            "fmt.errorf",
+            "go:",
+        ],
+    ),
+    (
+        "cpp",
+        &["cpp", "cc", "cxx", "hpp", "hh"],
+        &["c++", "g++", "clang++"],
+    ),
+    ("csharp", &["cs"], &["c#", "csharp", "dotnet", ".net"]),
     ("java", &["java"], &["java"]),
-    ("ruby", &["rb"], &["ruby"]),
+    (
+        "powershell",
+        &["ps1", "psm1"],
+        &["powershell", "pwsh", "cmdlet"],
+    ),
+    ("bash", &["sh", "bash"], &["bash", "pipefail", "shellcheck"]),
+    ("ruby", &["rb"], &["ruby", "rails"]),
 ];
 
-/// The languages a lesson's text clearly names. "java" counts only when the text
-/// is not actually naming "javascript".
+/// The languages a lesson's text clearly names, by whole-word keyword match.
 fn languages_in_text(text: &str) -> Vec<&'static str> {
     let lower = text.to_ascii_lowercase();
-    let mut found = Vec::new();
-    for (canon, _exts, keywords) in LANGS {
-        let named = keywords.iter().any(|kw| lower.contains(kw));
-        let confused_java = *canon == "java" && lower.contains("javascript");
-        if named && !confused_java {
-            found.push(*canon);
-        }
+    LANGS
+        .iter()
+        .filter(|(_, _, keywords)| keywords.iter().any(|kw| contains_word(&lower, kw)))
+        .map(|(canon, _, _)| *canon)
+        .collect()
+}
+
+/// Whole-word containment: `needle` must occur in `haystack` bounded by
+/// non-alphanumeric characters (or the string ends). So "go" matches "Go:" /
+/// "use go build" but not "going" or "cargo", "java" does not match inside
+/// "javascript", and "cpp" inside "llama.cpp" is not C++ (that token is not a
+/// keyword anyway). The needle's own punctuation (`+ # . :` and spaces) is part
+/// of it; only the surrounding characters are boundary-checked. Caller lowercases.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
     }
-    found
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// The single language a lesson is about, for the stored `language` tag, or
@@ -213,6 +271,47 @@ mod tests {
     }
 
     #[test]
+    fn recognises_go_csharp_powershell_bash_by_marker() {
+        assert_eq!(
+            lesson_language("Use a goroutine and `go build` to compile a module"),
+            Some("go")
+        );
+        // The seed convention "Go: ..." is caught by the `go:` marker, not bare "go".
+        assert_eq!(
+            lesson_language("Go: read a panic message bottom-up"),
+            Some("go")
+        );
+        assert_eq!(
+            lesson_language("Never block on .Result in C# async code"),
+            Some("csharp")
+        );
+        assert_eq!(
+            lesson_language("In PowerShell a cmdlet error is non-terminating by default"),
+            Some("powershell")
+        );
+        assert_eq!(
+            lesson_language("Start a bash script with set -o pipefail"),
+            Some("bash")
+        );
+    }
+
+    #[test]
+    fn word_boundaries_avoid_false_positives() {
+        // A project name, not the C++ language.
+        assert_eq!(
+            lesson_language("Serve a model with llama.cpp's server"),
+            None
+        );
+        // "rust" inside "frustrated"/"trust" must not tag Rust.
+        assert_eq!(
+            lesson_language("Do not get frustrated; trust the process"),
+            None
+        );
+        // bare "go" inside "going" must not tag Go (no marker present).
+        assert_eq!(lesson_language("We are going to deploy soon"), None);
+    }
+
+    #[test]
     fn general_and_cross_cutting_lessons_are_untagged() {
         // Names no language → general.
         assert_eq!(lesson_language("Run the tests before declaring done"), None);
@@ -229,6 +328,10 @@ mod tests {
         assert_eq!(language_for_extension(".py"), Some("python"));
         assert_eq!(language_for_extension("JSX"), Some("javascript"));
         assert_eq!(language_for_extension("hpp"), Some("cpp"));
+        assert_eq!(language_for_extension("go"), Some("go"));
+        assert_eq!(language_for_extension("cs"), Some("csharp"));
+        assert_eq!(language_for_extension("ps1"), Some("powershell"));
+        assert_eq!(language_for_extension("sh"), Some("bash"));
         assert_eq!(language_for_extension("txt"), None);
     }
 
