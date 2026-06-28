@@ -5,6 +5,17 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Language tagging no longer under-tags lessons named only by idiom.** Body-text
+  detection alone missed clearly language-specific lessons that never spell the
+  language out (a Go `sort.Strings` anti-pattern, a Rust borrow recipe), so they
+  stored untagged and leaked across languages. `resolve_memory_language` now lets
+  a **language-bound category** (code pattern, anti-pattern, debugging recipe,
+  test strategy) inherit the **session's language** — the dominant language of the
+  workspace the lesson was learned in — while an explicit language in the body
+  still wins and cross-cutting categories (tooling, process) stay untagged.
+  Workspace-language detection (`detect_workspace_language`) moved here too, so the
+  workspace signal and the stored tag share one source of truth.
+
 - **Accepted memory is tagged with a programming language and retrieval filters
   by it.** A lesson clearly about one language ("In Python, …") is noise in a
   task in another — a Python idiom injected into a Rust task degrades the

@@ -50,7 +50,9 @@ pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
-pub use language::{language_for_extension, lesson_language};
+pub use language::{
+    detect_workspace_language, language_for_extension, lesson_language, resolve_memory_language,
+};
 pub use markdown::{MarkdownMemoryFormat, MarkdownParseError};
 pub use memory_persistence::{
     AuditRecord, MemoryPersistence, MemoryPersistenceError, MemoryProvenance, MemoryRecord,

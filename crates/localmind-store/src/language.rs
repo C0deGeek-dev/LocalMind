@@ -14,6 +14,18 @@
 //! several is cross-cutting. Both are stored untagged (`NULL`) so they remain
 //! eligible for every task — the filter excludes only single-language lessons
 //! that do not match the task's language.
+//!
+//! Body text alone under-tags: the model often names a language only by idiom
+//! (`sort.Strings`, not "Go"), so a clearly language-specific lesson reads as
+//! untagged and leaks across languages. [`resolve_memory_language`] closes that
+//! gap — a language-bound *category* (a code pattern, an anti-pattern, a
+//! debugging recipe) inherits the language of the workspace it was learned in,
+//! while cross-cutting categories (tooling, process) stay untagged.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use localmind_core::LessonCategory;
 
 /// The languages recognised for memory tagging and workspace detection: the
 /// canonical name, the source extensions that signal it in a workspace, and the
@@ -74,9 +86,110 @@ pub fn language_for_extension(ext: &str) -> Option<&'static str> {
         .map(|(canon, _, _)| *canon)
 }
 
+/// Categories whose lessons are about a specific programming language even when
+/// the body never names it — a Go stdlib idiom, a Rust borrow recipe, a language
+/// test strategy. These inherit the session's language. Cross-cutting categories
+/// (tooling, process, preferences, deployment, security, docs) are not language
+/// bound and stay untagged unless the body itself names a language.
+fn is_language_bound(category: &LessonCategory) -> bool {
+    matches!(
+        category,
+        LessonCategory::CodePattern
+            | LessonCategory::AntiPattern
+            | LessonCategory::DebuggingRecipe
+            | LessonCategory::TestingStrategy
+    )
+}
+
+/// The language to tag an accepted memory with at write time. The body wins when
+/// it names a single language explicitly (most specific); otherwise a
+/// language-bound category inherits `session_language` — the dominant language of
+/// the workspace the lesson was learned in — because the model routinely names a
+/// language only by idiom (`sort.Strings`, not "Go"). A cross-cutting lesson, or
+/// one with no language signal at all, stays untagged (`None`) and eligible for
+/// every task.
+#[must_use]
+pub fn resolve_memory_language(
+    category: &LessonCategory,
+    body: &str,
+    session_language: Option<&str>,
+) -> Option<String> {
+    if let Some(explicit) = lesson_language(body) {
+        return Some(explicit.to_string());
+    }
+    if is_language_bound(category) {
+        return session_language.map(str::to_string);
+    }
+    None
+}
+
+/// The workspace's dominant programming language by source-file extension, or
+/// `None` when there is no clear signal (empty/mixed). A bounded, shallow scan
+/// that skips dependency and build directories — owned here so the workspace
+/// signal and the stored lesson tag share one source of truth.
+#[must_use]
+pub fn detect_workspace_language(root: &Path) -> Option<&'static str> {
+    /// Directories that never carry the project's own source signal.
+    const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "build",
+        "dist",
+        "venv",
+        "__pycache__",
+        "vendor",
+    ];
+    /// Cap on files inspected, so a large repo does not stall the scan.
+    const MAX_FILES: usize = 2_000;
+
+    let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        if seen >= MAX_FILES {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if seen >= MAX_FILES {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(entry.path());
+            } else {
+                seen += 1;
+                let path = entry.path();
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                if let Some(canon) = language_for_extension(ext) {
+                    *counts.entry(canon).or_default() += 1;
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(canon, _)| canon)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{language_for_extension, lesson_language};
+    use super::{
+        detect_workspace_language, language_for_extension, lesson_language, resolve_memory_language,
+    };
+    use localmind_core::LessonCategory;
 
     #[test]
     fn single_language_lessons_are_tagged() {
@@ -117,5 +230,48 @@ mod tests {
         assert_eq!(language_for_extension("JSX"), Some("javascript"));
         assert_eq!(language_for_extension("hpp"), Some("cpp"));
         assert_eq!(language_for_extension("txt"), None);
+    }
+
+    #[test]
+    fn language_bound_category_inherits_session_language() {
+        // Body names no language but it is a Go stdlib idiom; AntiPattern is
+        // language-bound, so it inherits the session's language (the gap that let
+        // `sort.Strings` lessons leak into other languages untagged).
+        assert_eq!(
+            resolve_memory_language(
+                &LessonCategory::AntiPattern,
+                "Use sort.Strings on a copy to avoid mutating the input slice.",
+                Some("go")
+            ),
+            Some("go".to_string())
+        );
+        // An explicit language in the body wins over the session language.
+        assert_eq!(
+            resolve_memory_language(
+                &LessonCategory::AntiPattern,
+                "In Rust, prefer iterators over index loops.",
+                Some("go")
+            ),
+            Some("rust".to_string())
+        );
+        // A cross-cutting category (tooling) stays untagged even in a go session.
+        assert_eq!(
+            resolve_memory_language(
+                &LessonCategory::ToolingNote,
+                "Rewrite the whole file when an incremental edit fails on hidden chars.",
+                Some("go")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_the_workspace_dominant_language() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("util.rs"), "fn b() {}").unwrap();
+        std::fs::create_dir_all(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/gen.py"), "x=1").unwrap();
+        assert_eq!(detect_workspace_language(dir.path()), Some("rust"));
     }
 }

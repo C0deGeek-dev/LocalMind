@@ -231,11 +231,15 @@ impl MemoryPersistence {
         // indexes it and records the audit row is the point of truth. A crash
         // after the file write leaves an unindexed file that the next
         // promotion overwrites — never a half-indexed entry.
+        // A lesson named only by idiom inherits the language of the workspace it
+        // was learned in (the project this promotion runs against).
+        let session_language =
+            crate::language::detect_workspace_language(&self.config.project_root);
         let path = MemoryPathResolver::write_memory_file(&self.config, &entry)?;
         let tx = connection
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
-        Self::index_memory_with(&tx, &entry, &path)?;
+        Self::index_memory_with(&tx, &entry, &path, session_language)?;
         if let Some(target) = &target {
             Self::supersede_memory_with(&tx, target)?;
             Self::write_audit_with(
@@ -297,11 +301,13 @@ impl MemoryPersistence {
         // that owns the scope, so a global lesson lands in the machine-wide
         // database that every project reads.
         let connection = self.connection_for(&entry.scope)?;
+        // A directly-persisted (seeded) entry carries no session context; its
+        // language comes from the body alone (the body-wins branch).
         let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
         let tx = connection
             .unchecked_transaction()
             .map_err(MemoryPersistenceError::Sqlite)?;
-        Self::index_memory_with(&tx, entry, &path)?;
+        Self::index_memory_with(&tx, entry, &path, None)?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         self.embed_memory_if_configured(connection, entry)?;
         Ok(path)
@@ -996,12 +1002,18 @@ impl MemoryPersistence {
         connection: &Connection,
         entry: &MemoryEntry,
         path: &Path,
+        session_language: Option<&str>,
     ) -> Result<(), MemoryPersistenceError> {
         let epistemic_status = EpistemicStatus::from_category(&entry.category);
         // The single language this lesson is about (or NULL for a general /
-        // cross-cutting one), detected once here from the full body so retrieval
-        // can filter off-language lessons inside the query.
-        let language = crate::language::lesson_language(entry.body.as_str());
+        // cross-cutting one), resolved once here: the body wins when it names a
+        // language, else a language-bound category inherits the session's, so a
+        // lesson named only by idiom is still tagged and filtered in retrieval.
+        let language = crate::language::resolve_memory_language(
+            &entry.category,
+            entry.body.as_str(),
+            session_language,
+        );
         connection
             .execute(
                 r#"
