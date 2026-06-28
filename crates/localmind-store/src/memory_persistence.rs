@@ -1,3 +1,7 @@
+use crate::revalidation::{
+    is_revalidation_candidate, parse_verdict, RevalidationConfig, RevalidationReport,
+    RevalidationVerdict, VerdictSource, VERDICT_PROMPT,
+};
 use crate::{
     MemoryPathResolver, ProjectConfig, ReviewQueue, ReviewQueueError, ReviewQueueItem,
     StoreConfigError,
@@ -6,7 +10,9 @@ use localmind_core::{
     content_fingerprint, AuditEventKind, CandidateDestination, Confidence, EpistemicStatus,
     MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
 };
-use localmind_inference::{InferenceCapability, InferenceError, TokenUsage};
+use localmind_inference::{
+    ChatEndpoint, ChatMessage, InferenceCapability, InferenceError, TokenUsage,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1225,6 +1231,114 @@ impl MemoryPersistence {
         Ok(())
     }
 
+    /// Run the opt-in source re-validation pass with a caller-supplied verdict
+    /// source: sample version-sensitive accepted lessons (across the project and
+    /// global stores), ask the source whether each still holds, and (unless
+    /// `dry_run`) route a "no longer true" verdict to the existing review gate.
+    /// Never deletes (D001); an `Unknown` verdict never flags. The source is
+    /// abstracted so this is fully offline-testable with a fixture (D008) — the
+    /// live model path is [`revalidate_with_model`](Self::revalidate_with_model).
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn revalidate_sources(
+        &self,
+        config: &RevalidationConfig,
+        source: &dyn VerdictSource,
+        dry_run: bool,
+    ) -> Result<RevalidationReport, MemoryPersistenceError> {
+        // (is_global, id, body) so a flagged candidate is acted on its store.
+        let mut candidates: Vec<(bool, String, String)> = Vec::new();
+        Self::collect_revalidation_candidates(&self.connection, false, &mut candidates)?;
+        if let Some(global) = &self.global {
+            Self::collect_revalidation_candidates(&global.connection, true, &mut candidates)?;
+        }
+        // Deterministic order, then bound the sample (a cap on egress + churn).
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        candidates.truncate(config.sample_size);
+
+        let mut report = RevalidationReport {
+            dry_run,
+            ..Default::default()
+        };
+        for (is_global, id, body) in &candidates {
+            report.sampled += 1;
+            match source.judge(body) {
+                RevalidationVerdict::NoLongerTrue => {
+                    report.no_longer_true += 1;
+                    if !dry_run {
+                        let connection = if *is_global {
+                            match &self.global {
+                                Some(global) => &global.connection,
+                                None => continue,
+                            }
+                        } else {
+                            &self.connection
+                        };
+                        Self::flag_for_review_in(
+                            connection,
+                            &MemoryEntryId::new(id.clone()),
+                            "source re-validation: reported no longer current",
+                        )?;
+                    }
+                    report.flagged.push(id.clone());
+                }
+                RevalidationVerdict::StillCurrent => report.still_current += 1,
+                RevalidationVerdict::Unknown => report.unknown += 1,
+            }
+        }
+        Ok(report)
+    }
+
+    /// [`revalidate_sources`](Self::revalidate_sources) driven by the configured
+    /// chat model. **Opt-in, network-touching** (policy D007): the caller invokes
+    /// it explicitly. Returns `Ok(None)` when no chat endpoint is configured (so
+    /// the feature degrades to "not available" rather than erroring), mirroring
+    /// the best-effort embedding path. The live run is opportunistic (D008).
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError`] when inference settings are malformed or
+    /// a store write fails.
+    pub fn revalidate_with_model(
+        &self,
+        config: &RevalidationConfig,
+        dry_run: bool,
+    ) -> Result<Option<RevalidationReport>, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(chat) = capability.chat() else {
+            return Ok(None);
+        };
+        let source = ModelVerdictSource { chat };
+        Ok(Some(self.revalidate_sources(config, &source, dry_run)?))
+    }
+
+    /// Append the version-sensitive, not-already-flagged candidates from one store.
+    fn collect_revalidation_candidates(
+        connection: &Connection,
+        is_global: bool,
+        out: &mut Vec<(bool, String, String)>,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id, body FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 0",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        for row in rows {
+            let (memory_id, body) = row.map_err(MemoryPersistenceError::Sqlite)?;
+            if is_revalidation_candidate(&body) {
+                out.push((is_global, memory_id, body));
+            }
+        }
+        Ok(())
+    }
+
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>, MemoryPersistenceError> {
         let mut statement = self
             .connection
@@ -1596,6 +1710,23 @@ impl MemoryPersistence {
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
         Ok(())
+    }
+}
+
+/// A [`VerdictSource`] backed by the configured chat model. Best-effort: a chat
+/// error yields [`RevalidationVerdict::Unknown`] (never a flag), so a down or
+/// flaky endpoint cannot manufacture review noise.
+struct ModelVerdictSource<'a> {
+    chat: &'a ChatEndpoint,
+}
+
+impl VerdictSource for ModelVerdictSource<'_> {
+    fn judge(&self, body: &str) -> RevalidationVerdict {
+        let messages = [ChatMessage::system(VERDICT_PROMPT), ChatMessage::user(body)];
+        match self.chat.complete(&messages) {
+            Ok(completion) => parse_verdict(&completion.content),
+            Err(_) => RevalidationVerdict::Unknown,
+        }
     }
 }
 
