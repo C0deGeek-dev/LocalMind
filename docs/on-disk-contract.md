@@ -58,6 +58,18 @@ deterministic paths remain active.
 deterministic blend order is the whole contract — ranking stays reproducible and
 offline, byte-identical to the no-rerank path.
 
+**Embedding accepted memory.** When an `[inference]` embedding endpoint **and**
+`embedding_model` are configured (and `features.embeddings` is on — the default),
+each accepted memory is embedded into `vector_index` at promotion/persist time
+(its body → one f32 vector, keyed by a content fingerprint so an unchanged body
+is not re-embedded). Embedding is opt-in in practice: with no `embedding_model`
+set, no vectors are written and retrieval/dedup stay purely lexical. It is also
+**best-effort** — if the endpoint is down, slow, or returns no vector, the
+memory still persists (the Markdown file and index row are already durable); the
+failure is recorded as an `InferenceCallFailed` audit row and the memory simply
+carries no vector until it is re-embedded. A promotion never fails because
+embedding could not run.
+
 ## Directory layout
 
 ```

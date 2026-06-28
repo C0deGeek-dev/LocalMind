@@ -27,6 +27,7 @@ pub enum AuditEventKind {
     MemoryFlaggedStale,
     SkillDraftCreated,
     InferenceCallCompleted,
+    InferenceCallFailed,
     VectorIndexUpdated,
     ReviewModeApplied,
     SkillActivated,

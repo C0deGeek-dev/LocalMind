@@ -1198,6 +1198,40 @@ impl MemoryPersistence {
         let Some(endpoint) = capability.embeddings() else {
             return Ok(());
         };
+        // Embedding is a best-effort addendum to an already-committed memory: the
+        // Markdown file and the index row are durable before we get here, so a
+        // down/slow embedding endpoint (or a transient vector-store write) must
+        // never fail the promotion or the caller's turn. On any failure, record a
+        // skip in the audit trail and fall back to the lexical contract — the
+        // memory is still retrievable, just without a vector until re-embedded.
+        if let Err(error) = Self::embed_and_store_memory(connection, endpoint, entry) {
+            let _ = Self::write_audit_with(
+                connection,
+                AuditEventKind::InferenceCallFailed,
+                "localmind",
+                "embeddings",
+                &serde_json::json!({
+                    "feature": "embeddings",
+                    "endpoint_kind": "embedding",
+                    "model": endpoint.model(),
+                    "outcome": "skipped",
+                    "error": error.to_string(),
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    /// Embed `entry`'s body against `endpoint` and upsert the vector into
+    /// `vector_index` (with the inference audit), on the connection that owns the
+    /// memory's scope. Returns `Err` on an endpoint/vector-store failure; the
+    /// caller decides whether that is fatal — for promotion it is **not** (see
+    /// [`embed_memory_if_configured`](Self::embed_memory_if_configured)).
+    fn embed_and_store_memory(
+        connection: &Connection,
+        endpoint: &localmind_inference::EmbeddingEndpoint,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
         let vectors = endpoint.embed(std::slice::from_ref(&entry.body))?;
         let Some(vector) = vectors.first() else {
             return Err(MemoryPersistenceError::InvalidVector {

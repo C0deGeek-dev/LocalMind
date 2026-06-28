@@ -5,6 +5,17 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Accepted memory is embedded into `vector_index`, best-effort.** When an
+  `[inference]` embedding endpoint **and** `embedding_model` are configured, each
+  accepted memory is embedded at promotion/persist time (keyed by a content
+  fingerprint so an unchanged body is not re-embedded), making the warm store
+  vector-searchable for dedup and rerank. Embedding is **best-effort**: a down or
+  slow endpoint no longer fails the promotion — the memory still persists (the
+  lexical contract is the fallback), the failure is logged as a new
+  `InferenceCallFailed` audit row, and the memory carries no vector until it is
+  re-embedded. With no `embedding_model` set, no vectors are written and behaviour
+  is byte-identical to the lexical-only path. See `docs/on-disk-contract.md`.
+
 - **Language tagging no longer under-tags lessons named only by idiom.** Body-text
   detection alone missed clearly language-specific lessons that never spell the
   language out (a Go `sort.Strings` anti-pattern, a Rust borrow recipe), so they
