@@ -263,6 +263,176 @@ fn vector_cosine_collapses_a_global_paraphrase_the_project_scan_missed() {
     );
 }
 
+/// A fixture `/v1/embeddings` server returning a fixed **2-D unit vector** keyed
+/// on a marker token in the request. Because each vector is a unit vector of the
+/// form `[c, sqrt(1 - c^2)]`, its cosine against the anchor `[1, 0]` is exactly
+/// `c` — so the route-to-review band edges are hit precisely:
+/// `conftoken` → 0.90 (confident, ≥ 0.86), `bandtoken` → 0.84 (borderline, in
+/// `[0.83, 0.86)`), `disttoken` → 0.80 (below the band → distinct).
+fn tiered_embeddings_server(max_requests: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for _ in 0..max_requests {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        request.extend_from_slice(&buffer[..read]);
+                        if request_complete(&request) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let text = String::from_utf8_lossy(&request);
+            let embedding = if text.contains("anchortoken") {
+                "[1.0,0.0]"
+            } else if text.contains("conftoken") {
+                "[0.9,0.4358899]"
+            } else if text.contains("bandtoken") {
+                "[0.84,0.5425865]"
+            } else if text.contains("disttoken") {
+                "[0.8,0.6]"
+            } else {
+                "[0.0,1.0]"
+            };
+            let body = format!("{{\"data\":[{{\"embedding\":{embedding}}}]}}");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{address}")
+}
+
+fn tiered_candidate(id: &str, summary: &str) -> CandidateLesson {
+    CandidateLesson::new(
+        LessonId::new(id),
+        summary,
+        LessonCategory::Process,
+        Confidence::new(0.7).unwrap(),
+        SuggestedAction::PromoteToMemory,
+    )
+    .with_evidence(EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted())
+}
+
+#[test]
+fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
+    // The route-to-review band: a confident match (cosine ≥ 0.86) and a borderline
+    // match (in [0.83, 0.86)) both flag `duplicate_of` and are held for review
+    // (never auto-merged); a genuinely-distinct lesson (cosine < 0.83) auto-accepts.
+    // Four embed calls: the seed body, then the three candidate summaries.
+    let base = tiered_embeddings_server(4);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[inference]\nembedding_base_url = \"{base}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 5\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\nsemantic_dedup = true\n",
+        ),
+    )
+    .unwrap();
+
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "mem-accepted",
+            "use anchortoken when scanning directories",
+        ))
+        .unwrap();
+
+    // Distinct marker tokens keep lexical overlap with the seed at 0 (well under
+    // the 0.6 bar), so each candidate reaches the vector rung; the embedder's
+    // marker decides its cosine tier.
+    let confident = "prefer conftoken for recursive lookups";
+    let borderline = "choose bandtoken to traverse nested folders";
+    let distinct = "compile disttoken with debug symbols enabled";
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("session"),
+            &[
+                tiered_candidate("c-conf", confident),
+                tiered_candidate("c-band", borderline),
+                tiered_candidate("c-dist", distinct),
+            ],
+        )
+        .unwrap();
+
+    ReviewModeProcessor::apply_project(root).unwrap();
+
+    let items = queue.list().unwrap();
+    let find = |summary: &str| {
+        items
+            .iter()
+            .find(|item| item.candidate.summary() == summary)
+            .unwrap_or_else(|| panic!("missing item {summary}"))
+    };
+    let annotation = |summary: &str| {
+        find(summary)
+            .candidate
+            .review_annotation
+            .clone()
+            .unwrap_or_else(|| panic!("missing annotation for {summary}"))
+    };
+
+    // Confident (0.90): flagged, held for review, with the confident note.
+    let conf = find(confident);
+    assert_ne!(
+        conf.state,
+        ReviewState::Accepted,
+        "a confident semantic duplicate must not auto-accept"
+    );
+    assert_eq!(
+        annotation(confident).duplicate_of.as_deref(),
+        Some("mem-accepted")
+    );
+    assert_eq!(
+        annotation(confident).notes,
+        "Similar accepted memory found; human review recommended."
+    );
+
+    // Borderline (0.84): in the band — flagged, held for review, borderline note.
+    let band = find(borderline);
+    assert_ne!(
+        band.state,
+        ReviewState::Accepted,
+        "a borderline paraphrase in the review band must route to review, not auto-accept"
+    );
+    assert_eq!(
+        annotation(borderline).duplicate_of.as_deref(),
+        Some("mem-accepted"),
+        "a borderline match must still flag the duplicate it is near"
+    );
+    assert_eq!(
+        annotation(borderline).notes,
+        "Borderline semantic match (review band); human review recommended.",
+        "a borderline match must be surfaced to the human as borderline"
+    );
+
+    // Distinct (0.80): below the band — not flagged, auto-accepts (no false merge).
+    let dist = find(distinct);
+    assert_eq!(
+        dist.state,
+        ReviewState::Accepted,
+        "a genuinely-distinct lesson below the band must not be flagged"
+    );
+    assert!(
+        annotation(distinct).duplicate_of.is_none(),
+        "a sub-band cosine must not flag a duplicate"
+    );
+}
+
 #[test]
 fn without_an_endpoint_dedup_is_exactly_the_lexical_contract() {
     // No `[inference]` block => semantic dedup inactive => the paraphrase's ~0.33

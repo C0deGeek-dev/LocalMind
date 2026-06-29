@@ -14,13 +14,25 @@ const DUPLICATE_SIMILARITY: f32 = 0.6;
 /// Lower overlap above which an existing memory is "on the same topic" — used to
 /// decide whether a corrective/negating candidate actually contradicts it.
 const CONFLICT_TOPIC_OVERLAP: f32 = 0.3;
-/// Cosine ≥ this is treated as a semantic duplicate of an existing accepted
+/// Cosine ≥ this is a **confident** semantic duplicate of an existing accepted
 /// memory. Conservative on purpose: normalized embeddings put genuine
 /// paraphrases high (~0.85–0.95) and distinct technical lessons well below
 /// (~0.3–0.6), so a high cut catches restatements without merging distinct
 /// lessons. A match only *flags* `duplicate_of` (routes to review); it never
 /// deletes, so the cost of a wrong cut is bounded.
 const VECTOR_DUPLICATE_SIMILARITY: f32 = 0.86;
+
+/// Lower edge of the **route-to-review band**: a cosine in
+/// `[VECTOR_REVIEW_BAND, VECTOR_DUPLICATE_SIMILARITY)` is a *borderline*
+/// paraphrase — surfaced for a human (the annotation notes it as borderline) but
+/// never auto-merged or deleted. This widens what is routed to review without
+/// lowering the confident-merge bar above: observed real paraphrases cluster at
+/// 0.80–0.95 (warm-store evidence: 3 pairs at 0.881–0.896 cleared the hard bar,
+/// several borderline ones sat at 0.80–0.85), so a 0.83 lower edge catches the
+/// borderline cluster while genuinely-distinct lessons (≲0.80) stay clear. Both
+/// tiers route to review under automatic mode; the band only changes *how many*
+/// candidates a human sees, never whether one is deleted.
+const VECTOR_REVIEW_BAND: f32 = 0.83;
 
 /// How many nearest vectors to fetch when looking for a semantic duplicate.
 /// More than one because the `vector_index` also holds non-memory subjects (e.g.
@@ -137,8 +149,16 @@ impl ReviewModeProcessor {
                 .as_ref()
                 .filter(|(_, sim)| *sim >= DUPLICATE_SIMILARITY)
                 .map(|(hit, _)| hit.memory_id.to_string());
+            // Whether the duplicate was a *borderline* semantic match (in the
+            // route-to-review band, below the confident bar) — surfaced to a human
+            // with that caveat, never auto-merged. A lexical duplicate is always
+            // confident.
+            let mut borderline_duplicate = false;
             if duplicate_of.is_none() && config.semantic_dedup_active() {
-                duplicate_of = vector_duplicate_of(&persistence, summary)?;
+                if let Some(found) = vector_duplicate_of(&persistence, summary)? {
+                    borderline_duplicate = !found.confident;
+                    duplicate_of = Some(found.memory_id);
+                }
             }
             // A genuine contradiction: a corrective/negating statement that
             // overlaps an existing memory's topic (it likely reverses it), or an
@@ -158,10 +178,15 @@ impl ReviewModeProcessor {
                 score: Confidence::new(confidence)?,
                 duplicate_of: duplicate_of.clone(),
                 conflict,
-                notes: if duplicate_of.is_some() {
-                    "Similar accepted memory found; human review recommended.".to_string()
-                } else {
-                    "No close duplicate found in accepted memory.".to_string()
+                notes: match (duplicate_of.is_some(), borderline_duplicate) {
+                    (true, true) => {
+                        "Borderline semantic match (review band); human review recommended."
+                            .to_string()
+                    }
+                    (true, false) => {
+                        "Similar accepted memory found; human review recommended.".to_string()
+                    }
+                    (false, _) => "No close duplicate found in accepted memory.".to_string(),
                 },
             });
 
@@ -290,28 +315,43 @@ fn auto_decide(
     Ok(true)
 }
 
-/// The id of an accepted memory whose embedding is a semantic duplicate of
-/// `summary` (cosine ≥ [`VECTOR_DUPLICATE_SIMILARITY`]), or `None`. Best-effort:
-/// with no embedding endpoint, an unreachable one, or no stored vectors, this
-/// returns `None` and dedup falls back to the lexical contract — it never errors
-/// the closeout on an embedding hiccup.
+/// A semantic duplicate found by the vector rung: the accepted memory's id and
+/// whether the match cleared the confident bar ([`VECTOR_DUPLICATE_SIMILARITY`])
+/// or only the lower route-to-review band edge ([`VECTOR_REVIEW_BAND`]).
+struct VectorDuplicate {
+    memory_id: String,
+    /// `true` when cosine ≥ [`VECTOR_DUPLICATE_SIMILARITY`] (confident);
+    /// `false` for a borderline match in the route-to-review band.
+    confident: bool,
+}
+
+/// The accepted memory whose embedding is a semantic duplicate of `summary`
+/// (cosine ≥ [`VECTOR_REVIEW_BAND`]), with a confident/borderline tier, or
+/// `None`. Both tiers route to review (the caller sets `duplicate_of`); the tier
+/// only colours the reviewer-facing note, and neither ever auto-merges or
+/// deletes. Best-effort: with no embedding endpoint, an unreachable one, or no
+/// stored vectors, this returns `None` and dedup falls back to the lexical
+/// contract — it never errors the closeout on an embedding hiccup.
 fn vector_duplicate_of(
     persistence: &MemoryPersistence,
     summary: &str,
-) -> Result<Option<String>, ReviewModeError> {
+) -> Result<Option<VectorDuplicate>, ReviewModeError> {
     let Some(vector) = persistence.embed_query(summary)? else {
         return Ok(None);
     };
     // Fetch candidate headroom, then filter to memory subjects before taking the
     // top match — so a higher-ranked non-memory vector cannot drop a real memory
     // duplicate. The candidates are score-ordered, so the first memory hit at or
-    // above the threshold is the nearest accepted-memory duplicate.
+    // above the band edge is the nearest accepted-memory duplicate.
     let nearest = persistence.vector_search(&vector, VECTOR_DUPLICATE_CANDIDATES)?;
     Ok(nearest
         .into_iter()
         .filter(|hit| hit.subject_kind == "memory")
-        .find(|hit| hit.score >= VECTOR_DUPLICATE_SIMILARITY)
-        .map(|hit| hit.subject_id))
+        .find(|hit| hit.score >= VECTOR_REVIEW_BAND)
+        .map(|hit| VectorDuplicate {
+            memory_id: hit.subject_id,
+            confident: hit.score >= VECTOR_DUPLICATE_SIMILARITY,
+        }))
 }
 
 trait ReviewModeAudit {

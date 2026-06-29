@@ -77,8 +77,15 @@ the review-mode dedup of a candidate against accepted memory adds an
 embedding-cosine pass after the lexical one — lexical token-overlap stays the
 cheap first pass and the no-embeddings fallback, then a candidate the lexical
 pass did not already flag is embedded and compared by cosine to accepted-memory
-vectors, and a match at cosine ≥ 0.86 flags `duplicate_of` → routed to review,
-never auto-deleted. Without both, dedup is byte-identical to the lexical contract.
+vectors. The cosine search scans **both** the project and the machine-wide
+global `vector_index` (project precedence), so a `GlobalUser`-scoped lesson — whose
+vector lives in the global index — is dedup-eligible just like a project one. A
+match at cosine ≥ 0.86 flags a **confident** `duplicate_of`; a match in the
+**route-to-review band** `[0.83, 0.86)` flags a **borderline** `duplicate_of`
+(annotated as such). Both tiers route to review and are **never auto-deleted or
+auto-merged** — the band only widens what a human sees, never what is removed.
+Without both the flag and an endpoint, dedup is byte-identical to the lexical
+contract.
 
 ## Directory layout
 

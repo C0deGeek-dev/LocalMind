@@ -5,6 +5,22 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **The semantic (vector) rung now reaches the machine-wide global store
+  (D-LM-0023).** `vector_search` scanned only the project `vector_index`, while
+  `GlobalUser`-scoped lessons embed their vectors into the global index — so the
+  embedding-cosine dedup rung and the hybrid-retrieval vector boost were both
+  blind to global memories (a global paraphrase auto-accepted under automatic
+  mode; a global memory never gained a vector score). `vector_search` now scans
+  **project + global** vectors, merged by score with project precedence, mirroring
+  the keyword path's `search`/`search_lang` merge. The duplicate probe also fetches
+  candidate headroom and filters to memory subjects, so a higher-ranked non-memory
+  vector (e.g. an ingested code chunk) can no longer hide a real memory duplicate.
+  Adds a **route-to-review band**: cosine ≥ 0.86 is a confident `duplicate_of`,
+  `[0.83, 0.86)` is a borderline one — both routed to review, **never auto-deleted
+  or auto-merged** (the band only widens what a human sees). No-embeddings behaviour
+  stays byte-identical to the lexical contract. Refines D-LM-0020; reuses
+  D-LM-0010/0017; honours D-LM-0016. See `docs/on-disk-contract.md`.
+
 - **Accepted memory now tracks usage (schema v8).** `memory_index` gains
   `hit_count` (default 0) and `last_used_at` (NULL = never), bumped post-turn
   when a memory is injected into context, so never-retrieved dead weight and
