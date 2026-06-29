@@ -672,8 +672,49 @@ impl MemoryPersistence {
         if query_vector.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut statement = self
-            .connection
+        // Merge project + global vectors before ranking — the global
+        // `vector_index` holds the vectors of `GlobalUser`-scoped lessons
+        // (cross-project tooling/debugging/process knowledge), so a project-only
+        // scan would make the semantic dedup and retrieval rungs blind to exactly
+        // the lessons that accumulate machine-wide. Mirrors `search_lang`'s
+        // project+global merge with **project precedence**: project rows lead,
+        // then global rows whose `(subject_kind, subject_id)` is not already
+        // present are appended, so on the (practically impossible) cross-store id
+        // collision the project row wins. Ranking and truncation then run over the
+        // combined set.
+        let mut scored = Self::vector_search_in(&self.connection, query_vector)?;
+        if let Some(global) = &self.global {
+            let seen: std::collections::HashSet<(String, String)> = scored
+                .iter()
+                .map(|result| (result.subject_kind.clone(), result.subject_id.clone()))
+                .collect();
+            for result in Self::vector_search_in(&global.connection, query_vector)? {
+                if !seen.contains(&(result.subject_kind.clone(), result.subject_id.clone())) {
+                    scored.push(result);
+                }
+            }
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Score every stored vector on one connection (project or global) by cosine
+    /// against `query_vector`, skipping rows whose recorded dimensions or blob
+    /// length do not match the query. Returns the unranked, untruncated scores;
+    /// [`vector_search`](Self::vector_search) merges project + global results and
+    /// applies the ranking and limit.
+    fn vector_search_in(
+        connection: &Connection,
+        query_vector: &[f32],
+    ) -> Result<Vec<VectorSearchResult>, MemoryPersistenceError> {
+        let mut statement = connection
             .prepare(
                 "SELECT subject_kind, subject_id, dimensions, vector_blob FROM vector_index ORDER BY subject_kind, subject_id",
             )
@@ -704,14 +745,6 @@ impl MemoryPersistence {
                 score: cosine_similarity(query_vector, &vector),
             });
         }
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.subject_id.cmp(&right.subject_id))
-        });
-        scored.truncate(limit);
         Ok(scored)
     }
 

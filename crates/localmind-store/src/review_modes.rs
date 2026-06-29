@@ -22,6 +22,13 @@ const CONFLICT_TOPIC_OVERLAP: f32 = 0.3;
 /// deletes, so the cost of a wrong cut is bounded.
 const VECTOR_DUPLICATE_SIMILARITY: f32 = 0.86;
 
+/// How many nearest vectors to fetch when looking for a semantic duplicate.
+/// More than one because the `vector_index` also holds non-memory subjects (e.g.
+/// ingested code chunks): a non-memory vector ranking first would hide a real
+/// accepted-memory duplicate behind it if we only asked for the single nearest.
+/// Mirrors the retrieval path's `limit.max(20)` candidate window.
+const VECTOR_DUPLICATE_CANDIDATES: usize = 20;
+
 /// Very common words carry no topic signal; dropping them keeps similarity
 /// keyed on the substantive terms.
 const STOP_WORDS: [&str; 24] = [
@@ -295,10 +302,15 @@ fn vector_duplicate_of(
     let Some(vector) = persistence.embed_query(summary)? else {
         return Ok(None);
     };
-    let nearest = persistence.vector_search(&vector, 1)?;
+    // Fetch candidate headroom, then filter to memory subjects before taking the
+    // top match — so a higher-ranked non-memory vector cannot drop a real memory
+    // duplicate. The candidates are score-ordered, so the first memory hit at or
+    // above the threshold is the nearest accepted-memory duplicate.
+    let nearest = persistence.vector_search(&vector, VECTOR_DUPLICATE_CANDIDATES)?;
     Ok(nearest
         .into_iter()
-        .find(|hit| hit.subject_kind == "memory" && hit.score >= VECTOR_DUPLICATE_SIMILARITY)
+        .filter(|hit| hit.subject_kind == "memory")
+        .find(|hit| hit.score >= VECTOR_DUPLICATE_SIMILARITY)
         .map(|hit| hit.subject_id))
 }
 

@@ -80,9 +80,13 @@ fn request_complete(request: &[u8]) -> bool {
 }
 
 fn seed_memory(id: &str, body: &str) -> MemoryEntry {
+    seed_memory_scoped(id, body, MemoryScope::Project)
+}
+
+fn seed_memory_scoped(id: &str, body: &str, scope: MemoryScope) -> MemoryEntry {
     MemoryEntry {
         id: MemoryEntryId::new(id),
-        scope: MemoryScope::Project,
+        scope,
         body: body.to_string(),
         category: LessonCategory::ProjectConvention,
         confidence: Confidence::new(0.9).unwrap(),
@@ -174,6 +178,83 @@ fn vector_cosine_collapses_a_paraphrase_the_lexical_pass_misses() {
     );
 
     // The distinct lesson is not a vector duplicate: it auto-accepts as before.
+    let distinct = find(DISTINCT);
+    assert_eq!(
+        distinct.state,
+        ReviewState::Accepted,
+        "a genuinely distinct lesson must not be merged"
+    );
+}
+
+#[test]
+fn vector_cosine_collapses_a_global_paraphrase_the_project_scan_missed() {
+    // The semantic rung must reach the machine-wide global store: the accepted
+    // lesson is **global**-scoped, so its vector lives in the global
+    // `vector_index`. A project-only vector scan would query an empty project index,
+    // the semantic rung would find nothing, and automatic mode would auto-accept the
+    // paraphrase. With `vector_search` scanning project + global, the global
+    // paraphrase is flagged `duplicate_of` and routed to review, never merged.
+    let base = marker_embeddings_server("edit", 3);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let global = tempfile::tempdir().unwrap();
+    let global_root = global.path().join("memory");
+    std::fs::write(
+        root.join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\", \"global_user\"]\nglobal_memory_root = '{}'\n\n[inference]\nembedding_base_url = \"{base}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 5\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\nsemantic_dedup = true\n",
+            global_root.display(),
+        ),
+    )
+    .unwrap();
+
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+    // The accepted memory is global-scoped: it persists into the machine-wide
+    // store and its vector lands in the global `vector_index`.
+    persistence
+        .persist_memory_entry(&seed_memory_scoped(
+            "mem-accepted",
+            ACCEPTED,
+            MemoryScope::GlobalUser,
+        ))
+        .unwrap();
+
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("session"),
+            &[candidate(PARAPHRASE), candidate(DISTINCT)],
+        )
+        .unwrap();
+
+    ReviewModeProcessor::apply_project(root).unwrap();
+
+    let items = queue.list().unwrap();
+    let find = |summary: &str| {
+        items
+            .iter()
+            .find(|item| item.candidate.summary() == summary)
+            .unwrap_or_else(|| panic!("missing item {summary}"))
+    };
+
+    let paraphrase = find(PARAPHRASE);
+    assert_ne!(
+        paraphrase.state,
+        ReviewState::Accepted,
+        "a semantic duplicate of a GLOBAL memory must not auto-accept"
+    );
+    assert_eq!(
+        paraphrase
+            .candidate
+            .review_annotation
+            .as_ref()
+            .unwrap()
+            .duplicate_of
+            .as_deref(),
+        Some("mem-accepted"),
+        "the paraphrase must be flagged a duplicate of the global accepted memory"
+    );
+
     let distinct = find(DISTINCT);
     assert_eq!(
         distinct.state,
