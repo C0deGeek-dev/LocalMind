@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v1.1.0 - 2026-06-29
+
+Coordinated LocalX release.
+
 - **The semantic (vector) rung now reaches the machine-wide global store
   (D-LM-0023).** `vector_search` scanned only the project `vector_index`, while
   `GlobalUser`-scoped lessons embed their vectors into the global index — so the
