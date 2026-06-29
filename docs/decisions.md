@@ -4,6 +4,58 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0023 — The semantic (vector) rung reaches the machine-wide global store
+
+- **Date**: 2026-06-29
+- **Status**: accepted
+
+D-LM-0020 made accepted-memory dedup embedding-backed but scoped it explicitly
+"to the project vector store … broadening to global vectors is a later step."
+That later step was never taken, and the gap was load-bearing: `GlobalUser`-scoped
+lessons (cross-project tooling, debugging, process, anti-pattern knowledge —
+D-LM-0017) embed their vectors into the **global** `vector_index`, but
+`MemoryPersistence::vector_search` queried the **project** index only. So the
+semantic dedup rung embedded the candidate, searched an empty project index, found
+nothing, and — under automatic mode — auto-accepted near-identical global
+paraphrases (a warm run accepted several "PowerShell `&&`" restatements; three
+pairs measured cosine 0.881–0.896, well above the 0.86 bar, yet `review_items =
+0`). The lexical rung was already global-aware (`search_lang`), so this was an
+asymmetry: a primitive that forgot `self.global`. The **same** one-line asymmetry
+also blinded global semantic *retrieval* — `localmind-search::hybrid_memory_search`
+surfaces a global memory by keyword but, using the same project-only
+`vector_search`, never gave it a vector-score contribution.
+
+Decision — three parts, refining D-LM-0020 and reusing D-LM-0010/0017:
+
+1. **`vector_search` is global-aware.** It scans the project **and** the global
+   `vector_index`, merging scored candidates with **project precedence** (project
+   rows lead; a global row whose `(subject_kind, subject_id)` is already present is
+   dropped), then ranks and truncates the combined set — mirroring the
+   already-shipped `search`/`search_lang` project+global merge. The fix is made
+   once in the shared primitive, so **both** callers (review-mode dedup and
+   hybrid retrieval) become global-aware together; no second vector store, no
+   forked path.
+2. **Duplicate-probe headroom.** `vector_duplicate_of` fetches several nearest
+   vectors (mirroring retrieval's `limit.max(20)`) and filters to
+   `subject_kind == "memory"` before taking the top, so a higher-ranked
+   non-memory subject (e.g. an ingested code chunk) cannot hide a real
+   accepted-memory duplicate behind it.
+3. **A route-to-review band, not a lowered merge bar.** The confident bar stays
+   `VECTOR_DUPLICATE_SIMILARITY = 0.86`; a new `VECTOR_REVIEW_BAND = 0.83` flags a
+   *borderline* duplicate for the cosine range `[0.83, 0.86)`. Both tiers route to
+   review (the annotation's `duplicate_of` is set and automatic mode holds the item
+   for a human); the band only widens what a reviewer sees and **never** auto-merges
+   or deletes — the standing **D-LM-0016** invariant. The edges stay test-pinned
+   named constants (D-LM-0020's posture), not a learned or TOML-tunable knob; 0.83
+   is evidence-derived from the observed paraphrase cluster (0.80–0.95) and sits well
+   above the ≲0.6 distinct region.
+
+Safety holds end to end: with embeddings unavailable the semantic rung is skipped
+and behaviour is byte-identical to the lexical-only contract (best-effort, D-LM-0020
+posture), pinned by a no-regression test. The net effect is *more* candidates
+routed to human review and global semantic retrieval restored — never a deletion,
+never a silent merge. See `docs/on-disk-contract.md` for the storage contract.
+
 ## D-LM-0022 — Ingested chunk knowledge is semantically retrievable: language-tagged, embedded, hybrid-retrieved — lifting the keyword-only-v1 deferral
 
 - **Date**: 2026-06-28

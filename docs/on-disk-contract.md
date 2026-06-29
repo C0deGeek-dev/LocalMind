@@ -131,8 +131,11 @@ other scope stays project-rooted. The global database is shared across projects,
 so a global lesson written in one project is retrievable in another. Retrieval
 merges the project and global indexes with **project precedence** (a project
 memory overrides a global one on conflict; a global memory surfaces when no
-project memory applies). A project that narrows `allowed_scopes` to `["project"]`
-opens no global store and is byte-for-byte unchanged. See D-LM-0017.
+project memory applies) — for both the keyword (FTS) and the semantic (vector)
+paths: `vector_search` scans the project and global `vector_index` the same way,
+so a global memory contributes a vector score in hybrid retrieval and is
+dedup-eligible (D-LM-0023). A project that narrows `allowed_scopes` to
+`["project"]` opens no global store and is byte-for-byte unchanged. See D-LM-0017.
 
 ## Markdown memory format
 
