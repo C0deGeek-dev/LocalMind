@@ -4,6 +4,45 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0024 — Lesson quality is a write-time gate and a retroactive freshness reason, routed to review, never deleted
+
+- **Date**: 2026-06-30
+- **Status**: accepted
+
+A model-pinned benchmark showed accepted learning is net-positive but noisy:
+tooling/process artifacts (a working-directory or build-wrapper note) and
+over-fit, exercise-specific claims (a concrete method call welded to one
+exercise's identifiers) auto-accepted and then mis-injected into unrelated
+tasks, regressing them. The accept path had dedup, confidence, and conflict
+gates but no **quality** dimension, and tooling/process/debugging lessons
+globalize machine-wide, so a bad one spread.
+
+Decision — one deterministic, offline classifier, `classify_quality(category,
+summary, body) -> {General, OverFit, ToolingNoise}`, used at three seams (mark,
+enforce, retroactive) so they can never diverge:
+
+1. **Marked at extraction** (`annotate_candidate`, both the deterministic and the
+   model paths) in `review_annotation.notes`, so the verdict shows in
+   `candidates.json` and to an Assisted reviewer.
+2. **Enforced at the accept seam** (`review_modes::apply_project`): under
+   trusted/automatic mode a non-`General` candidate is **withheld from auto-accept
+   and routed to manual review**, treated exactly like a duplicate. Manual and
+   Assisted modes are unchanged. Nothing is discarded.
+3. **Retroactive** (`freshness::classify`): a `LowQuality` reason — the most
+   actionable, **age-independent** — flags an already-stored bad lesson (one that
+   predates the gate) for review across the project and global stores, honouring
+   the existing per-run cap and dry-run.
+
+The classifier is conservative (route, don't drop): the cost of a wrong label is
+bounded to "a human re-judges it", because **nothing here deletes** — the standing
+never-auto-delete invariant (D-LM-0016), the same route-to-review path the
+freshness pass already uses. An error-code/diagnostic recipe stays `General`
+(specific but generalizable), and a path/shell phrase inside a security or
+architecture lesson is not read as tooling noise (the category gate). Markers
+match whole words/phrases, never bare substrings, so a marker cannot fire inside
+an unrelated word. Refines D-LM-0005 (evidence-grounded extraction) with a quality
+axis; reuses D-LM-0016.
+
 ## D-LM-0023 — The semantic (vector) rung reaches the machine-wide global store
 
 - **Date**: 2026-06-29

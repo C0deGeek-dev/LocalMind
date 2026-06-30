@@ -359,7 +359,8 @@ mod tests {
 
     #[test]
     fn the_named_contractual_examples_are_pinned() {
-        // The two examples named in the plan's box 01.4 / 05.1.
+        // The two canonical regressions: a working-directory tooling note and an
+        // over-fit grid-parsing claim must never read as general.
         assert_eq!(
             classify_quality(
                 &LessonCategory::Process,
