@@ -38,11 +38,15 @@ fn project_only() -> tempfile::TempDir {
 }
 
 fn entry(id: &str, body: &str, scope: MemoryScope) -> MemoryEntry {
+    entry_cat(id, body, scope, LessonCategory::DebuggingRecipe)
+}
+
+fn entry_cat(id: &str, body: &str, scope: MemoryScope, category: LessonCategory) -> MemoryEntry {
     MemoryEntry {
         id: MemoryEntryId::new(id),
         scope,
         body: body.to_string(),
-        category: LessonCategory::DebuggingRecipe,
+        category,
         confidence: Confidence::new(0.9).unwrap(),
         source_session: Some(SessionId::new("seed")),
         evidence: vec![EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted()],
@@ -273,6 +277,138 @@ fn the_pass_reaches_the_global_store() {
     let flagged = persistence.list_stale_candidates().unwrap();
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].as_str(), "g-old");
+}
+
+#[test]
+fn low_quality_lessons_are_flagged_across_stores_but_good_ones_are_not() {
+    // Retroactive cleanup: tooling-noise / over-fit lessons that predate the write
+    // gate are flagged for review (project + global) regardless of age, while
+    // healthy general lessons are left alone. Reuses the write gate's classifier.
+    let global = tempfile::tempdir().unwrap();
+    let global_root = global.path().join("memory");
+    let project = project_with_global(&global_root);
+    let persistence = MemoryPersistence::open_project(project.path()).unwrap();
+
+    // Bad, recently created: a tooling-noise lesson (project) and an over-fit one
+    // (global). Both must flag even though no time has passed.
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "p-tooling",
+            "Use ./gradlew instead of gradlew on Windows if the wrapper is in the current directory.",
+            MemoryScope::Project,
+            LessonCategory::Process,
+        ))
+        .unwrap();
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "g-overfit",
+            "Avoid `zip(words, letters)` when emitting an initial state before any letter arrives.",
+            MemoryScope::GlobalUser,
+            LessonCategory::CodePattern,
+        ))
+        .unwrap();
+    // Good general lessons (project + global) must not flag.
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "p-good",
+            "always acquire locks in a consistent global order to avoid deadlocks",
+            MemoryScope::Project,
+            LessonCategory::DebuggingRecipe,
+        ))
+        .unwrap();
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "g-good",
+            "ensure function signatures match the test expectations before implementing",
+            MemoryScope::GlobalUser,
+            LessonCategory::TestingStrategy,
+        ))
+        .unwrap();
+
+    // `now` = creation time, so age-based reasons cannot fire; only low-quality can.
+    let report = persistence
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            false,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    let reason = |id: &str| {
+        report
+            .flagged
+            .iter()
+            .find(|f| f.memory_id == id)
+            .map(|f| f.reason)
+    };
+    assert_eq!(reason("p-tooling"), Some(FreshnessReason::LowQuality));
+    assert_eq!(reason("g-overfit"), Some(FreshnessReason::LowQuality));
+    assert_eq!(
+        reason("p-good"),
+        None,
+        "a good project lesson is not flagged"
+    );
+    assert_eq!(
+        reason("g-good"),
+        None,
+        "a good global lesson is not flagged"
+    );
+    assert_eq!(report.low_quality, 2);
+
+    // Routed to review in both stores; nothing deleted.
+    let flagged = persistence.list_stale_candidates().unwrap();
+    assert!(flagged.iter().any(|i| i.as_str() == "p-tooling"));
+    assert!(flagged.iter().any(|i| i.as_str() == "g-overfit"));
+    assert_eq!(
+        persistence.list_memory().unwrap().len(),
+        4,
+        "flagging never deletes a memory"
+    );
+}
+
+#[test]
+fn the_low_quality_detector_is_word_boundary_safe_and_dry_run_writes_nothing() {
+    // The substring-vs-word-boundary bug: "function" / "uncertain" must not read as
+    // a tooling/over-fit marker, so a good lesson mentioning them is not flagged;
+    // and a dry run reports without writing.
+    let project = project_only();
+    let persistence = MemoryPersistence::open_project(project.path()).unwrap();
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "good",
+            "keep each function small and document any uncertain assumption clearly",
+            MemoryScope::Project,
+            LessonCategory::CodePattern,
+        ))
+        .unwrap();
+    persistence
+        .persist_memory_entry(&entry_cat(
+            "bad",
+            "Gradle build issues occurred due to path formatting in Windows shell commands.",
+            MemoryScope::Project,
+            LessonCategory::Process,
+        ))
+        .unwrap();
+
+    let dry = persistence
+        .freshness_pass_at(
+            &FreshnessThresholds::default(),
+            FreshnessScope::Both,
+            true,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+    assert_eq!(
+        dry.low_quality, 1,
+        "only the real tooling-noise lesson flags"
+    );
+    assert_eq!(dry.flagged.len(), 1);
+    assert_eq!(dry.flagged[0].memory_id, "bad");
+    assert!(dry.dry_run);
+    assert!(
+        persistence.list_stale_candidates().unwrap().is_empty(),
+        "a dry run must not flag anything"
+    );
 }
 
 #[test]

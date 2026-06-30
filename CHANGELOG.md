@@ -5,6 +5,16 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Retroactive low-quality freshness flag (D-LM-0024).** The freshness pass gains
+  a `low-quality` reason that reuses the write-time quality classifier to flag an
+  already-stored tooling-noise or over-fit lesson — one that predates the write
+  gate — for review, across the project and global stores. It is the most
+  actionable reason and is **age-independent** (a bad lesson is flagged on the
+  first pass regardless of age), while still only routing to review (never
+  deleting) and honouring the per-run cap and dry-run. Markers match whole
+  words/phrases, so `function` / `uncertain` never mis-flag. An operator applies it
+  with `learning freshness`.
+
 - **Write-time lesson-quality gate (D-LM-0024).** A model-pinned benchmark showed
   accepted learning is net-positive but noisy: tooling/process artifacts (a
   working-directory or build-wrapper note) and over-fit, exercise-specific claims

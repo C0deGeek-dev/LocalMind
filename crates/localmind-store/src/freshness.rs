@@ -4,9 +4,10 @@
 //! code; the bulk of the machine-wide global store (language idioms, tooling
 //! notes, anti-patterns) is *not* code-anchored, so nothing ever re-checks "is
 //! this still true?". This module adds the missing proactive half: a pure,
-//! offline pass that selects accepted memory for **review** by three independent,
-//! conservative heuristics — age, never-retrieved-after-a-grace, and a
-//! version-sensitive-tooling keyword set. It only ever routes a memory to the
+//! offline pass that selects accepted memory for **review** by four independent,
+//! conservative heuristics — age, never-retrieved-after-a-grace, a
+//! version-sensitive-tooling keyword set, and low quality (the write-time
+//! classifier applied retroactively). It only ever routes a memory to the
 //! existing review gate (`flag_for_review`); it never deletes, never re-ranks,
 //! and never acts (a human or the automatic-review mode decides). The selection
 //! logic here is pure (no I/O), so the whole pass is unit-testable without a
@@ -53,6 +54,11 @@ impl Default for FreshnessThresholds {
 /// and the most-actionable reasons are the ones kept when the per-run cap bites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreshnessReason {
+    /// Its content reads as tooling-noise or over-fit (the write-time quality
+    /// classifier) — a bad lesson that predates the write gate. The most
+    /// actionable reason: it does not depend on age, so a retroactive pass catches
+    /// it immediately.
+    LowQuality,
     /// Its body names a version-sensitive tooling marker and it is past the
     /// version-sensitive age floor.
     VersionSensitive,
@@ -66,9 +72,10 @@ impl FreshnessReason {
     /// Cap-priority rank (lower survives the cap first).
     fn rank(self) -> u8 {
         match self {
-            FreshnessReason::VersionSensitive => 0,
-            FreshnessReason::Unused => 1,
-            FreshnessReason::Age => 2,
+            FreshnessReason::LowQuality => 0,
+            FreshnessReason::VersionSensitive => 1,
+            FreshnessReason::Unused => 2,
+            FreshnessReason::Age => 3,
         }
     }
 
@@ -76,6 +83,7 @@ impl FreshnessReason {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            FreshnessReason::LowQuality => "low-quality",
             FreshnessReason::VersionSensitive => "version-sensitive",
             FreshnessReason::Unused => "never-retrieved",
             FreshnessReason::Age => "age",
@@ -86,6 +94,9 @@ impl FreshnessReason {
     #[must_use]
     pub fn audit_reason(self) -> &'static str {
         match self {
+            FreshnessReason::LowQuality => {
+                "freshness: low-quality lesson (tooling-noise or over-fit) — re-judge or retire"
+            }
             FreshnessReason::VersionSensitive => {
                 "freshness: version-sensitive lesson — re-check it still holds"
             }
@@ -145,6 +156,7 @@ pub struct FreshnessReport {
     /// Active memories examined across the project and global stores.
     pub scanned: usize,
     /// Candidates that matched a heuristic, *before* the per-run cap.
+    pub low_quality: usize,
     pub version_sensitive: usize,
     pub unused: usize,
     pub age: usize,
@@ -162,7 +174,7 @@ impl FreshnessReport {
     /// Total candidates that matched a heuristic before the cap.
     #[must_use]
     pub fn total_candidates(&self) -> usize {
-        self.version_sensitive + self.unused + self.age
+        self.low_quality + self.version_sensitive + self.unused + self.age
     }
 }
 
@@ -217,12 +229,21 @@ fn looks_like_version(token: &str) -> bool {
 /// failure).
 #[must_use]
 pub(crate) fn classify(
+    category: &localmind_core::LessonCategory,
     created_at: &str,
     hit_count: i64,
     body: &str,
     now: OffsetDateTime,
     thresholds: &FreshnessThresholds,
 ) -> Option<FreshnessReason> {
+    // Low quality is independent of age: a tooling-noise or over-fit lesson that
+    // predates the write gate is flagged on the first retroactive pass, even if it
+    // is brand new or its date cannot be parsed. It routes to review like every
+    // other reason — never deleted. Reuses the one shared `classify_quality` fn
+    // (the write gate's classifier), so the two callers can never diverge.
+    if !crate::quality::classify_quality(category, "", body).is_general() {
+        return Some(FreshnessReason::LowQuality);
+    }
     let age_days = age_in_days(created_at, now)?;
     if age_days >= thresholds.version_sensitive_min_age_days && is_version_sensitive(body) {
         return Some(FreshnessReason::VersionSensitive);
@@ -298,6 +319,10 @@ mod tests {
         assert!(!is_version_sensitive("there are 3 cases to handle."));
     }
 
+    // A category that admits every reason without itself reading as low quality.
+    const GENERAL_CATEGORY: localmind_core::LessonCategory =
+        localmind_core::LessonCategory::ProjectConvention;
+
     #[test]
     fn classify_picks_the_most_actionable_reason() {
         let t = thresholds();
@@ -305,18 +330,63 @@ mod tests {
         // ~400 days old, version-sensitive, never used -> version-sensitive wins.
         let created = "2025-05-20 10:00:00.0 +00:00:00";
         assert_eq!(
-            classify(created, 0, "deprecated flag", now, &t),
+            classify(&GENERAL_CATEGORY, created, 0, "deprecated flag", now, &t),
             Some(FreshnessReason::VersionSensitive)
         );
         // ~400 days old, plain, never used -> unused wins over age.
         assert_eq!(
-            classify(created, 0, "an evergreen lesson", now, &t),
+            classify(
+                &GENERAL_CATEGORY,
+                created,
+                0,
+                "an evergreen lesson",
+                now,
+                &t
+            ),
             Some(FreshnessReason::Unused)
         );
         // ~400 days old, plain, but used -> falls through to age.
         assert_eq!(
-            classify(created, 5, "an evergreen lesson", now, &t),
+            classify(
+                &GENERAL_CATEGORY,
+                created,
+                5,
+                "an evergreen lesson",
+                now,
+                &t
+            ),
             Some(FreshnessReason::Age)
+        );
+    }
+
+    #[test]
+    fn a_low_quality_lesson_is_flagged_regardless_of_age() {
+        let t = thresholds();
+        let now = now_at(2026, 6, 28);
+        // Brand new (today) and used, but tooling-noise -> flagged immediately.
+        let created = "2026-06-28 10:00:00.0 +00:00:00";
+        assert_eq!(
+            classify(
+                &localmind_core::LessonCategory::Process,
+                created,
+                5,
+                "Use ./gradlew instead of gradlew on Windows.",
+                now,
+                &t
+            ),
+            Some(FreshnessReason::LowQuality)
+        );
+        // Even an unparseable date still flags a bad lesson.
+        assert_eq!(
+            classify(
+                &localmind_core::LessonCategory::Process,
+                "not-a-date",
+                0,
+                "Initial shell commands failed due to incorrect working directory assumptions.",
+                now,
+                &t
+            ),
+            Some(FreshnessReason::LowQuality)
         );
     }
 
@@ -327,7 +397,14 @@ mod tests {
         // Two days old, never used, even version-sensitive: under every floor.
         let created = "2026-06-26 10:00:00.0 +00:00:00";
         assert_eq!(
-            classify(created, 0, "deprecated flag in v1.2", now, &t),
+            classify(
+                &GENERAL_CATEGORY,
+                created,
+                0,
+                "deprecated flag in v1.2",
+                now,
+                &t
+            ),
             None
         );
     }
@@ -336,7 +413,12 @@ mod tests {
     fn an_unparseable_date_is_treated_as_fresh() {
         let t = thresholds();
         let now = now_at(2026, 6, 28);
-        assert_eq!(classify("not-a-date", 0, "deprecated", now, &t), None);
+        // A general lesson with an unparseable date is fresh (low-quality is the
+        // only age-independent reason, and "deprecated" is not low quality).
+        assert_eq!(
+            classify(&GENERAL_CATEGORY, "not-a-date", 0, "deprecated", now, &t),
+            None
+        );
     }
 
     #[test]
@@ -345,6 +427,16 @@ mod tests {
         let now = now_at(2026, 6, 28);
         // 30 days old, never used: under the 90-day grace -> not flagged.
         let created = "2026-05-29 10:00:00.0 +00:00:00";
-        assert_eq!(classify(created, 0, "an evergreen lesson", now, &t), None);
+        assert_eq!(
+            classify(
+                &GENERAL_CATEGORY,
+                created,
+                0,
+                "an evergreen lesson",
+                now,
+                &t
+            ),
+            None
+        );
     }
 }

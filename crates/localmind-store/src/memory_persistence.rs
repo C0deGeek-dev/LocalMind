@@ -1189,6 +1189,7 @@ impl MemoryPersistence {
         // Per-reason counts over every match, before the cap.
         for (_, flag) in &candidates {
             match flag.reason {
+                FreshnessReason::LowQuality => report.low_quality += 1,
                 FreshnessReason::VersionSensitive => report.version_sensitive += 1,
                 FreshnessReason::Unused => report.unused += 1,
                 FreshnessReason::Age => report.age += 1,
@@ -1234,7 +1235,7 @@ impl MemoryPersistence {
     ) -> Result<(), MemoryPersistenceError> {
         let mut statement = connection
             .prepare(
-                "SELECT memory_id, created_at, hit_count, body FROM memory_index \
+                "SELECT memory_id, created_at, hit_count, body, category FROM memory_index \
                  WHERE status = 'active' AND stale_candidate = 0",
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
@@ -1245,16 +1246,25 @@ impl MemoryPersistence {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(MemoryPersistenceError::Sqlite)?;
         for row in rows {
-            let (memory_id, created_at, hit_count, body) =
+            let (memory_id, created_at, hit_count, body, category) =
                 row.map_err(MemoryPersistenceError::Sqlite)?;
             *scanned += 1;
-            if let Some(reason) =
-                crate::freshness::classify(&created_at, hit_count, &body, now, thresholds)
-            {
+            // The stored category is the `{:?}` form; parse it back so the
+            // quality reason (subject 04) can apply the category gate.
+            let category = crate::markdown::parse_category(&category);
+            if let Some(reason) = crate::freshness::classify(
+                &category,
+                &created_at,
+                hit_count,
+                &body,
+                now,
+                thresholds,
+            ) {
                 candidates.push((
                     is_global,
                     crate::freshness::FreshnessFlag { memory_id, reason },

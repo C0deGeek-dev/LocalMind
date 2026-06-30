@@ -283,8 +283,10 @@ fn parse_scope(value: &str) -> Result<MemoryScope, MarkdownParseError> {
 
 /// Map a category's `{:?}` form back to a [`LessonCategory`]. An unknown name or
 /// the `Other("…")` form recovers the inner string, so a custom category survives
-/// the round-trip.
-fn parse_category(value: &str) -> LessonCategory {
+/// the round-trip. Shared with the freshness pass, which reads the stored
+/// `memory_index.category` string and needs the typed category for the
+/// quality-classifier gate.
+pub(crate) fn parse_category(value: &str) -> LessonCategory {
     match value.trim() {
         "UserPreference" => LessonCategory::UserPreference,
         "ProjectConvention" => LessonCategory::ProjectConvention,

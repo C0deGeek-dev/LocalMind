@@ -104,6 +104,14 @@ error-code/diagnostic recipe (e.g. `error[E0107]`) is kept as `general`
 architecture lesson is not read as tooling noise (the category gate). The
 classifier is pure, so the contract is the verdict, not any keyword list.
 
+The **freshness pass** reuses the same classifier retroactively: a `low-quality`
+reason (the most-actionable, age-independent) flags an already-stored
+tooling-noise or over-fit lesson — one that predates the write gate — for review
+across the project and global stores, alongside the existing age /
+never-retrieved / version-sensitive reasons. It only routes to review (sets
+`stale_candidate`), never deletes, and honours the per-run cap and the dry-run.
+An operator applies it with `learning freshness`.
+
 ## Directory layout
 
 ```
