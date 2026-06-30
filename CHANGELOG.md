@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v1.2.0 - 2026-06-30
+
+Coordinated LocalX release.
+
 - **Retroactive low-quality freshness flag (D-LM-0024).** The freshness pass gains
   a `low-quality` reason that reuses the write-time quality classifier to flag an
   already-stored tooling-noise or over-fit lesson — one that predates the write
