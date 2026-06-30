@@ -35,6 +35,19 @@ human to review them, and stores accepted knowledge as readable project files.
 | **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
 | **Cloud required** | No |
 
+## Privacy by design
+
+LocalMind keeps the knowledge extracted from your work under your control.
+
+- **No usage telemetry is sent.** Sessions, candidate lessons, searches, and
+  memory activity are not reported to LocalX or an analytics service.
+- **Memory stays local.** Accepted knowledge is stored as readable Markdown and
+  a local SQLite index in paths you control.
+- **Inference is optional.** Deterministic local behavior works without a cloud
+  service; any configured inference or embedding endpoint is an explicit choice.
+- **Nothing becomes memory silently.** Secret redaction and human review happen
+  before durable project knowledge is written.
+
 > [!IMPORTANT]
 > LocalMind is opt-in and review-gated. It refuses project memory writes until
 > `.localmind.toml` enables learning, and it never promotes a candidate lesson
