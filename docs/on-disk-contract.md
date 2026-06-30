@@ -87,6 +87,23 @@ auto-merged** — the band only widens what a human sees, never what is removed.
 Without both the flag and an endpoint, dedup is byte-identical to the lexical
 contract.
 
+**Write-time quality gate.** Alongside the dedup, confidence, and conflict
+checks, every candidate carries a deterministic, offline **quality** verdict —
+`general`, `over-fit`, or `tooling-noise` — computed from its category and text
+(`classify_quality`). A *tooling-noise* lesson is a build-tool / shell /
+working-directory / OS-env mechanic, not a code lesson; an *over-fit* lesson is a
+claim welded to one exercise's identifiers/literals with no transferable
+principle. The verdict is marked at extraction (in the candidate's
+`review_annotation.notes`, visible in `candidates.json` and to an Assisted
+reviewer) and **enforced at the accept seam**: under trusted/automatic mode a
+non-`general` candidate is **withheld from auto-accept and routed to manual
+review** — treated exactly like a duplicate. It is never discarded and never
+deleted (the standing never-auto-delete invariant); a human still decides. An
+error-code/diagnostic recipe (e.g. `error[E0107]`) is kept as `general`
+(specific but generalizable), and a path/shell phrase inside a security or
+architecture lesson is not read as tooling noise (the category gate). The
+classifier is pure, so the contract is the verdict, not any keyword list.
+
 ## Directory layout
 
 ```

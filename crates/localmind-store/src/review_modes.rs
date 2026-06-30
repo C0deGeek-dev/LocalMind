@@ -174,20 +174,28 @@ impl ReviewModeProcessor {
                 .filter(|(_, sim)| *sim >= CONFLICT_TOPIC_OVERLAP)
                 .map(|(hit, _)| hit.memory_id.clone());
             let conflict = is_contradiction(summary, related);
+            // The lesson-quality verdict: a tooling-noise or over-fit candidate
+            // is withheld from auto-accept below (routed to manual review like a
+            // duplicate), and the reason is surfaced to the reviewer here. The
+            // classifier only labels — it never deletes (D-LM-0016).
+            let quality = crate::classify_quality(&item.candidate.category, summary, "");
+            let mut notes = match (duplicate_of.is_some(), borderline_duplicate) {
+                (true, true) => {
+                    "Borderline semantic match (review band); human review recommended.".to_string()
+                }
+                (true, false) => {
+                    "Similar accepted memory found; human review recommended.".to_string()
+                }
+                (false, _) => "No close duplicate found in accepted memory.".to_string(),
+            };
+            if let Some(note) = quality.review_note() {
+                notes = format!("{notes} {note}");
+            }
             item.candidate.review_annotation = Some(ReviewAnnotation {
                 score: Confidence::new(confidence)?,
                 duplicate_of: duplicate_of.clone(),
                 conflict,
-                notes: match (duplicate_of.is_some(), borderline_duplicate) {
-                    (true, true) => {
-                        "Borderline semantic match (review band); human review recommended."
-                            .to_string()
-                    }
-                    (true, false) => {
-                        "Similar accepted memory found; human review recommended.".to_string()
-                    }
-                    (false, _) => "No close duplicate found in accepted memory.".to_string(),
-                },
+                notes,
             });
 
             match config.config.review.mode {
@@ -217,15 +225,17 @@ impl ReviewModeProcessor {
                                 "trusted mode auto-superseded a contradicted memory",
                                 "trusted",
                             )?,
-                            (false, _) if duplicate_of.is_none() => auto_decide(
-                                &queue,
-                                &persistence,
-                                &item.id,
-                                ReviewAction::Accept,
-                                "localmind-trusted",
-                                "trusted mode auto-accepted above threshold",
-                                "trusted",
-                            )?,
+                            (false, _) if duplicate_of.is_none() && quality.is_general() => {
+                                auto_decide(
+                                    &queue,
+                                    &persistence,
+                                    &item.id,
+                                    ReviewAction::Accept,
+                                    "localmind-trusted",
+                                    "trusted mode auto-accepted above threshold",
+                                    "trusted",
+                                )?
+                            }
                             _ => false,
                         }
                     } else {
@@ -254,15 +264,17 @@ impl ReviewModeProcessor {
                             "automatic mode auto-superseded a contradicted memory",
                             "automatic",
                         )?,
-                        (false, _) if duplicate_of.is_none() => auto_decide(
-                            &queue,
-                            &persistence,
-                            &item.id,
-                            ReviewAction::Accept,
-                            "localmind-automatic",
-                            "automatic mode auto-accepted",
-                            "automatic",
-                        )?,
+                        (false, _) if duplicate_of.is_none() && quality.is_general() => {
+                            auto_decide(
+                                &queue,
+                                &persistence,
+                                &item.id,
+                                ReviewAction::Accept,
+                                "localmind-automatic",
+                                "automatic mode auto-accepted",
+                                "automatic",
+                            )?
+                        }
                         _ => false,
                     };
                     if decided {
@@ -556,6 +568,74 @@ mod tests {
             novel_item.state,
             ReviewState::Accepted,
             "a novel candidate should auto-accept under automatic mode"
+        );
+    }
+
+    /// The write-time quality gate: under automatic mode a tooling-noise and an
+    /// over-fit candidate are withheld from auto-accept (left for manual review),
+    /// while a general lesson still auto-accepts. None is deleted.
+    #[test]
+    fn automatic_mode_withholds_low_quality_candidates_but_accepts_a_general_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"automatic\"\n",
+        )
+        .unwrap();
+
+        // A tooling-noise lesson (build/cwd mechanic), an over-fit lesson (a call
+        // welded to one exercise's identifiers), and a general principle.
+        let tooling = candidate(
+            "Initial shell commands failed due to incorrect working directory assumptions.",
+        );
+        let overfit = candidate(
+            "Avoid `zip(words, letters)` when emitting an initial state before any letter arrives.",
+        );
+        let general = candidate("prefer ripgrep over grep when searching the codebase");
+        let queue = ReviewQueue::open_project(root).unwrap();
+        queue
+            .enqueue_candidates(
+                &SessionId::new("session"),
+                &[tooling.clone(), overfit.clone(), general.clone()],
+            )
+            .unwrap();
+
+        ReviewModeProcessor::apply_project(root).unwrap();
+
+        let items = queue.list().unwrap();
+        let find = |summary: &str| {
+            items
+                .iter()
+                .find(|item| item.candidate.summary() == summary)
+                .unwrap_or_else(|| panic!("missing item {summary}"))
+        };
+        assert_ne!(
+            find(tooling.summary()).state,
+            ReviewState::Accepted,
+            "a tooling-noise candidate must not auto-accept"
+        );
+        assert_ne!(
+            find(overfit.summary()).state,
+            ReviewState::Accepted,
+            "an over-fit candidate must not auto-accept"
+        );
+        assert_eq!(
+            find(general.summary()).state,
+            ReviewState::Accepted,
+            "a general candidate still auto-accepts under automatic mode"
+        );
+        // Nothing was deleted: all three candidates are still present (the bad two
+        // stay in the queue for a human, never discarded).
+        assert_eq!(items.len(), 3, "no candidate was discarded: {items:?}");
+        // The reviewer sees the quality reason on a withheld candidate.
+        assert!(
+            find(tooling.summary())
+                .candidate
+                .review_annotation
+                .as_ref()
+                .is_some_and(|a| a.notes.contains("tooling-noise")),
+            "the tooling-noise reason must be surfaced to the reviewer"
         );
     }
 

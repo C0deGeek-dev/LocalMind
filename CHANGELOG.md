@@ -5,6 +5,20 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Write-time lesson-quality gate (D-LM-0024).** A model-pinned benchmark showed
+  accepted learning is net-positive but noisy: tooling/process artifacts (a
+  working-directory or build-wrapper note) and over-fit, exercise-specific claims
+  auto-accepted and then mis-injected into unrelated tasks. A new deterministic,
+  offline classifier (`classify_quality`) labels every candidate `general`,
+  `over-fit`, or `tooling-noise`. The verdict is marked at extraction (in
+  `review_annotation.notes`, both the deterministic and the model paths) and
+  enforced at the accept seam: under trusted/automatic mode a non-`general`
+  candidate is **withheld from auto-accept and routed to manual review** — treated
+  like a duplicate, never discarded, **never auto-deleted**. An error-code recipe
+  stays `general` (specific but generalizable), and a path/shell phrase inside a
+  security or architecture lesson is not read as tooling noise (the category gate).
+  See `docs/on-disk-contract.md`.
+
 ## v1.1.0 - 2026-06-29
 
 Coordinated LocalX release.

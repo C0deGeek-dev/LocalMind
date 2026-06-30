@@ -18,6 +18,7 @@ mod language;
 mod markdown;
 mod memory_persistence;
 mod paths;
+mod quality;
 mod redaction;
 mod research;
 mod revalidation;
@@ -64,6 +65,7 @@ pub use memory_persistence::{
     MemorySearchResult, VectorSearchResult,
 };
 pub use paths::{MemoryPathError, MemoryPathResolver};
+pub use quality::{classify_quality, Quality};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use research::{BatchInsightError, BatchInsightPipeline, BatchInsightReport};
 pub use revalidation::{

@@ -573,6 +573,17 @@ fn annotate_candidate(candidate: &mut CandidateLesson) -> Result<(), CloseoutErr
             "source-grounded deterministic extraction".to_string()
         },
     });
+    // Mark the lesson-quality verdict at birth (both the deterministic and the
+    // model extraction paths route through here), so a tooling-noise or over-fit
+    // candidate is visible to a reviewer in `candidates.json` and the accept seam
+    // can withhold auto-accept (`review_modes::apply_project`). The classifier
+    // only labels; it never decides storage and never deletes.
+    let quality = crate::quality::classify_quality(&candidate.category, candidate.summary(), "");
+    if let (Some(annotation), Some(note)) =
+        (candidate.review_annotation.as_mut(), quality.review_note())
+    {
+        annotation.notes = format!("{}; {note}", annotation.notes);
+    }
     // Refine a memory-bound candidate into a concrete update suggestion. These
     // are review suggestions only — the reviewer enacts them; extraction never
     // writes accepted memory. Skill/doc/session candidates keep their action.
