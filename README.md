@@ -18,7 +18,7 @@
   </p>
   <p>
     <a href="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg"></a>
-    <img alt="LocalX release train 1.0.0" src="https://img.shields.io/badge/release%20train-v1.0.0-69d987?style=flat-square">
+    <img alt="LocalX release train 1.2.0" src="https://img.shields.io/badge/release%20train-v1.2.0-69d987?style=flat-square">
     <img alt="Markdown and SQLite storage" src="https://img.shields.io/badge/storage-Markdown%20%C2%B7%20SQLite-59636e?style=flat-square">
   </p>
 </div>
