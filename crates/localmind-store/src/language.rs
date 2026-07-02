@@ -243,6 +243,7 @@ pub fn detect_workspace_language(root: &Path) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         detect_workspace_language, language_for_extension, lesson_language, resolve_memory_language,

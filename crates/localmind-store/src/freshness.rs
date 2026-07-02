@@ -286,6 +286,7 @@ pub(crate) fn cap_order(a: &FreshnessFlag, b: &FreshnessFlag) -> std::cmp::Order
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
