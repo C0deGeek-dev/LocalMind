@@ -5,6 +5,16 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **`localmind status` is honest.** It now reports real project readiness —
+  config discovery, the memory store and its accepted-memory count, the review
+  queue, and whether inference is configured — and exits non-zero when the
+  project is unusable, instead of printing a canned "ready".
+- **`insights distill`/`research` say when nothing ran.** With no `[inference]`
+  endpoint they print an explicit "model-backed pass skipped" note instead of a
+  bare "Enqueued: 0" that looked like "ran, found nothing".
+- **Docs: a capability table** in the README names which surfaces the standalone
+  CLI exposes versus which are host-mounted (hybrid/vector search, rerank, the
+  code graph, MCP, freshness, provenance).
 - **Fixed: the trusted/automatic auto-supersede arm now honors the D-LM-0024
   quality gate.** A non-`General` (tooling-noise / over-fit) candidate that
   contradicts an accepted memory no longer auto-retires it — the strongest
