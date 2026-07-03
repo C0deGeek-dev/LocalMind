@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.1.0 - 2026-07-03
+
+Coordinated LocalX release.
+
 - **`localmind status` is honest.** It now reports real project readiness —
   config discovery, the memory store and its accepted-memory count, the review
   queue, and whether inference is configured — and exits non-zero when the
