@@ -1,3 +1,4 @@
+use crate::dedup::{similarity, token_set};
 use crate::{
     MemoryPersistence, MemoryPersistenceError, ProjectConfig, ReviewModeConfig, ReviewQueue,
     ReviewQueueError,
@@ -5,7 +6,6 @@ use crate::{
 use localmind_core::{
     AuditEventKind, Confidence, ReviewAction, ReviewAnnotation, ReviewDecision, ReviewItemId,
 };
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Overlap (0..1) above which two summaries are treated as near-duplicates.
@@ -43,32 +43,6 @@ const VECTOR_DUPLICATE_CANDIDATES: usize = 20;
 
 /// Very common words carry no topic signal; dropping them keeps similarity
 /// keyed on the substantive terms.
-const STOP_WORDS: [&str; 24] = [
-    "the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "for", "with", "is", "are", "be",
-    "this", "that", "it", "as", "at", "by", "from", "use", "using",
-];
-
-/// The substantive, lowercased word set of a summary (alphanumeric tokens,
-/// stop-words removed). Used for set-overlap similarity.
-fn token_set(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_ascii_lowercase)
-        .filter(|w| w.len() > 2 && !STOP_WORDS.contains(&w.as_str()))
-        .collect()
-}
-
-/// Overlap coefficient `|A∩B| / min(|A|,|B|)` — robust to length differences,
-/// so a short lesson contained in a longer memory still scores high.
-fn similarity(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f32 {
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    let intersection = a.intersection(b).count();
-    let smaller = a.len().min(b.len());
-    intersection as f32 / smaller as f32
-}
-
 /// Markers that a statement reverses or forbids prior guidance.
 const NEGATION_MARKERS: [&str; 11] = [
     "do not",
