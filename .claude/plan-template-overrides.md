@@ -49,9 +49,10 @@ build-sequencing choices stay in the plan.
   PR-reviewed; the published GitHub Wiki is a one-way generated mirror — never
   hand-edited on github.com. Wiki Reference pages link the owned `docs/`, never
   duplicate them.
-- **VERSION discipline.** No README/doc/wiki claim may exceed the current
-  `VERSION` (`0.3.0-beta.2`); `vision.md` aspirations are marked as direction,
-  not shipped behaviour.
+- **VERSION discipline, both directions.** No README/doc/wiki claim may exceed
+  the current `VERSION` (read the `VERSION` file, never hardcode a literal), and
+  no doc describes a retired stack as current; `vision.md` aspirations are marked
+  as direction, not shipped behaviour.
 
 ## §7 plan-specific gates
 
