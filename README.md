@@ -18,7 +18,7 @@
   </p>
   <p>
     <a href="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg"></a>
-    <img alt="LocalX release train 1.2.1" src="https://img.shields.io/badge/release%20train-v1.2.1-69d987?style=flat-square">
+    <img alt="LocalX release train 2.0.2" src="https://img.shields.io/badge/release%20train-v2.0.2-69d987?style=flat-square">
     <img alt="Markdown and SQLite storage" src="https://img.shields.io/badge/storage-Markdown%20%C2%B7%20SQLite-59636e?style=flat-square">
   </p>
 </div>
@@ -43,6 +43,11 @@ LocalMind keeps the knowledge extracted from your work under your control.
   memory activity are not reported to LocalX or an analytics service.
 - **Memory stays local.** Accepted knowledge is stored as readable Markdown and
   a local SQLite index in paths you control.
+- **Learning is opt-in per project.** A repo with no `.localmind.toml` is never
+  learned from; creating the file is the opt-in. Once enabled, accepted lessons
+  write to both the project store **and** the same-machine global store by
+  default (cross-project knowledge) — set `allowed_scopes = ["project"]` to keep
+  a project's memory project-only. Nothing leaves the machine (`local_only`).
 - **Inference is optional.** Deterministic local behavior works without a cloud
   service; any configured inference or embedding endpoint is an explicit choice.
 - **Nothing becomes memory silently.** Secret redaction and human review happen

@@ -294,10 +294,11 @@ impl ProjectConfig {
         home_dir().map(|home| home.join(".localmind").join("memory"))
     }
 
-    /// Whether the project opts in to machine-wide global-scope memory (its
-    /// `allowed_scopes` lists `GlobalUser`). Global memory is off by default — a
-    /// project must opt in so a global lesson is never written or read without
-    /// consent.
+    /// Whether the project allows machine-wide global-scope memory (its
+    /// `allowed_scopes` lists `GlobalUser`). Global memory is **on by default**
+    /// (D-LM-0017/0019): cross-project knowledge accumulates in the same-machine
+    /// (`local_only`) global store out of the box; narrow `allowed_scopes` to
+    /// `["project"]` for project-only memory.
     #[must_use]
     pub fn allows_global(&self) -> bool {
         self.allows_scope(&MemoryScope::GlobalUser)

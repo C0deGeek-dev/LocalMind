@@ -216,7 +216,12 @@ impl ReviewModeProcessor {
                     // stays human-gated.
                     let decided = if above_threshold {
                         match (conflict, related_target.clone()) {
-                            (true, Some(target)) => auto_decide(
+                            // Auto-superseding an accepted memory is the strongest
+                            // automated action; gate it on the same D-LM-0024
+                            // quality check as auto-accept, so a non-`General`
+                            // (tooling-noise / over-fit) candidate can't retire a
+                            // human's memory — it routes to manual review.
+                            (true, Some(target)) if quality.is_general() => auto_decide(
                                 &queue,
                                 &persistence,
                                 &item.id,
@@ -255,15 +260,19 @@ impl ReviewModeProcessor {
                     // novel candidate auto-accepts as before.
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
                     let decided = match (conflict, related_target.clone()) {
-                        (true, Some(target)) if above_threshold => auto_decide(
-                            &queue,
-                            &persistence,
-                            &item.id,
-                            ReviewAction::Supersede(target),
-                            "localmind-automatic",
-                            "automatic mode auto-superseded a contradicted memory",
-                            "automatic",
-                        )?,
+                        // Same D-LM-0024 quality gate as the accept arm: a
+                        // non-`General` candidate never auto-retires a memory.
+                        (true, Some(target)) if above_threshold && quality.is_general() => {
+                            auto_decide(
+                                &queue,
+                                &persistence,
+                                &item.id,
+                                ReviewAction::Supersede(target),
+                                "localmind-automatic",
+                                "automatic mode auto-superseded a contradicted memory",
+                                "automatic",
+                            )?
+                        }
                         (false, _) if duplicate_of.is_none() && quality.is_general() => {
                             auto_decide(
                                 &queue,
@@ -692,6 +701,71 @@ mod tests {
         let novel_item = find(novel.summary());
         assert_eq!(novel_item.state, ReviewState::Accepted);
         assert_eq!(novel_item.reviewer_action.as_deref(), Some("accept"));
+    }
+
+    #[test]
+    fn a_non_general_contradiction_is_not_auto_superseded_it_routes_to_review() {
+        // D-LM-0024 gate on the supersede arm: a tooling-noise candidate that
+        // contradicts an accepted memory must NOT auto-retire it (the strongest
+        // automated action) even in automatic mode — it routes to a human. The
+        // sibling test above proves a *general* contradiction with the same shape
+        // DOES supersede, so this isolates the quality gate.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\n",
+        )
+        .unwrap();
+
+        let persistence = MemoryPersistence::open_project(root).unwrap();
+        persistence
+            .persist_memory_entry(&seed_memory(
+                "mem-cwd",
+                "always run build commands from the working directory root",
+            ))
+            .unwrap();
+
+        let queue = ReviewQueue::open_project(root).unwrap();
+        // Tooling-noise (build/working-directory mechanic, Process category) AND a
+        // direct contradiction of the seeded memory.
+        let contradiction = candidate(
+            "do not run build commands from the working directory root; use the build folder instead",
+        );
+        queue
+            .enqueue_candidates(&SessionId::new("session"), &[contradiction.clone()])
+            .unwrap();
+
+        ReviewModeProcessor::apply_project(root).unwrap();
+
+        let item = queue
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.candidate.summary() == contradiction.summary())
+            .unwrap();
+        assert_ne!(
+            item.state,
+            ReviewState::Accepted,
+            "a tooling-noise contradiction must not auto-supersede"
+        );
+        assert_ne!(item.reviewer_action.as_deref(), Some("supersede"));
+        assert!(
+            item.candidate
+                .review_annotation
+                .as_ref()
+                .is_some_and(|a| a.notes.contains("tooling-noise")),
+            "the quality reason is surfaced to the reviewer"
+        );
+        // The seeded memory was not retired.
+        assert!(
+            persistence
+                .list_memory()
+                .unwrap()
+                .iter()
+                .any(|m| m.memory_id.as_str() == "mem-cwd" && m.status != "superseded"),
+            "the accepted memory survives — nothing auto-retired it"
+        );
     }
 
     #[test]

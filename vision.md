@@ -104,8 +104,10 @@ The system must never silently learn from everything.
 
 Learning should be configurable at multiple levels:
 
-* Global off by default
-* Enable per project
+* Enable per project (the opt-in: creating `.localmind.toml` — no file, no
+  learning). **Shipped default (D-LM-0017/0019): once a project enables learning,
+  global cross-project scope is *on*, same-machine (`local_only`); narrow to
+  `["project"]` for project-only memory.**
 * Enable per session
 * Enable per folder
 * Enable per memory category

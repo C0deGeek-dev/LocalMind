@@ -9,9 +9,12 @@ wants project-only memory narrows `allowed_scopes` to `["project"]`.
 
 ## Configuration: `.localmind.toml`
 
-Learning is **on by default** (`local_only`, review-gated). This file is optional
-— it overrides the defaults at the project root, and is where you opt out
-(`enabled = false`) or tune the engine:
+This file is **required to enable learning**: a project with no `.localmind.toml`
+refuses every learning write (a typed `MissingConfig` error), so a repo is never
+learned from until its owner opts in by creating the file. Once it exists,
+learning is **on** and `local_only` + review-gated by default, and the defaults
+below apply to any key you omit. It lives at the project root, is where you opt
+out (`enabled = false`), and is where you tune the engine:
 
 ```toml
 [learning]
@@ -45,10 +48,11 @@ rerank = false               # opt in to the embedding rerank stage; off = deter
 rerank_window = 20           # how many top blended hits rerank may reorder
 ```
 
-A **missing file uses the defaults** (learning on, `local_only`, `["project",
-"global_user"]` scope); `enabled = false` opts out (refuses all writes). Malformed
-TOML, or a `memory_root` that escapes the project root, are hard, typed errors —
-never silent fallbacks. When `[inference]` is absent, model-backed extraction,
+A **missing file refuses all learning writes** (a typed `MissingConfig` error) —
+the file is the opt-in. Once it exists, an omitted key takes its default
+(learning on, `local_only`, `["project", "global_user"]` scope); `enabled = false`
+opts out. Malformed TOML, or a `memory_root` that escapes the project root, are
+hard, typed errors — never silent fallbacks. When `[inference]` is absent, model-backed extraction,
 embeddings, review
 annotation, skill writing, research, and distillation are disabled and the
 deterministic paths remain active.

@@ -5,6 +5,19 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Fixed: the trusted/automatic auto-supersede arm now honors the D-LM-0024
+  quality gate.** A non-`General` (tooling-noise / over-fit) candidate that
+  contradicts an accepted memory no longer auto-retires it — the strongest
+  automated action was ungated while auto-accept was gated; both now require
+  `quality.is_general()` and a non-general contradiction routes to manual review.
+- **Docs: corrected the learning opt-in and global-scope defaults.**
+  `docs/on-disk-contract.md` now states plainly that `.localmind.toml` is
+  **required** to enable learning (a missing file refuses all writes), matching
+  the code and README; the `allows_global` rustdoc and `vision.md` now state that
+  global cross-project scope is **on by default** once learning is enabled
+  (same-machine, `local_only`; narrow to `["project"]` to opt out) instead of the
+  stale "off by default". README privacy section calls out the global default.
+
 ## v2.0.2 - 2026-07-02
 
 Coordinated LocalX release.
