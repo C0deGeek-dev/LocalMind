@@ -41,8 +41,6 @@ const VECTOR_REVIEW_BAND: f32 = 0.83;
 /// Mirrors the retrieval path's `limit.max(20)` candidate window.
 const VECTOR_DUPLICATE_CANDIDATES: usize = 20;
 
-/// Very common words carry no topic signal; dropping them keeps similarity
-/// keyed on the substantive terms.
 /// Markers that a statement reverses or forbids prior guidance.
 const NEGATION_MARKERS: [&str; 11] = [
     "do not",
