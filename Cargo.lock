@@ -734,6 +734,7 @@ dependencies = [
  "getrandom",
  "localmind-core",
  "localmind-inference",
+ "localmind-review",
  "regex",
  "rusqlite",
  "serde",

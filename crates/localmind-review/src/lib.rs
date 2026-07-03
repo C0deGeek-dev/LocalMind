@@ -2,28 +2,6 @@
 
 use localmind_core::{ReviewAction, ReviewDecision, ReviewState};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewCapabilities {
-    pub accept: bool,
-    pub reject: bool,
-    pub edit: bool,
-    pub merge: bool,
-    pub convert_to_skill: bool,
-}
-
-impl ReviewCapabilities {
-    #[must_use]
-    pub fn manual_mvp() -> Self {
-        Self {
-            accept: true,
-            reject: true,
-            edit: true,
-            merge: true,
-            convert_to_skill: true,
-        }
-    }
-}
-
 pub fn decision_closes_item(action: &ReviewAction) -> bool {
     matches!(
         action,
@@ -50,14 +28,42 @@ pub fn state_after_decision(decision: &ReviewDecision) -> ReviewState {
 
 #[cfg(test)]
 mod tests {
-    use super::{decision_closes_item, ReviewCapabilities};
-    use localmind_core::ReviewAction;
+    use super::{decision_closes_item, state_after_decision};
+    use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId, ReviewState};
+
+    fn decision(action: ReviewAction) -> ReviewDecision {
+        ReviewDecision {
+            item_id: ReviewItemId::new("x"),
+            action,
+            reviewer: String::new(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        }
+    }
 
     #[test]
-    fn manual_mvp_supports_edit_before_promotion() {
-        let capabilities = ReviewCapabilities::manual_mvp();
-
-        assert!(capabilities.edit);
+    fn a_terminal_action_closes_the_item_but_deferral_does_not() {
         assert!(decision_closes_item(&ReviewAction::Accept));
+        assert!(decision_closes_item(&ReviewAction::ConvertToSkill));
+        assert!(!decision_closes_item(&ReviewAction::MarkTemporary));
+        assert!(!decision_closes_item(&ReviewAction::IgnoreSimilar));
+    }
+
+    #[test]
+    fn state_after_decision_is_the_single_source_the_queue_uses() {
+        assert_eq!(
+            state_after_decision(&decision(ReviewAction::Accept)),
+            ReviewState::Accepted
+        );
+        assert_eq!(
+            state_after_decision(&decision(ReviewAction::MarkTemporary)),
+            ReviewState::Deferred
+        );
+        assert_eq!(
+            state_after_decision(&decision(ReviewAction::Reject)),
+            ReviewState::Rejected
+        );
     }
 }

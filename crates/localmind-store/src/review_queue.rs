@@ -281,7 +281,7 @@ impl ReviewQueue {
     }
 
     pub fn decide(&self, decision: ReviewDecision) -> Result<ReviewQueueItem, ReviewQueueError> {
-        let state = state_for_action(&decision.action);
+        let state = localmind_review::state_after_decision(&decision);
         if matches!(decision.action, ReviewAction::Edit)
             && decision
                 .replacement_summary
@@ -405,18 +405,6 @@ fn find_duplicate(pending: &[DedupKey], hash: &str, summary: &str) -> Option<Str
             key.canonical_hash == hash || crate::dedup::is_near_duplicate(&key.summary, summary)
         })
         .map(|key| key.id.clone())
-}
-
-fn state_for_action(action: &ReviewAction) -> ReviewState {
-    match action {
-        ReviewAction::Accept | ReviewAction::ConvertToSkill | ReviewAction::Supersede(_) => {
-            ReviewState::Accepted
-        }
-        ReviewAction::Reject | ReviewAction::IgnoreSimilar => ReviewState::Rejected,
-        ReviewAction::Edit => ReviewState::Edited,
-        ReviewAction::MergeInto(_) => ReviewState::Merged,
-        ReviewAction::MarkTemporary => ReviewState::Deferred,
-    }
 }
 
 fn parse_state(value: &str) -> ReviewState {
