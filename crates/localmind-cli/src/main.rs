@@ -2,8 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use localmind_core::SkillDraftId;
 use localmind_core::{
-    MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionOutcome,
-    SessionRecord, SessionSource,
+    MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionSource,
 };
 use localmind_store::{
     sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
@@ -282,7 +281,8 @@ enum InsightCommand {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
-    /// Research one topic against accepted memories and the code graph.
+    /// Research one topic against accepted memories (model-backed; requires
+    /// a configured `[inference]` endpoint).
     Research {
         topic: String,
         #[arg(long, default_value = ".")]
@@ -363,17 +363,97 @@ impl From<FormatArg> for TranscriptImportFormat {
     }
 }
 
+/// Print a notice (to stderr) when a batch insight pass has no inference
+/// endpoint configured, so an empty "Enqueued: 0" is not mistaken for "ran and
+/// found nothing" — the model-backed pass is silently skipped without config.
+fn warn_if_no_inference(project: &std::path::Path, pass: &str) {
+    let configured = localmind_store::ProjectConfig::discover(project)
+        .ok()
+        .and_then(|c| c.config.inference)
+        .is_some();
+    if !configured {
+        eprintln!(
+            "note: no [inference] endpoint configured — model-backed {pass} was skipped (nothing ran). Configure chat_base_url/chat_model in .localmind.toml to enable it."
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Command::Status) {
         Command::Status => {
-            let _record = SessionRecord::new(
-                localmind_core::SessionId::new("example-session"),
-                SessionSource::GenericTranscript,
-                SessionOutcome::Unknown,
+            // Real readiness for the current project: config, store/DB, review
+            // queue, and inference — not a canned "ready".
+            let mut ready = true;
+            match localmind_store::ProjectConfig::discover(".") {
+                Ok(pc) => {
+                    let learning = &pc.config.learning;
+                    println!(
+                        "config:  {} (learning {}, scopes {:?})",
+                        pc.config_path.display(),
+                        if learning.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        learning.allowed_scopes
+                    );
+                    match &pc.config.inference {
+                        Some(inf) => println!(
+                            "inference: configured ({})",
+                            inf.chat_base_url.as_deref().unwrap_or("chat endpoint set")
+                        ),
+                        None => println!(
+                            "inference: not configured (deterministic paths only; model-backed extraction/insights are skipped)"
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ready = false;
+                    println!("config:  not usable — {error}");
+                    println!("         learning is disabled until a valid .localmind.toml exists in this project");
+                }
+            }
+            match MemoryPersistence::open_project(".") {
+                Ok(store) => match store.list_memory() {
+                    Ok(memories) => {
+                        println!("store:   open, {} accepted memory item(s)", memories.len());
+                    }
+                    Err(error) => {
+                        ready = false;
+                        println!("store:   open but memory list failed — {error}");
+                    }
+                },
+                Err(error) => {
+                    ready = false;
+                    println!("store:   not open — {error}");
+                }
+            }
+            match ReviewQueue::open_project(".") {
+                Ok(queue) => match queue.list() {
+                    Ok(items) => println!("review:  {} candidate(s) pending", items.len()),
+                    Err(error) => {
+                        ready = false;
+                        println!("review:  queue read failed — {error}");
+                    }
+                },
+                Err(error) => {
+                    ready = false;
+                    println!("review:  queue not open — {error}");
+                }
+            }
+            println!(
+                "status:  {}",
+                if ready {
+                    "ready"
+                } else {
+                    "not ready (see above)"
+                }
             );
-            println!("LocalMind core ready: {}", _record.source_label());
+            if !ready {
+                std::process::exit(1);
+            }
         }
         Command::Import {
             input,
@@ -615,14 +695,16 @@ fn main() -> Result<()> {
         },
         Command::Insights { command } => match command {
             InsightCommand::Distill { project } => {
-                let report = localmind_store::BatchInsightPipeline::distill(project)?;
+                warn_if_no_inference(&project, "distillation");
+                let report = localmind_store::BatchInsightPipeline::distill(&project)?;
                 println!(
                     "Enqueued: {} Accepted by mode: {}",
                     report.enqueued, report.accepted_by_mode
                 );
             }
             InsightCommand::Research { topic, project } => {
-                let report = localmind_store::BatchInsightPipeline::research(project, &topic)?;
+                warn_if_no_inference(&project, "research");
+                let report = localmind_store::BatchInsightPipeline::research(&project, &topic)?;
                 println!(
                     "Enqueued: {} Accepted by mode: {}",
                     report.enqueued, report.accepted_by_mode
@@ -805,20 +887,4 @@ fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Resu
     persistence.record_review_item_audit(&item)?;
     println!("{} -> {:?}", item.id, item.state);
     Ok(())
-}
-
-trait SessionSourceLabel {
-    fn source_label(&self) -> &'static str;
-}
-
-impl SessionSourceLabel for SessionRecord {
-    fn source_label(&self) -> &'static str {
-        match &self.source {
-            SessionSource::GenericTranscript => "generic transcript",
-            SessionSource::ClaudeCode => "claude code",
-            SessionSource::OpenAiCodex => "openai codex",
-            SessionSource::LocalPilot => "localpilot",
-            SessionSource::Other(_) => "custom host",
-        }
-    }
 }
