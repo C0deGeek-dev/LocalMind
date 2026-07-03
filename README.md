@@ -188,6 +188,30 @@ The learning engine is split into host-neutral Rust crates. LocalPilot embeds it
 through an adapter; the core never depends on LocalPilot. The standalone CLI
 uses the same contracts for generic transcripts and other agent hosts.
 
+### What the standalone `localmind` CLI exposes
+
+Several engine capabilities are **implemented and tested in the crates but
+mounted by a host** (LocalPilot), not surfaced by this binary. Know which you get
+from the CLI alone:
+
+| Capability | Standalone `localmind` CLI | Notes |
+|---|---|---|
+| Import → closeout → review → promote → search (FTS5) → audit → context export | ✅ | The core loop |
+| Signed memory bundle export/import, `eval`, `status`, skill drafts | ✅ | |
+| Batch `insights` (distill/research) | ✅ (needs `[inference]`) | Model-backed; skipped with a notice when no endpoint |
+| Hybrid keyword+vector search, rerank | host-mounted | Engine has it; the CLI search is keyword (FTS5) only |
+| Code graph (ingest/query/impact/primer), MCP graph tools | host-mounted | No CLI subcommand drives these |
+| Freshness pass, usage stats, provenance, source revalidation, memory delete | host-mounted | Exposed by the LocalPilot `learning`/`memory` commands |
+
+The `[retrieval] rerank` config keys are accepted and validated but only take
+effect through a host that runs the rerank stage.
+
+**`local_only` note.** `local_only = true` is mandatory (setting it `false` is a
+typed error), but it constrains *scope* (memory is same-machine), not the
+`[inference]`/`[embedding]` URLs — those accept any reachable `http(s)` endpoint.
+Keep the endpoints on loopback/your LAN if you want inference to stay on-machine;
+the standalone engine does not enforce a loopback-only inference host.
+
 | Area | Start here |
 |---|---|
 | Product scope and implementation status | [Vision](vision.md) |
