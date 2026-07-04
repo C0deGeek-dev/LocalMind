@@ -221,7 +221,7 @@ fn has_native_markers(lines: &[&str]) -> bool {
 /// an `Other(..)` category. On import the inverse is
 /// [`parse_category`](crate::markdown::parse_category), which maps a known name
 /// back to its variant and anything else to `Other`.
-fn okf_type(category: &LessonCategory) -> String {
+pub(crate) fn okf_type(category: &LessonCategory) -> String {
     match category {
         LessonCategory::Other(inner) => inner.clone(),
         other => format!("{other:?}"),

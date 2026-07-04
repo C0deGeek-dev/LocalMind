@@ -6,8 +6,9 @@ use localmind_core::{
 };
 use localmind_store::{
     sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
-    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, OkfImporter,
-    ReviewQueue, SignedBundle, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
+    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, OkfExporter,
+    OkfImporter, ReviewQueue, SignedBundle, SkillDraftStore, TranscriptImportFormat,
+    TranscriptImporter,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -231,6 +232,20 @@ enum OkfCommand {
         /// dry run that reports what would change and writes nothing.
         #[arg(long)]
         apply: bool,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export accepted memory as a conformant OKF bundle directory.
+    Export {
+        /// Destination directory for the OKF bundle.
+        out: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Which scopes to include.
+        #[arg(long, value_enum, default_value_t = ScopeArg::Both)]
+        scope: ScopeArg,
         /// Emit a JSON report instead of text.
         #[arg(long)]
         json: bool,
@@ -658,6 +673,12 @@ fn main() -> Result<()> {
                 apply,
                 json,
             } => okf_import(&input, &project, apply, json)?,
+            OkfCommand::Export {
+                out,
+                project,
+                scope,
+                json,
+            } => okf_export(&out, &project, scope.into(), json)?,
         },
         Command::Skills { command } => match command {
             SkillsCommand::Generate { project } => {
@@ -859,6 +880,28 @@ fn memory_export(out: &PathBuf, project: &PathBuf, scope: BundleScope, json: boo
             );
         }
     }
+    Ok(())
+}
+
+/// `okf export`: write accepted memory as a conformant OKF bundle directory.
+fn okf_export(out: &Path, project: &Path, scope: BundleScope, json: bool) -> Result<()> {
+    let report = OkfExporter::new(project).export(out, scope)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Exported {} accepted memor{} to OKF bundle {} ({} categor{}, {} redaction{}).",
+        report.total,
+        if report.total == 1 { "y" } else { "ies" },
+        out.display(),
+        report.categories,
+        if report.categories == 1 { "y" } else { "ies" },
+        report.redactions,
+        if report.redactions == 1 { "" } else { "s" }
+    );
     Ok(())
 }
 

@@ -18,6 +18,7 @@ mod language;
 mod markdown;
 mod memory_persistence;
 mod okf;
+mod okf_export;
 mod okf_import;
 mod paths;
 mod quality;
@@ -67,6 +68,7 @@ pub use memory_persistence::{
     MemorySearchResult, VectorSearchResult,
 };
 pub use okf::{OkfFormat, OkfParseError, OKF_VERSION};
+pub use okf_export::{OkfExportError, OkfExportReport, OkfExporter};
 pub use okf_import::{OkfImportError, OkfImportReport, OkfImporter};
 pub use paths::{MemoryPathError, MemoryPathResolver};
 pub use quality::{classify_quality, Quality};
