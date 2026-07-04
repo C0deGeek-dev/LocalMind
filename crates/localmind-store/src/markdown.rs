@@ -141,7 +141,7 @@ impl MarkdownMemoryFormat {
 /// Split a Markdown memory file into its front-matter lines (between the opening
 /// and closing `---`) and the trimmed body. Errors when either delimiter is
 /// absent.
-fn split_front_matter(text: &str) -> Result<(Vec<&str>, String), MarkdownParseError> {
+pub(crate) fn split_front_matter(text: &str) -> Result<(Vec<&str>, String), MarkdownParseError> {
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") {
         return Err(MarkdownParseError::MissingFrontMatter);
