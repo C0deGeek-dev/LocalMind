@@ -6,11 +6,11 @@ use localmind_core::{
 };
 use localmind_store::{
     sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
-    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, ReviewQueue,
-    SignedBundle, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
+    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, OkfImporter,
+    ReviewQueue, SignedBundle, SkillDraftStore, TranscriptImportFormat, TranscriptImporter,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "localmind")]
@@ -83,6 +83,12 @@ enum Command {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    /// Interoperate with Google's Open Knowledge Format (OKF): import a bundle as
+    /// review candidates, export accepted memory as a conformant OKF bundle.
+    Okf {
+        #[command(subcommand)]
+        command: OkfCommand,
     },
     /// Generate and inspect disabled skill suggestions.
     Skills {
@@ -201,6 +207,27 @@ enum MemoryCommand {
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// Write the imported entries as review candidates. Without it this is a
+        /// dry run that reports what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OkfCommand {
+    /// Import an OKF bundle directory: parse each concept and (with --apply)
+    /// enqueue it for review. An OKF bundle is unsigned, so every concept is
+    /// flagged untrusted.
+    Import {
+        /// OKF bundle directory to import.
+        input: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Write the parsed concepts as review candidates. Without it this is a
         /// dry run that reports what would change and writes nothing.
         #[arg(long)]
         apply: bool,
@@ -624,6 +651,14 @@ fn main() -> Result<()> {
                 json,
             } => memory_import(&input, &project, apply, json)?,
         },
+        Command::Okf { command } => match command {
+            OkfCommand::Import {
+                input,
+                project,
+                apply,
+                json,
+            } => okf_import(&input, &project, apply, json)?,
+        },
         Command::Skills { command } => match command {
             SkillsCommand::Generate { project } => {
                 let store = SkillDraftStore::open_project(project)?;
@@ -823,6 +858,37 @@ fn memory_export(out: &PathBuf, project: &PathBuf, scope: BundleScope, json: boo
                 }
             );
         }
+    }
+    Ok(())
+}
+
+/// `okf import`: read an OKF bundle directory and (with `--apply`) enqueue its
+/// concepts for review. The default is a dry run that writes nothing. An OKF
+/// bundle is unsigned, so every concept is flagged untrusted.
+fn okf_import(input: &Path, project: &Path, apply: bool, json: bool) -> Result<()> {
+    let report = OkfImporter::new(project).import(input, apply)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} {} OKF concept{} (unsigned, untrusted): {} new, {} duplicate, {} skipped.",
+        if report.applied {
+            "Enqueued for review from"
+        } else {
+            "Dry run over"
+        },
+        report.total,
+        if report.total == 1 { "" } else { "s" },
+        report.added,
+        report.duplicate,
+        report.skipped
+    );
+    println!("An OKF bundle is unsigned — imported concepts are reviewed before they are used.");
+    if !report.applied {
+        println!("Re-run with --apply to enqueue these for review.");
     }
     Ok(())
 }
