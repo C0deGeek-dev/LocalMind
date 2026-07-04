@@ -298,11 +298,74 @@ envelope (`SignedBundle`), the on-disk shared/portable form:
   The author is a key-bound fingerprint, so it cannot be spoofed with another
   key. See `docs/decisions.md` D-LM-0018.
 
+## OKF (Open Knowledge Format) interop
+
+LocalMind reads and writes Google Cloud's **Open Knowledge Format (OKF) v0.1** —
+a directory of Markdown files with YAML front matter, only `type` required,
+reserving `title`/`description`/`resource`/`tags`/`timestamp`, with
+no-front-matter `index.md` navigation and a markdown-link concept graph. This is
+an **import/export profile over the Markdown memory format above, not a second
+store** (see `docs/decisions.md` D-LM-0025).
+
+**Export** (`localmind okf export <dir>`) writes accepted memory as an OKF bundle:
+one concept `.md` per memory, grouped into per-`type` directories, with an
+`index.md` in each directory (and at the root). Each concept carries the OKF
+reader-facing keys **and** the full native front matter (§Markdown memory format
+above), so it is at once a conformant OKF concept and a lossless LocalMind memory:
+
+```
+---
+okf_version: "0.1"
+type: <category>              # OKF reader-facing keys
+title: <derived from the body>
+description: <derived, optional>
+resource: <first related file / evidence uri, optional>
+timestamp: <updated_at, RFC 3339, optional>
+id: <memory id>               # the native block (§Markdown memory format)
+scope: <...>
+category: <...>
+confidence: <...>
+# ... the remaining native keys ...
+---
+
+<body>
+```
+
+- **Selection + redaction reuse the signed-bundle exporter**, so an OKF export
+  applies the same scope filter and the same defence-in-depth secret redaction; it
+  is read-only over the store.
+- **`index.md` files carry no `type`**, so a re-import skips them (navigation, not
+  concepts) — which is what keeps concept bodies byte-lossless across an
+  export→import cycle. Cross-concept edges (`supersedes`/`contradicts`) live in each
+  concept's native front matter, never injected into a body.
+
+**Import** (`localmind okf import <dir>`) reads an OKF bundle and enqueues each
+concept as a **review candidate** — never written straight to active memory.
+
+- A **LocalMind-origin** file (native keys present) round-trips losslessly through
+  the canonical parser.
+- A **foreign** concept (reserved fields only) is synthesized into a low-trust entry
+  (unknown `type` → `Other`, conservative confidence, `scope = Project`, a
+  deterministic `okf-<hash>` id); the foreign reader also accepts inline-flow
+  (`tags: [a, b]`) and quoted scalars.
+- An OKF bundle is **unsigned**, so every concept is flagged **untrusted** (contrast
+  the signed portable bundle above), is quality-gated (D-LM-0024) at the accept seam,
+  and is embedded at promotion via the normal path — never at import, so the review
+  gate is never bypassed.
+- Non-conformant files (no `type`, e.g. an `index.md` or `log.md`) are skipped and
+  counted. A `--dry-run` (the default) reports what an apply would enqueue without
+  writing.
+
+OKF v0.1 is a starting point, not a finished standard: the adapter depends only on
+`type` + the reserved set, emits `okf_version` so drift is detectable, and treats
+later versions as out of scope.
+
 ## Versioning
 
 - Database schema: `PRAGMA user_version` stepper (above).
 - Graph payload: `graph_meta.format_version`.
 - Portable bundle: `format_version` (currently **1**).
+- OKF profile: `okf_version` (currently **0.1**).
 - Crate/API versions: workspace version + `CHANGELOG.md`; release tags
   (`v<workspace version>`) mark contract-relevant changes. Hosts pinning a
   commit (e.g. a git submodule) get the contract as of that commit.

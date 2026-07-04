@@ -4,6 +4,56 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0025 — OKF (Open Knowledge Format) interop is an import/export profile over the canonical Markdown format, not a storage switch
+
+- **Date**: 2026-07-04
+- **Status**: accepted
+
+Google Cloud published the Open Knowledge Format (OKF) v0.1 (2026-06): organizational
+knowledge as a directory of Markdown files with YAML front matter, only `type`
+required, reserving `title`/`description`/`resource`/`tags`/`timestamp`, with
+no-front-matter `index.md` navigation and a markdown-link concept graph. LocalMind
+already stores accepted memory as Markdown + front matter with a richer schema — and
+adds embeddings, semantic dedup, signed portable bundles, review-gating, and a
+quality gate, none of which OKF v0.1 has. The value of OKF is therefore
+interoperability, not a better engine.
+
+Decision — a bidirectional OKF **profile** over the canonical `MarkdownMemoryFormat`,
+never a second store:
+
+1. **Export** (`OkfFormat::to_okf`) reuses `MarkdownMemoryFormat::serialize` verbatim
+   and prepends the OKF reader-facing keys (`type`/`title`/`description`/`resource`/
+   `timestamp` + `okf_version`). The native block is still present, so the file is at
+   once a conformant OKF concept and a lossless LocalMind memory — losslessness is
+   *structural* (the native serialization stays the source of truth), not a separate
+   field map that can drift.
+2. **Import** (`OkfFormat::from_okf`) delegates to `MarkdownMemoryFormat::parse` for a
+   LocalMind-origin file (detected by the native keys — a lossless round-trip) and
+   synthesizes a low-trust entry from the reserved fields for a *foreign* concept
+   (unknown `type` → `Other`, conservative confidence, `scope = Project`, a
+   deterministic `okf-<hash>` id). The foreign reader accepts inline-flow YAML the
+   canonical block reader does not, scoped to the OKF module.
+3. **Bundle import is review-gated and untrusted.** An OKF bundle is unsigned, so
+   every concept enters the review queue flagged untrusted — never auto-accepted
+   (D-LM-0016) — is quality-gated (D-LM-0024) at the accept seam, and is embedded at
+   promotion (never at import, so the gate is never bypassed). This is the OKF-shaped
+   sibling of the signed-bundle import (D-LM-0018): OKF has no provenance, the Ed25519
+   bundle does; the two coexist and are not merged.
+4. **Export reuses the signed-bundle exporter** for scope selection and
+   defence-in-depth secret redaction, then writes concepts into per-`type` directories
+   with no-front-matter `index.md` navigation. The concept graph lives in the index
+   files and each concept's native `supersedes`/`contradicts`, never injected into a
+   concept body (which would break the byte-lossless round-trip).
+
+Scope: OKF is import/export only; the SQLite+Markdown store stays canonical, and
+embeddings/signing/dedup/review-gating are unchanged. Pinned to OKF v0.1
+(self-described "not a finished standard"): the adapter depends only on `type` + the
+reserved set and emits `okf_version` so drift is detectable; later versions are out of
+scope. Conformance is proven against Google-`knowledge-catalog`-shaped fixtures. CLI:
+`localmind okf import <dir>` / `localmind okf export <dir>`. Reuses D-LM-0016
+(never auto-delete / route-to-review), D-LM-0018 (bundle import + trust classes),
+D-LM-0024 (quality gate).
+
 ## D-LM-0024 — Lesson quality is a write-time gate and a retroactive freshness reason, routed to review, never deleted
 
 - **Date**: 2026-06-30

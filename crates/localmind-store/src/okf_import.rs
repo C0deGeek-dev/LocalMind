@@ -12,7 +12,8 @@
 //! - the write-time quality gate (D-LM-0024) and the semantic/lexical dedup run
 //!   at the *accept* seam, not here, so they are inherited for free;
 //! - an accepted concept is embedded into the memory `vector_index` at promotion
-//!   via the existing path — there is no import-time embed to build (D009).
+//!   via the existing path; embedding at import time is deliberately avoided
+//!   because it would bypass the review gate.
 //!
 //! A `--dry-run` (the CLI default) reports what an apply *would* enqueue without
 //! writing. Files that are not conformant OKF concepts (no `type` field, missing

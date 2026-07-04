@@ -5,6 +5,12 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- OKF (Open Knowledge Format) interop: `localmind okf import <dir>` enqueues an OKF
+  bundle's concepts as untrusted, review-gated candidates, and `localmind okf export
+  <dir>` writes accepted memory as a conformant OKF bundle. Import/export is a profile
+  over the Markdown memory format — a LocalMind-origin file round-trips losslessly;
+  OKF is unsigned, so imports are flagged untrusted and never auto-promoted.
+  (`docs/on-disk-contract.md`, `docs/decisions.md` D-LM-0025)
 - Docs: clarified the on-disk contract's `schema_migrations` row — the table
   records only the baseline (`version = 1`); the stepper appends no per-step row,
   so `PRAGMA user_version` is the authoritative schema version. Corrected the
