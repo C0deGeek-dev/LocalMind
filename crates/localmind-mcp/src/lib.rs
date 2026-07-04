@@ -24,6 +24,14 @@ pub struct McpSurface {
 }
 
 impl McpSurface {
+    /// The MCP surface LocalMind *plans* to expose: resources and tools, no
+    /// prompts.
+    ///
+    /// Library-only/unwired: this descriptor is the documented "future home"
+    /// boundary shape (see the topology note in `vision.md`). No host mounts an
+    /// `McpSurface` yet, so only this crate's tests reference it; it is retained
+    /// (not deleted) as the declared intent the graph/skills tools above already
+    /// implement.
     #[must_use]
     pub fn planned() -> Self {
         Self {

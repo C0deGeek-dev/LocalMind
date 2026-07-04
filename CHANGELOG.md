@@ -5,6 +5,11 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Docs: clarified the on-disk contract's `schema_migrations` row — the table
+  records only the baseline (`version = 1`); the stepper appends no per-step row,
+  so `PRAGMA user_version` is the authoritative schema version. Corrected the
+  README release-train badge to the current version. (`docs/on-disk-contract.md`)
+
 ## v2.1.5 - 2026-07-04
 
 Coordinated LocalX release.

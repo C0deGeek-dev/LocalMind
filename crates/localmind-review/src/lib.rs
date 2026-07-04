@@ -2,6 +2,15 @@
 
 use localmind_core::{ReviewAction, ReviewDecision, ReviewState};
 
+/// Whether a review decision's action *closes* (terminates) its queue item.
+///
+/// Library-only boundary surface: this thin `localmind-review` crate is a
+/// "future home / thin boundary" crate (see the topology note in `vision.md`)
+/// that pins dependency direction for hosts while the storage-backed queue lives
+/// in `localmind-store`. No host consumes this predicate yet — only this crate's
+/// own tests exercise it — so it is deliberately retained (not deleted) as the
+/// declared seam a host will call when the review workflow moves out of the
+/// store. `state_after_decision` (below) is the currently-wired counterpart.
 pub fn decision_closes_item(action: &ReviewAction) -> bool {
     matches!(
         action,
