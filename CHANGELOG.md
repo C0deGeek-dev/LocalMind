@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.2.0 - 2026-07-06
+
+Coordinated LocalX release.
+
 - OKF (Open Knowledge Format) interop: `localmind okf import <dir>` enqueues an OKF
   bundle's concepts as untrusted, review-gated candidates, and `localmind okf export
   <dir>` writes accepted memory as a conformant OKF bundle. Import/export is a profile
