@@ -25,7 +25,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print the current engine readiness status.
-    Status,
+    Status {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
     /// Import a transcript into an opted-in project.
     Import {
         /// Transcript file to import.
@@ -116,6 +120,9 @@ enum Command {
         /// "no measured lift offline" signal that gates default-on extraction.
         #[arg(long)]
         with_lift: bool,
+        /// Project root whose [inference] config the --with-lift pass reads.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -423,12 +430,14 @@ fn warn_if_no_inference(project: &std::path::Path, pass: &str) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command.unwrap_or(Command::Status) {
-        Command::Status => {
-            // Real readiness for the current project: config, store/DB, review
+    match cli.command.unwrap_or(Command::Status {
+        project: PathBuf::from("."),
+    }) {
+        Command::Status { project } => {
+            // Real readiness for the named project: config, store/DB, review
             // queue, and inference — not a canned "ready".
             let mut ready = true;
-            match localmind_store::ProjectConfig::discover(".") {
+            match localmind_store::ProjectConfig::discover(&project) {
                 Ok(pc) => {
                     let learning = &pc.config.learning;
                     println!(
@@ -457,7 +466,7 @@ fn main() -> Result<()> {
                     println!("         learning is disabled until a valid .localmind.toml exists in this project");
                 }
             }
-            match MemoryPersistence::open_project(".") {
+            match MemoryPersistence::open_project(&project) {
                 Ok(store) => match store.list_memory() {
                     Ok(memories) => {
                         println!("store:   open, {} accepted memory item(s)", memories.len());
@@ -472,9 +481,17 @@ fn main() -> Result<()> {
                     println!("store:   not open — {error}");
                 }
             }
-            match ReviewQueue::open_project(".") {
+            match ReviewQueue::open_project(&project) {
                 Ok(queue) => match queue.list() {
-                    Ok(items) => println!("review:  {} candidate(s) pending", items.len()),
+                    Ok(items) => {
+                        // Pending means pending: an accepted/rejected/deferred
+                        // item is no longer awaiting review.
+                        let pending = items
+                            .iter()
+                            .filter(|item| item.state == localmind_core::ReviewState::Pending)
+                            .count();
+                        println!("review:  {pending} candidate(s) pending");
+                    }
                     Err(error) => {
                         ready = false;
                         println!("review:  queue read failed — {error}");
@@ -767,7 +784,12 @@ fn main() -> Result<()> {
                 );
             }
         },
-        Command::Eval { k, json, with_lift } => {
+        Command::Eval {
+            k,
+            json,
+            with_lift,
+            project,
+        } => {
             let work_root =
                 std::env::temp_dir().join(format!("localmind-eval-{}", std::process::id()));
             fs::create_dir_all(&work_root)?;
@@ -777,7 +799,7 @@ fn main() -> Result<()> {
             // config, if any) and report the lift. Offline, the model path falls
             // back to deterministic and the lift is zero.
             let outcome = if with_lift {
-                let inference = localmind_store::ProjectConfig::discover(".")
+                let inference = localmind_store::ProjectConfig::discover(&project)
                     .ok()
                     .and_then(|config| config.config.inference);
                 localmind_store::run_eval_lift(&fixtures, k, &work_root, inference.as_ref())

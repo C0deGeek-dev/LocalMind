@@ -4,6 +4,44 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0026 — The retrieval rerank stage is host-wired, not deleted; the stored-vector entry point is the host seam
+
+- **Date**: 2026-07-07
+- **Status**: accepted
+
+`localmind-search` (hybrid memory search, the deterministic rank blend, and
+the opt-in embedding rerank stage) plus the `[retrieval] rerank` /
+`rerank_window` config keys shipped engine-side with **zero consumers**,
+while the reference host ran its own retrieval — the exact
+parallel-implementations drift the ecosystem rules exist to prevent. The
+owner decision is **wire, not delete**: the capability was built and
+extended deliberately (D-LM-0020/0022/0023 all invest in this crate), the
+config keys are shipped and documented, and the CPU embedding infrastructure
+already exists.
+
+How it is wired:
+
+1. **`rerank_scored`** joins `rerank_hits` as the crate's second rerank entry
+   point: it reorders an already-ranked candidate list by *precomputed*
+   query-to-hit cosines. A host that has already scored its candidates
+   against the stored `vector_index` (the injection path does, for its
+   relevance gate) reuses those scores instead of re-embedding hit texts per
+   query — no second embedding pass on a latency-sensitive path.
+2. **Same contract as `rerank_hits`:** only the top `rerank_window` hits may
+   move; the tail keeps blend order; a hit without a stored vector keeps its
+   exact slot (unknown relevance never demotes below the deterministic
+   blend); fewer than two scored hits, or a sub-2 window, is the identity.
+3. **The `[retrieval]` keys govern it end-to-end:** `rerank = false` (the
+   default) or no embedding endpoint ⇒ the host path is byte-identical to
+   the unranked flow (`ProjectConfig::rerank_active` stays the single gate).
+4. The keyword search stays the **candidate floor** (D-LM-0022): rerank
+   reorders keyword candidates, it never introduces hits of its own.
+
+The host consumption itself (which host, which call site) is a host decision;
+the engine guarantee is that both rerank entry points behave identically with
+the stage off. Supersedes the "library-only, wire-or-remove" limbo recorded
+by the 2026-07-06 environment review.
+
 ## D-LM-0025 — OKF (Open Knowledge Format) interop is an import/export profile over the canonical Markdown format, not a storage switch
 
 - **Date**: 2026-07-04

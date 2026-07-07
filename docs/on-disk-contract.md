@@ -207,6 +207,14 @@ databases newer than it understands. Tables:
 | `skill_records(skill_id, draft_json, status, source_memory_ids_json, created_at, updated_at)` | active/retired skill lifecycle | activation and retirement are audited |
 | `graph_nodes`, `graph_edges`, `graph_meta` | code-structure graph | payload format versioned separately via `graph_meta.format_version` (`GRAPH_FORMAT_VERSION`, currently 1) |
 
+Concurrency contract: every production component opens the database in
+**WAL** journal mode with a 5-second busy timeout and `synchronous=NORMAL`,
+so the host process (e.g. an agent session) and the CLI can overlap on the
+same file without immediate `SQLITE_BUSY` failures. WAL keeps `-wal` and
+`-shm` sidecar files beside `localmind.sqlite` — anything that copies or
+backs up a store must take the sidecars with it (or open the database once
+so SQLite checkpoints them back into the main file).
+
 Write-consistency contract: multi-statement writes (promote, persist,
 delete) commit atomically; the Markdown file write precedes the indexing
 transaction, and deletion removes the file before the database rows so an

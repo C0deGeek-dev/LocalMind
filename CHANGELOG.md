@@ -5,6 +5,23 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- The retrieval rerank stage gained a stored-vector entry point
+  (`rerank_scored`) so a host that already scored its candidates against the
+  `vector_index` can rerank without re-embedding hit texts per query; the
+  `[retrieval] rerank`/`rerank_window` keys now take effect through the
+  LocalPilot host's memory-injection retrieval (D-LM-0026). Default off and
+  byte-identical to the blend order when off or without an embedding
+  endpoint.
+- Every production database open now sets WAL journal mode, a 5-second busy
+  timeout, and `synchronous=NORMAL` through one shared helper — the host and
+  the CLI share `.localmind/localmind.sqlite`, and an overlap previously
+  failed immediately with `SQLITE_BUSY`. WAL adds `-wal`/`-shm` sidecar files
+  beside the database (see `docs/on-disk-contract.md`).
+- `status` counts only items actually awaiting review as pending — an
+  accepted, rejected, or deferred candidate no longer inflated the count.
+- `status` and `eval` accept `--project` like their sibling commands instead
+  of silently reading the current directory.
+
 ## v2.2.0 - 2026-07-06
 
 Coordinated LocalX release.

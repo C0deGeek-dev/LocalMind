@@ -199,12 +199,13 @@ from the CLI alone:
 | Import → closeout → review → promote → search (FTS5) → audit → context export | ✅ | The core loop |
 | Signed memory bundle export/import, `eval`, `status`, skill drafts | ✅ | |
 | Batch `insights` (distill/research) | ✅ (needs `[inference]`) | Model-backed; skipped with a notice when no endpoint |
-| Hybrid keyword+vector search, rerank | host-mounted | Engine has it; the CLI search is keyword (FTS5) only |
+| Hybrid keyword+vector search, rerank | host-mounted | The LocalPilot host runs the rerank stage on its memory-injection retrieval (D-LM-0026); the CLI search is keyword (FTS5) only |
 | Code graph (ingest/query/impact/primer), MCP graph tools | host-mounted | No CLI subcommand drives these |
 | Freshness pass, usage stats, provenance, source revalidation, memory delete | host-mounted | Exposed by the LocalPilot `learning`/`memory` commands |
 
-The `[retrieval] rerank` config keys are accepted and validated but only take
-effect through a host that runs the rerank stage.
+The `[retrieval] rerank` config keys take effect through a host that runs the
+rerank stage (default off; without an embedding endpoint the deterministic
+blend order is the whole story).
 
 **`local_only` note.** `local_only = true` is mandatory (setting it `false` is a
 typed error), but it constrains *scope* (memory is same-machine), not the

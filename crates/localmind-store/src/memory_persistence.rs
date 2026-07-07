@@ -125,11 +125,12 @@ impl MemoryPersistence {
             }
         })?;
         let db_path = state_dir.join("localmind.sqlite");
-        let connection =
-            Connection::open(&db_path).map_err(|source| MemoryPersistenceError::OpenDatabase {
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            MemoryPersistenceError::OpenDatabase {
                 path: db_path,
                 source,
-            })?;
+            }
+        })?;
         let global = Self::open_global(&config)?;
         let persistence = Self {
             config,
@@ -161,11 +162,12 @@ impl MemoryPersistence {
             }
         })?;
         let db_path = state_dir.join("localmind.sqlite");
-        let connection =
-            Connection::open(&db_path).map_err(|source| MemoryPersistenceError::OpenDatabase {
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            MemoryPersistenceError::OpenDatabase {
                 path: db_path,
                 source,
-            })?;
+            }
+        })?;
         crate::schema::migrate(&connection).map_err(MemoryPersistenceError::Schema)?;
         Ok(Some(GlobalStore { connection }))
     }

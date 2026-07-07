@@ -9,7 +9,7 @@ mod rerank;
 mod workspace;
 
 pub use rank::{combined_score, proximity_score, temporal_score, RankingConfig, SearchWeights};
-pub use rerank::{rerank_hits, RerankEmbedder, RerankError, RerankOptions};
+pub use rerank::{rerank_hits, rerank_scored, RerankEmbedder, RerankError, RerankOptions};
 pub use workspace::{search_workspace, RankedHit, SearchHitKind, WorkspaceQuery};
 
 use localmind_core::ContextQuery;

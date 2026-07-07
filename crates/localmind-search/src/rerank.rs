@@ -120,6 +120,62 @@ fn hit_text(hit: &RankedHit) -> String {
     }
 }
 
+/// Rerank an already-ranked hit list by **precomputed** query-to-hit cosine
+/// scores — the stored-vector sibling of [`rerank_hits`] for a host that has
+/// already scored its candidates against the `vector_index` (no re-embedding
+/// of hit texts). Same contract as [`rerank_hits`]: only the top `window`
+/// hits may move, the tail keeps its order, and `window < 2` or fewer than
+/// two hits is the identity. A hit without a cosine keeps its exact slot
+/// (unknown relevance never demotes a hit below where the deterministic
+/// blend put it — the conservative direction); the scored hits redistribute
+/// among the scored slots by cosine, original order breaking ties.
+pub fn rerank_scored<T>(
+    mut hits: Vec<T>,
+    window: usize,
+    cosine_of: impl Fn(&T) -> Option<f32>,
+) -> Vec<T> {
+    if hits.len() < 2 || window < 2 {
+        return hits;
+    }
+    let window = window.min(hits.len());
+    let mut scored: Vec<(usize, f32)> = hits[..window]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hit)| cosine_of(hit).map(|cosine| (index, cosine)))
+        .collect();
+    if scored.len() < 2 {
+        return hits;
+    }
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    // Redistribute the scored hits over the same slots, best cosine first;
+    // unscored hits (and the tail) never move.
+    let mut taken: Vec<Option<T>> = hits.drain(..).map(Some).collect();
+    let mut picked = std::collections::VecDeque::with_capacity(scored.len());
+    for (index, _) in scored {
+        if let Some(hit) = taken[index].take() {
+            picked.push_back(hit);
+        }
+    }
+    let mut reordered: Vec<T> = Vec::with_capacity(taken.len());
+    for slot in taken {
+        match slot {
+            Some(hit) => reordered.push(hit),
+            None => {
+                if let Some(hit) = picked.pop_front() {
+                    reordered.push(hit);
+                }
+            }
+        }
+    }
+    reordered
+}
+
 /// Cosine similarity in `[-1, 1]`; `0.0` for mismatched, empty, or zero vectors.
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     if left.len() != right.len() || left.is_empty() {
@@ -251,5 +307,47 @@ mod tests {
         // Window {a,b} both score 0 → keep order; c stays in the tail.
         assert_eq!(ids(&after), vec!["a", "b", "c"]);
         Ok(())
+    }
+
+    #[test]
+    fn precomputed_scores_reorder_only_the_scored_slots() {
+        // ("id", Option<cosine>) — b has no stored vector and must keep its
+        // exact slot; a and c redistribute over slots 0 and 2 by cosine.
+        let hits = vec![("a", Some(0.1_f32)), ("b", None), ("c", Some(0.9))];
+        let after = super::rerank_scored(hits, 10, |hit| hit.1);
+        let order: Vec<&str> = after.iter().map(|hit| hit.0).collect();
+        assert_eq!(order, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn precomputed_scores_respect_the_window() {
+        // The best cosine sits outside the window and must not move.
+        let hits = vec![("a", Some(0.2_f32)), ("b", Some(0.5)), ("c", Some(0.9))];
+        let after = super::rerank_scored(hits, 2, |hit| hit.1);
+        let order: Vec<&str> = after.iter().map(|hit| hit.0).collect();
+        assert_eq!(order, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn precomputed_scores_are_the_identity_when_there_is_nothing_to_rerank() {
+        // Fewer than two scored hits, a sub-2 window, or a short list — all
+        // identity (the determinism floor for the stored-vector path).
+        let single_scored = vec![("a", Some(0.9_f32)), ("b", None), ("c", None)];
+        let after = super::rerank_scored(single_scored, 10, |hit| hit.1);
+        assert_eq!(
+            after.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+
+        let tiny_window = vec![("a", Some(0.1_f32)), ("b", Some(0.9))];
+        let after = super::rerank_scored(tiny_window, 1, |hit| hit.1);
+        assert_eq!(
+            after.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        let short: Vec<(&str, Option<f32>)> = vec![("a", Some(0.1))];
+        let after = super::rerank_scored(short, 10, |hit| hit.1);
+        assert_eq!(after.len(), 1);
     }
 }

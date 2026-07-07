@@ -29,11 +29,12 @@ impl GraphStore {
             source,
         })?;
         let db_path = state_dir.join(REVIEW_DB_FILE_NAME);
-        let connection =
-            Connection::open(&db_path).map_err(|source| GraphStoreError::OpenDatabase {
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            GraphStoreError::OpenDatabase {
                 path: db_path,
                 source,
-            })?;
+            }
+        })?;
         Self::from_connection(connection)
     }
 

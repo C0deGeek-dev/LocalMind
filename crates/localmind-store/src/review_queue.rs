@@ -54,11 +54,12 @@ impl ReviewQueue {
             source,
         })?;
         let db_path = state_dir.join(REVIEW_DB_FILE_NAME);
-        let connection =
-            Connection::open(&db_path).map_err(|source| ReviewQueueError::OpenDatabase {
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            ReviewQueueError::OpenDatabase {
                 path: db_path,
                 source,
-            })?;
+            }
+        })?;
         let queue = Self { connection };
         queue.migrate()?;
         Ok(queue)

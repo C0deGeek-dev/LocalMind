@@ -19,6 +19,33 @@ use thiserror::Error;
 /// Highest schema version this build understands.
 pub(crate) const DB_SCHEMA_VERSION: i32 = 8;
 
+/// How long a connection waits on a locked database before failing.
+///
+/// The host (e.g. a LocalPilot session) and the CLI legitimately open the
+/// same `.localmind/localmind.sqlite` concurrently; without a timeout any
+/// overlap surfaces as an immediate `SQLITE_BUSY`.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Open the shared database the way every production component must: WAL
+/// journal (readers don't block the writer across processes), a busy
+/// timeout, and `synchronous=NORMAL` (the standard WAL pairing — durable at
+/// checkpoint, not per-write fsync). WAL is a persistent database property
+/// but the busy timeout is per-connection, so this helper is the single
+/// sanctioned way to open the file.
+///
+/// WAL adds `-wal`/`-shm` sidecar files beside the database; the on-disk
+/// contract documents them.
+pub(crate) fn open_database(path: &std::path::Path) -> Result<Connection, rusqlite::Error> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    // `journal_mode` answers with the resulting mode, so it needs the checked
+    // variant; accept whatever SQLite settled on (the mode itself is pinned
+    // by the contention test, not here).
+    connection.pragma_update_and_check(None, "journal_mode", "WAL", |_row| Ok(()))?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(connection)
+}
+
 pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     let current: i32 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -278,8 +305,61 @@ pub enum SchemaError {
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate, SchemaError, DB_SCHEMA_VERSION};
+    use super::{migrate, open_database, SchemaError, DB_SCHEMA_VERSION};
     use rusqlite::Connection;
+
+    #[test]
+    fn two_processes_worth_of_connections_share_the_database(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The host and the CLI open the same file concurrently. With WAL +
+        // busy_timeout a second writer waits for the first instead of
+        // failing SQLITE_BUSY — the exact cross-process overlap the
+        // bare-`Connection::open` sites could not survive.
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("localmind.sqlite");
+        let writer = open_database(&path)?;
+        migrate(&writer)?;
+        let mode: String = writer.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let timeout: i64 = writer.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        assert!(timeout >= 5_000, "busy timeout must be set, got {timeout}");
+
+        // Hold a write transaction on connection A…
+        writer.execute_batch("BEGIN IMMEDIATE")?;
+        writer.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)
+             ON CONFLICT(version) DO UPDATE SET applied_at = excluded.applied_at",
+            rusqlite::params![9_000, "held"],
+        )?;
+
+        // …and write through connection B on another thread while A commits
+        // after a delay. Without the busy timeout this insert fails
+        // immediately with `database is locked`.
+        let path_b = path.clone();
+        let second = std::thread::spawn(move || -> Result<(), rusqlite::Error> {
+            let cli = open_database(&path_b)?;
+            cli.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)
+                 ON CONFLICT(version) DO UPDATE SET applied_at = excluded.applied_at",
+                rusqlite::params![9_001, "second-writer"],
+            )?;
+            Ok(())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        writer.execute_batch("COMMIT")?;
+        // The second writer must outwait the lock, not fail SQLITE_BUSY.
+        second
+            .join()
+            .map_err(|_| "second-writer thread panicked")??;
+
+        let rows: i64 = writer.query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version IN (9000, 9001)",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 2, "both writers' rows must land");
+        Ok(())
+    }
 
     #[test]
     fn fresh_database_steps_to_current_version() -> Result<(), Box<dyn std::error::Error>> {

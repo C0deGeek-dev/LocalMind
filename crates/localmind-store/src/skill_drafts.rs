@@ -339,7 +339,7 @@ impl SkillDraftStore {
             path: state_dir.clone(),
             source,
         })?;
-        let connection = Connection::open(state_dir.join("localmind.sqlite"))
+        let connection = crate::schema::open_database(&state_dir.join("localmind.sqlite"))
             .map_err(SkillDraftError::Sqlite)?;
         crate::schema::migrate(&connection).map_err(SkillDraftError::Schema)?;
         Ok(connection)

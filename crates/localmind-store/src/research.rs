@@ -4,7 +4,7 @@ use localmind_core::{
     SuggestedAction,
 };
 use localmind_inference::{ChatMessage, InferenceCapability};
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -183,7 +183,7 @@ fn record_distilled_rows(
 ) -> Result<(), BatchInsightError> {
     let state_dir = project_root.join(".localmind");
     fs::create_dir_all(&state_dir).map_err(BatchInsightError::Io)?;
-    let connection = Connection::open(state_dir.join("localmind.sqlite"))?;
+    let connection = crate::schema::open_database(&state_dir.join("localmind.sqlite"))?;
     crate::schema::migrate(&connection)?;
     for candidate in candidates {
         connection.execute(
