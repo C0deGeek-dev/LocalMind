@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.3.0 - 2026-07-07
+
+Coordinated LocalX release.
+
 - The retrieval rerank stage gained a stored-vector entry point
   (`rerank_scored`) so a host that already scored its candidates against the
   `vector_index` can rerank without re-embedding hit texts per query; the
