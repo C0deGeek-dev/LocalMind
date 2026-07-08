@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 8;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 9;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -87,6 +87,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 8 {
         apply_v8(&tx)?;
+    }
+    if current < 9 {
+        apply_v9(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -292,6 +295,31 @@ fn apply_v8(connection: &Connection) -> Result<(), SchemaError> {
         .map_err(SchemaError::Sqlite)
 }
 
+/// Document semantic-ingest support: chunked repository documentation stored as
+/// retrievable text keyed by a stable chunk id. Each chunk's vector lives in the
+/// shared `vector_index` under `subject_kind = 'doc'` (already generic since v2);
+/// this table holds the passage text so a semantic hit can be shown and cited.
+/// Idempotent create so re-running the migration is a no-op.
+fn apply_v9(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS doc_chunk (
+                chunk_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                heading TEXT,
+                body TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_doc_chunk_path
+                ON doc_chunk(path);
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error(
@@ -438,6 +466,27 @@ mod tests {
         )?;
         assert_eq!(hits, 3);
         assert_eq!(last.as_deref(), Some("then"));
+        Ok(())
+    }
+
+    #[test]
+    fn v9_adds_the_doc_chunk_table() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        connection.execute(
+            "INSERT INTO doc_chunk(chunk_id, path, ordinal, heading, body, updated_at)
+             VALUES('p#0', 'p', 0, 'H', 'text', 'now')",
+            [],
+        )?;
+        // A chunk with no heading (NULL) is allowed too.
+        connection.execute(
+            "INSERT INTO doc_chunk(chunk_id, path, ordinal, body, updated_at)
+             VALUES('p#1', 'p', 1, 'more', 'now')",
+            [],
+        )?;
+        let count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM doc_chunk", [], |row| row.get(0))?;
+        assert_eq!(count, 2);
         Ok(())
     }
 

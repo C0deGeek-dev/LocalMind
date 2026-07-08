@@ -8,7 +8,9 @@ mod catalog;
 mod graph;
 mod skills;
 
-pub use catalog::{catalog, ToolSpec, TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_SEARCH};
+pub use catalog::{
+    catalog, ToolSpec, TOOL_DOC_SEARCH, TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_SEARCH,
+};
 pub use graph::{
     handle, tool_names, AnchoredKnowledge, GraphToolError, GraphToolRequest, GraphToolResponse,
     SymbolSummary, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE,

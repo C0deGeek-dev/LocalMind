@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use localmind_mcp::{
-    catalog, fetch_active_skill, handle, list_active_skills, GraphToolRequest,
+    catalog, fetch_active_skill, handle, list_active_skills, GraphToolRequest, TOOL_DOC_SEARCH,
     TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_SEARCH, TOOL_SKILL_FETCH, TOOL_SKILL_LIST,
     TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE, TOOL_SYMBOL_NEIGHBORHOOD,
 };
@@ -116,6 +116,7 @@ fn call_tool(project: &Path, params: &Value) -> Result<String, ToolFailure> {
     match name {
         TOOL_MEMORY_SEARCH => memory_search(project, args),
         TOOL_MEMORY_CONTEXT_EXPORT => memory_context_export(project, args),
+        TOOL_DOC_SEARCH => doc_search(project, args),
         TOOL_SYMBOL_NEIGHBORHOOD => graph_tool(
             project,
             GraphToolRequest::MemorySymbolNeighborhood {
@@ -191,6 +192,27 @@ fn memory_context_export(project: &Path, args: &Value) -> Result<String, ToolFai
     let exporter = ContextExporter::open_project(project).map_err(exec)?;
     let export = exporter.export(&query, target).map_err(exec)?;
     Ok(export.body_markdown)
+}
+
+fn doc_search(project: &Path, args: &Value) -> Result<String, ToolFailure> {
+    let query = str_arg(args, "query")?;
+    let limit = usize::try_from(u32_arg(args, "limit", 5)).unwrap_or(5);
+    let persistence = MemoryPersistence::open_project(project).map_err(exec)?;
+    let results = persistence.doc_search(&query, limit).map_err(exec)?;
+    if results.is_empty() {
+        return Ok(
+            "No documentation matched this query (or embeddings are not configured).".to_string(),
+        );
+    }
+    let mut out = String::new();
+    for result in results {
+        let heading = result.heading.unwrap_or_default();
+        out.push_str(&format!(
+            "{}  #{}  {}  (score {:.3})\n{}\n\n",
+            result.path, result.ordinal, heading, result.score, result.body
+        ));
+    }
+    Ok(out)
 }
 
 fn graph_tool(project: &Path, request: GraphToolRequest) -> Result<String, ToolFailure> {

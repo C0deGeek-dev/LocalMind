@@ -17,6 +17,8 @@ use crate::skills::{TOOL_SKILL_FETCH, TOOL_SKILL_LIST};
 pub const TOOL_MEMORY_SEARCH: &str = "memory_search";
 /// Wire name of the agent context-pack export tool.
 pub const TOOL_MEMORY_CONTEXT_EXPORT: &str = "memory_context_export";
+/// Wire name of the semantic documentation search tool.
+pub const TOOL_DOC_SEARCH: &str = "doc_search";
 
 /// One tool advertised in a `tools/list` response.
 #[derive(Clone, Debug, Serialize)]
@@ -58,6 +60,17 @@ pub fn catalog() -> Vec<ToolSpec> {
                         "enum": ["generic", "claude-code", "open-ai-codex", "localpilot"],
                         "description": "Formatting target. Defaults to claude-code."
                     }
+                }),
+                &["query"],
+            ),
+        },
+        ToolSpec {
+            name: TOOL_DOC_SEARCH,
+            description: "Semantic search over ingested repository documentation. Returns the most relevant doc passages (path, heading, text) by meaning, not keyword.",
+            input_schema: object_schema(
+                json!({
+                    "query": { "type": "string", "description": "Natural-language query." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Max passages (default 5)." }
                 }),
                 &["query"],
             ),
@@ -116,9 +129,9 @@ mod tests {
     use super::catalog;
 
     #[test]
-    fn catalog_lists_all_eight_tools_with_schemas() {
+    fn catalog_lists_all_tools_with_schemas() {
         let tools = catalog();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         for tool in &tools {
             assert!(!tool.name.is_empty());
             assert_eq!(tool.input_schema["type"], "object");

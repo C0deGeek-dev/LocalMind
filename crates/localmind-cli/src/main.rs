@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod graph;
+mod ingest;
 mod mcp;
 
 #[derive(Debug, Parser)]
@@ -113,6 +114,11 @@ enum Command {
         #[command(subcommand)]
         command: GraphCommand,
     },
+    /// Ingest documentation (prose) into the semantic doc index.
+    Ingest {
+        #[command(subcommand)]
+        command: IngestCommand,
+    },
     /// Serve LocalMind query tools to an MCP client over stdio.
     Mcp {
         #[command(subcommand)]
@@ -146,6 +152,18 @@ enum GraphCommand {
         /// Repository root to ingest.
         path: PathBuf,
         /// Project root containing .localmind.toml (holds the graph store).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IngestCommand {
+    /// Chunk and embed Markdown docs under a path into the semantic doc index.
+    Docs {
+        /// Root directory to ingest Markdown from.
+        path: PathBuf,
+        /// Project root containing .localmind.toml.
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -821,6 +839,9 @@ fn main() -> Result<()> {
         },
         Command::Graph { command } => match command {
             GraphCommand::Reindex { path, project } => graph::reindex(path, project)?,
+        },
+        Command::Ingest { command } => match command {
+            IngestCommand::Docs { path, project } => ingest::docs(path, project)?,
         },
         Command::Mcp { command } => match command {
             McpCommand::Serve { project } => mcp::serve(project)?,

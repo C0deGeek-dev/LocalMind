@@ -77,6 +77,17 @@ pub struct VectorSearchResult {
     pub score: f32,
 }
 
+/// One semantic hit over ingested documentation: the source file, the chunk's
+/// ordinal and (optional) heading, the passage text, and the cosine score.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocSearchResult {
+    pub path: String,
+    pub ordinal: i64,
+    pub heading: Option<String>,
+    pub body: String,
+    pub score: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryRecord {
     pub memory_id: MemoryEntryId,
@@ -609,6 +620,31 @@ impl MemoryPersistence {
         model: &str,
         vector: &[f32],
     ) -> Result<bool, MemoryPersistenceError> {
+        Self::upsert_vector_row(
+            connection,
+            "memory",
+            memory_id.as_str(),
+            source_fingerprint,
+            model,
+            vector,
+        )
+    }
+
+    /// Upsert one row into the shared `vector_index`, keyed by
+    /// `(subject_kind, subject_id)`. The fingerprint short-circuit makes a
+    /// re-embed of unchanged content a no-op (returns `Ok(false)`); a changed
+    /// fingerprint or a new subject writes the vector and returns `Ok(true)`.
+    /// `subject_kind` is `'memory'` for accepted lessons and `'doc'` for
+    /// ingested documentation chunks — both share ranking in
+    /// [`vector_search`](Self::vector_search).
+    fn upsert_vector_row(
+        connection: &Connection,
+        subject_kind: &str,
+        subject_id: &str,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
         if vector.is_empty() {
             return Err(MemoryPersistenceError::InvalidVector {
                 detail: "vector must not be empty".to_string(),
@@ -616,8 +652,8 @@ impl MemoryPersistence {
         }
         let existing: Option<String> = connection
             .query_row(
-                "SELECT source_fingerprint FROM vector_index WHERE subject_kind = 'memory' AND subject_id = ?1",
-                params![memory_id.as_str()],
+                "SELECT source_fingerprint FROM vector_index WHERE subject_kind = ?1 AND subject_id = ?2",
+                params![subject_kind, subject_id],
                 |row| row.get(0),
             )
             .optional()
@@ -632,7 +668,7 @@ impl MemoryPersistence {
                 r#"
                 INSERT INTO vector_index
                 (subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)
-                VALUES('memory', ?1, ?2, ?3, ?4, ?5, ?6)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
                     source_fingerprint = excluded.source_fingerprint,
                     model = excluded.model,
@@ -641,7 +677,8 @@ impl MemoryPersistence {
                     updated_at = excluded.updated_at
                 "#,
                 params![
-                    memory_id.as_str(),
+                    subject_kind,
+                    subject_id,
                     source_fingerprint,
                     model,
                     i64::try_from(vector.len()).map_err(|_| MemoryPersistenceError::InvalidVector {
@@ -656,14 +693,131 @@ impl MemoryPersistence {
             connection,
             AuditEventKind::VectorIndexUpdated,
             "localmind",
-            memory_id.as_str(),
+            subject_id,
             &serde_json::json!({
-                "subject_kind": "memory",
+                "subject_kind": subject_kind,
                 "model": model,
                 "dimensions": vector.len(),
             }),
         )?;
         Ok(true)
+    }
+
+    /// Ingest one documentation chunk: store its text in `doc_chunk` and, when an
+    /// embedding endpoint is configured and reachable, embed the body into
+    /// `vector_index` under `subject_kind = 'doc'`. The text row is written
+    /// unconditionally (so re-ingest is idempotent and the passage is always
+    /// citable); the vector is a best-effort addendum — a down endpoint leaves
+    /// the chunk searchable only once re-ingested with embeddings up. Returns
+    /// whether a vector was written.
+    pub fn ingest_doc_chunk(
+        &self,
+        chunk_id: &str,
+        path: &str,
+        ordinal: i64,
+        heading: Option<&str>,
+        body: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO doc_chunk(chunk_id, path, ordinal, heading, body, updated_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    path = excluded.path,
+                    ordinal = excluded.ordinal,
+                    heading = excluded.heading,
+                    body = excluded.body,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    chunk_id,
+                    path,
+                    ordinal,
+                    heading,
+                    body,
+                    OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(false);
+        };
+        let vectors = match endpoint.embed(std::slice::from_ref(&body.to_string())) {
+            Ok(vectors) => vectors,
+            // Best-effort: a down endpoint leaves the chunk text stored without a
+            // vector rather than failing the ingest.
+            Err(_) => return Ok(false),
+        };
+        let Some(vector) = vectors.first() else {
+            return Ok(false);
+        };
+        Self::upsert_vector_row(
+            &self.connection,
+            "doc",
+            chunk_id,
+            &content_fingerprint(body),
+            endpoint.model(),
+            vector,
+        )
+    }
+
+    /// Semantic search over ingested documentation chunks. Embeds the query,
+    /// ranks it against every stored vector, keeps the `'doc'` hits, and joins
+    /// their passage text. Returns an empty result when embeddings are not
+    /// configured or the endpoint is unreachable (semantic doc search needs a
+    /// query vector) — callers keep working, just without doc hits.
+    pub fn doc_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DocSearchResult>, MemoryPersistenceError> {
+        let Some(query_vector) = self.embed_query(query)? else {
+            return Ok(Vec::new());
+        };
+        // Over-fetch before the 'doc' filter: vector_search ranks memory and doc
+        // subjects together, so ask for enough to still fill `limit` doc hits.
+        let ranked = self.vector_search(&query_vector, limit.saturating_mul(4).max(limit))?;
+        let mut results = Vec::new();
+        for hit in ranked {
+            if hit.subject_kind != "doc" {
+                continue;
+            }
+            let row = self
+                .connection
+                .query_row(
+                    "SELECT path, ordinal, heading, body FROM doc_chunk WHERE chunk_id = ?1",
+                    params![hit.subject_id],
+                    |row| {
+                        Ok(DocSearchResult {
+                            path: row.get(0)?,
+                            ordinal: row.get(1)?,
+                            heading: row.get(2)?,
+                            body: row.get(3)?,
+                            score: hit.score,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            if let Some(result) = row {
+                results.push(result);
+            }
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Number of ingested documentation chunks (text rows), independent of how
+    /// many carry a vector.
+    pub fn doc_chunk_count(&self) -> Result<i64, MemoryPersistenceError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM doc_chunk", [], |row| row.get(0))
+            .map_err(MemoryPersistenceError::Sqlite)
     }
 
     pub fn vector_search(
