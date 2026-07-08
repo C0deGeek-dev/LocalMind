@@ -7,12 +7,14 @@
 //! way to bypass the review gate. The frontend is one self-contained HTML file
 //! embedded at build time.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId};
-use localmind_store::{MemoryPersistence, ReviewQueue};
+use localmind_mcp::{handle, GraphToolRequest};
+use localmind_store::{GraphStore, MemoryPersistence, ReviewQueue};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -69,8 +71,13 @@ fn route(
         (Method::Post, ["api", "review", id, action]) => {
             api_review_action(project, id, action, &body)
         }
-        (Method::Get, ["api", "memory"]) => api_memory_search(project, query),
+        (Method::Get, ["api", "memory"]) => api_memory_list(project, query),
+        (Method::Get, ["api", "memory", id]) => api_memory_get(project, id),
         (Method::Delete, ["api", "memory", id]) => api_memory_delete(project, id),
+        (Method::Get, ["api", "docs"]) => api_docs(project, query),
+        (Method::Get, ["api", "graph"]) => api_graph(project, query),
+        (Method::Get, ["api", "audit"]) => api_audit(project, query),
+        (Method::Get, ["api", "stats"]) => api_stats(project),
         _ => Err(anyhow!("not found: {method:?} {path}")),
     };
 
@@ -216,23 +223,216 @@ fn api_bulk(project: &Path, body: &str) -> Result<Value> {
     Ok(json!({ "action": action, "done": done, "errors": errors }))
 }
 
-fn api_memory_search(project: &Path, query: &str) -> Result<Value> {
-    let q = query_param(query, "query").unwrap_or_default();
+/// Accepted memory: ranked search when `query` is present, else the full list,
+/// with optional `scope`/`category` filters.
+fn api_memory_list(project: &Path, query: &str) -> Result<Value> {
+    let text = query_param(query, "query").filter(|q| !q.is_empty());
+    let scope_filter = query_param(query, "scope");
+    let category_filter = query_param(query, "category");
+    let persistence = MemoryPersistence::open_project(project)?;
+
+    if let Some(text) = text {
+        let items: Vec<Value> = persistence
+            .search(&text)?
+            .into_iter()
+            .filter(|r| matches_filter(&r.category, category_filter.as_deref()))
+            .map(|r| {
+                json!({
+                    "id": r.memory_id.to_string(),
+                    "category": r.category,
+                    "score": r.score,
+                    "path": r.path.display().to_string(),
+                    "snippet": r.snippet,
+                    "stale": r.stale_candidate,
+                    "hit_count": r.hit_count,
+                })
+            })
+            .collect();
+        return Ok(json!({ "mode": "search", "items": items }));
+    }
+
+    let items: Vec<Value> = persistence
+        .list_memory()?
+        .into_iter()
+        .filter(|r| matches_filter(&r.scope, scope_filter.as_deref()))
+        .filter(|r| matches_filter(&r.category, category_filter.as_deref()))
+        .map(|r| {
+            json!({
+                "id": r.memory_id.to_string(),
+                "category": r.category,
+                "scope": r.scope,
+                "status": r.status,
+                "snippet": truncate(&r.body, 200),
+                "hit_count": r.hit_count,
+                "stale": r.stale_candidate,
+                "contradicted": r.contradicted,
+            })
+        })
+        .collect();
+    Ok(json!({ "mode": "list", "items": items }))
+}
+
+/// One accepted memory in full, with its provenance ("why do you think that?").
+fn api_memory_get(project: &Path, id: &str) -> Result<Value> {
+    let persistence = MemoryPersistence::open_project(project)?;
+    let record = persistence
+        .list_memory()?
+        .into_iter()
+        .find(|r| r.memory_id.as_str() == id)
+        .ok_or_else(|| anyhow!("accepted memory not found: {id}"))?;
+    let provenance = persistence
+        .provenance(&MemoryEntryId::new(id))?
+        .map(|p| {
+            json!({
+                "source_session": p.source_session,
+                "confidence": p.confidence,
+                "epistemic_status": format!("{:?}", p.epistemic_status),
+                "status": p.status,
+                "stale": p.stale_candidate,
+                "contradicts": p.contradicts.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            })
+        });
+    Ok(json!({
+        "id": record.memory_id.to_string(),
+        "category": record.category,
+        "scope": record.scope,
+        "status": record.status,
+        "body": record.body,
+        "hit_count": record.hit_count,
+        "last_used_at": record.last_used_at,
+        "stale": record.stale_candidate,
+        "contradicted": record.contradicted,
+        "provenance": provenance,
+    }))
+}
+
+/// Semantic search over ingested documentation.
+fn api_docs(project: &Path, query: &str) -> Result<Value> {
+    let q = query_param(query, "q")
+        .or_else(|| query_param(query, "query"))
+        .unwrap_or_default();
+    let limit = query_param(query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 50);
     let persistence = MemoryPersistence::open_project(project)?;
     let results: Vec<Value> = persistence
-        .search(&q)?
+        .doc_search(&q, limit)?
         .into_iter()
-        .map(|result| {
+        .map(|r| {
             json!({
-                "memory_id": result.memory_id.to_string(),
-                "score": result.score,
-                "path": result.path.display().to_string(),
-                "category": result.category,
-                "snippet": result.snippet,
+                "path": r.path,
+                "ordinal": r.ordinal,
+                "heading": r.heading,
+                "score": r.score,
+                "body": r.body,
             })
         })
         .collect();
     Ok(json!({ "results": results }))
+}
+
+/// Code-graph query: one of neighborhood / connection / coverage / knowledge.
+fn api_graph(project: &Path, query: &str) -> Result<Value> {
+    let tool = query_param(query, "tool").unwrap_or_else(|| "neighborhood".to_string());
+    let symbol = query_param(query, "symbol").unwrap_or_default();
+    let request = match tool.as_str() {
+        "connection" => GraphToolRequest::MemorySymbolConnection {
+            from: query_param(query, "from").unwrap_or_default(),
+            to: query_param(query, "to").unwrap_or_default(),
+            max_hops: query_param(query, "max_hops")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6),
+        },
+        "coverage" => GraphToolRequest::MemorySymbolCoverage { symbol },
+        "knowledge" => GraphToolRequest::MemorySymbolKnowledge { symbol },
+        _ => GraphToolRequest::MemorySymbolNeighborhood {
+            symbol,
+            depth: query_param(query, "depth")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
+        },
+    };
+    let store = GraphStore::open_project(project)?;
+    // A typed graph error (unknown/ambiguous symbol) is a soft, user-facing
+    // result, not a 400 — surface it in the payload.
+    match handle(&store, &request) {
+        Ok(response) => Ok(serde_json::to_value(&response)?),
+        Err(error) => Ok(json!({ "graph_error": error.to_string() })),
+    }
+}
+
+/// The audit trail, newest first.
+fn api_audit(project: &Path, query: &str) -> Result<Value> {
+    let limit = query_param(query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let persistence = MemoryPersistence::open_project(project)?;
+    let mut records = persistence.audit_records()?;
+    records.reverse();
+    let items: Vec<Value> = records
+        .into_iter()
+        .take(limit)
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "kind": r.kind,
+                "actor": r.actor,
+                "subject": r.subject,
+                "at": r.happened_at,
+            })
+        })
+        .collect();
+    Ok(json!({ "items": items }))
+}
+
+/// Dashboard aggregates across the queue, accepted memory, and the doc index.
+fn api_stats(project: &Path) -> Result<Value> {
+    let queue = ReviewQueue::open_project(project)?;
+    let queue_items = queue.list()?;
+    let mut pending_by_category: BTreeMap<String, usize> = BTreeMap::new();
+    let mut pending = 0usize;
+    for item in &queue_items {
+        if format!("{:?}", item.state) == "Pending" {
+            pending += 1;
+            *pending_by_category
+                .entry(format!("{:?}", item.candidate.category))
+                .or_default() += 1;
+        }
+    }
+    let persistence = MemoryPersistence::open_project(project)?;
+    let memory = persistence.list_memory()?;
+    let mut accepted_by_scope: BTreeMap<String, usize> = BTreeMap::new();
+    let mut accepted_by_category: BTreeMap<String, usize> = BTreeMap::new();
+    for record in &memory {
+        *accepted_by_scope.entry(record.scope.clone()).or_default() += 1;
+        *accepted_by_category
+            .entry(record.category.clone())
+            .or_default() += 1;
+    }
+    Ok(json!({
+        "pending": pending,
+        "accepted": memory.len(),
+        "doc_chunks": persistence.doc_chunk_count()?,
+        "pending_by_category": pending_by_category,
+        "accepted_by_scope": accepted_by_scope,
+        "accepted_by_category": accepted_by_category,
+    }))
+}
+
+fn matches_filter(value: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|f| f.is_empty() || value.eq_ignore_ascii_case(f))
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        trimmed.to_string()
+    } else {
+        let cut: String = trimmed.chars().take(max).collect();
+        format!("{cut}…")
+    }
 }
 
 fn api_memory_delete(project: &Path, id: &str) -> Result<Value> {
@@ -381,7 +581,7 @@ mod tests {
     #[test]
     fn index_html_is_embedded_and_self_contained() {
         // No external asset references — the page must be self-contained.
-        assert!(super::INDEX_HTML.contains("LocalMind Review"));
+        assert!(super::INDEX_HTML.contains("LocalMind"));
         assert!(!super::INDEX_HTML.contains("src=\"http"));
         assert!(!super::INDEX_HTML.contains("cdn"));
     }

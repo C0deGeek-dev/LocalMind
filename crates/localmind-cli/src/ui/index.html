@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LocalMind Review</title>
+<title>LocalMind</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
-    --fg:#e6e9ef; --muted:#9aa4b2; --accent:#69d987; --danger:#e5745f;
-    --warn:#d9b25f; --chip:#2a2f3a;
+    --fg:#e6e9ef; --muted:#9aa4b2; --accent:#69d987; --accent2:#59b0e6;
+    --danger:#e5745f; --warn:#d9b25f; --chip:#2a2f3a;
   }
   @media (prefers-color-scheme: light) {
     :root { --bg:#f6f7f9; --panel:#fff; --panel2:#f0f2f5; --line:#dde1e8;
@@ -17,168 +17,303 @@
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
     background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:16px; padding:12px 18px;
-    background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; font-weight:700; }
-  .stat { color:var(--muted); font-size:13px; }
-  .stat b { color:var(--fg); }
+  a { color:var(--accent2); }
+  header { display:flex; align-items:center; gap:6px; padding:9px 16px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; position:sticky; top:0; z-index:5; }
+  header h1 { font-size:15px; margin:0 14px 0 0; font-weight:700; }
+  nav a { padding:6px 11px; border-radius:6px; color:var(--muted); text-decoration:none; font-weight:500; }
+  nav a.on { background:var(--panel2); color:var(--fg); }
+  nav a:hover { color:var(--fg); }
   .grow { flex:1; }
+  .pill { color:var(--muted); font-size:13px; background:var(--panel2);
+    padding:4px 10px; border-radius:20px; border:1px solid var(--line); }
+  .pill b { color:var(--fg); }
   label.rev { color:var(--muted); font-size:13px; }
   input, textarea, select, button { font:inherit; color:inherit; }
-  input[type=text] { background:var(--panel2); border:1px solid var(--line);
+  input[type=text], select { background:var(--panel2); border:1px solid var(--line);
     border-radius:6px; padding:5px 8px; color:var(--fg); }
   button { background:var(--panel2); border:1px solid var(--line); color:var(--fg);
     border-radius:6px; padding:6px 11px; cursor:pointer; }
   button:hover { border-color:var(--muted); }
   button.primary { background:var(--accent); border-color:var(--accent); color:#0b130d; font-weight:600; }
   button.danger { color:var(--danger); }
-  main { display:grid; grid-template-columns:minmax(280px,380px) 1fr; height:calc(100vh - 106px); }
-  #list { overflow:auto; border-right:1px solid var(--line); }
+  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:20px;
+    background:var(--chip); color:var(--muted); margin-right:6px; white-space:nowrap; }
+  .badge { font-size:10px; padding:1px 6px; border-radius:20px; margin-left:5px; }
+  .badge.stale { background:rgba(217,178,95,.18); color:var(--warn); }
+  .badge.conflict { background:rgba(229,116,95,.18); color:var(--danger); }
+  #view { height:calc(100vh - 52px); overflow:hidden; }
+  .split { display:grid; grid-template-columns:minmax(300px,400px) 1fr; height:100%; }
+  .listcol { overflow:auto; border-right:1px solid var(--line); }
+  .detailcol { overflow:auto; padding:18px 22px; }
+  .toolbar { display:flex; align-items:center; gap:8px; padding:8px 14px;
+    border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; position:sticky; top:0; }
   .row { display:flex; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line);
     cursor:pointer; align-items:flex-start; }
-  .row:hover { background:var(--panel); }
-  .row.sel { background:var(--panel2); }
+  .row:hover { background:var(--panel); } .row.sel { background:var(--panel2); }
   .row .txt { flex:1; min-width:0; }
   .row .sum { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .row .id { color:var(--muted); font-size:12px; }
-  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:20px;
-    background:var(--chip); color:var(--muted); margin-right:6px; }
-  #detail { overflow:auto; padding:18px 22px; }
-  #detail .meta { color:var(--muted); font-size:13px; margin-bottom:10px; }
-  #detail textarea { width:100%; min-height:320px; background:var(--panel2);
-    border:1px solid var(--line); border-radius:8px; padding:12px; color:var(--fg);
-    resize:vertical; font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .body { white-space:pre-wrap; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:12px 14px; font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  textarea.edit { width:100%; min-height:300px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:12px; color:var(--fg); resize:vertical;
+    font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:10px; }
   .actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-  .bulkbar { display:flex; align-items:center; gap:8px; padding:8px 18px;
-    background:var(--panel); border-bottom:1px solid var(--line); }
+  .pad { padding:20px 24px; overflow:auto; height:100%; }
   .empty { color:var(--muted); padding:40px; text-align:center; }
+  .cards { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:16px 20px; min-width:150px; }
+  .card .n { font-size:30px; font-weight:700; } .card .l { color:var(--muted); font-size:13px; }
+  .barwrap { margin:14px 0; } .barwrap h3 { font-size:13px; color:var(--muted); margin:0 0 8px; font-weight:600; }
+  .bar { display:flex; align-items:center; gap:8px; margin:3px 0; font-size:13px; }
+  .bar .lbl { width:190px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar .track { flex:1; background:var(--panel2); border-radius:5px; height:16px; overflow:hidden; }
+  .bar .fill { background:var(--accent2); height:100%; }
+  .bar .v { width:38px; text-align:right; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); position:sticky; top:0; background:var(--bg); }
+  td.mono { font-family:ui-monospace,Menlo,monospace; color:var(--muted); }
+  .result { border:1px solid var(--line); border-radius:10px; padding:12px 16px; margin:0 0 12px;
+    background:var(--panel); }
+  .result .h { font-size:13px; color:var(--muted); margin-bottom:6px; }
   .toast { position:fixed; bottom:16px; right:16px; background:var(--panel2);
     border:1px solid var(--line); border-radius:8px; padding:10px 14px; opacity:0;
-    transition:opacity .2s; }
-  .toast.show { opacity:1; }
-  .toast.err { border-color:var(--danger); color:var(--danger); }
+    transition:opacity .2s; z-index:9; } .toast.show { opacity:1; } .toast.err { border-color:var(--danger); color:var(--danger); }
+  .kbd { font:11px ui-monospace,monospace; background:var(--panel2); border:1px solid var(--line);
+    border-radius:4px; padding:0 5px; color:var(--muted); }
 </style>
 </head>
 <body>
 <header>
-  <h1>🧠 LocalMind Review</h1>
-  <span class="stat" id="stat">…</span>
+  <h1>🧠 LocalMind</h1>
+  <nav id="nav">
+    <a href="#dashboard">Dashboard</a><a href="#review">Review</a><a href="#memory">Memory</a>
+    <a href="#docs">Docs</a><a href="#graph">Graph</a><a href="#audit">Audit</a>
+  </nav>
   <span class="grow"></span>
-  <label class="rev">reviewer <input type="text" id="reviewer" value="david" size="10"></label>
-  <select id="catFilter"><option value="">all categories</option></select>
-  <button id="refresh">Refresh</button>
+  <label class="rev">reviewer <input type="text" id="reviewer" value="david" size="9"></label>
+  <span class="pill" id="pill">…</span>
 </header>
-<div class="bulkbar">
-  <input type="checkbox" id="selAll"> <span class="stat"><span id="selCount">0</span> selected</span>
-  <button id="bulkAccept" class="primary">Accept selected</button>
-  <button id="bulkReject" class="danger">Reject selected</button>
-</div>
-<main>
-  <div id="list"></div>
-  <div id="detail"><div class="empty">Select a pending item to review.</div></div>
-</main>
+<div id="view"></div>
 <div class="toast" id="toast"></div>
 <script>
-let items = [], selected = null, checks = new Set();
 const $ = s => document.querySelector(s);
-const api = async (m, url, body) => {
-  const r = await fetch(url, { method:m, headers:{'Content-Type':'application/json'},
-    body: body ? JSON.stringify(body) : undefined });
-  const j = await r.json().catch(()=>({error:'bad response'}));
-  if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
-  return j;
-};
+const view = $('#view');
 const token = new URLSearchParams(location.search).get('token');
 const q = u => token ? u + (u.includes('?')?'&':'?') + 'token=' + encodeURIComponent(token) : u;
 const reviewer = () => $('#reviewer').value.trim() || 'ui';
-function toast(msg, err) {
-  const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (err?' err':'');
-  setTimeout(()=>t.className='toast', 2200);
-}
-async function loadStatus() {
-  try { const s = await api('GET', q('/api/status'));
-    $('#stat').innerHTML = `<b>${s.pending}</b> pending · <b>${s.accepted}</b> accepted`;
-  } catch(e){ $('#stat').textContent = e.message; }
-}
-async function loadList() {
-  const data = await api('GET', q('/api/review?state=Pending'));
-  items = data.items;
-  const cats = [...new Set(items.map(i=>i.category))].sort();
-  const cf = $('#catFilter'), cur = cf.value;
-  cf.innerHTML = '<option value="">all categories</option>' +
-    cats.map(c=>`<option ${c===cur?'selected':''}>${c}</option>`).join('');
-  render();
-}
-function render() {
-  const filter = $('#catFilter').value;
-  const list = $('#list'); list.innerHTML = '';
-  const shown = items.filter(i=>!filter || i.category===filter);
-  if (!shown.length) { list.innerHTML = '<div class="empty">Queue is empty. 🎉</div>'; }
-  for (const it of shown) {
-    const row = document.createElement('div');
-    row.className = 'row' + (selected===it.id?' sel':'');
-    row.innerHTML = `<input type="checkbox" ${checks.has(it.id)?'checked':''}>
-      <div class="txt"><span class="sum"><span class="chip">${it.category}</span>${esc(it.summary)}</span>
-      <span class="id">${it.id}</span></div>`;
-    row.querySelector('input').addEventListener('click', e=>{ e.stopPropagation();
-      e.target.checked ? checks.add(it.id) : checks.delete(it.id); updateSel(); });
-    row.addEventListener('click', ()=>select(it.id));
-    list.appendChild(row);
-  }
-  updateSel();
-}
-function updateSel(){ $('#selCount').textContent = checks.size; }
-function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
-function select(id) {
-  selected = id; render();
-  const it = items.find(i=>i.id===id); if(!it) return;
-  $('#detail').innerHTML = `
-    <div class="meta"><span class="chip">${it.category}</span>
-      confidence ${it.confidence.toFixed(2)} · ${it.id} · session ${it.session}</div>
-    ${it.rationale?`<div class="meta">⚠ ${esc(it.rationale)}</div>`:''}
-    <textarea id="body">${esc(it.replacement || it.summary)}</textarea>
-    <div class="actions">
-      <button class="primary" id="bAccept">Accept &amp; promote</button>
-      <button id="bEdit">Save edit</button>
-      <button id="bDefer">Defer</button>
-      <button class="danger" id="bReject">Reject</button>
+const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function api(m,url,body){ const r=await fetch(q(url),{method:m,headers:{'Content-Type':'application/json'},
+  body:body?JSON.stringify(body):undefined}); const j=await r.json().catch(()=>({error:'bad response'}));
+  if(!r.ok||j.error) throw new Error(j.error||('HTTP '+r.status)); return j; }
+function toast(msg,err){ const t=$('#toast'); t.textContent=msg; t.className='toast show'+(err?' err':'');
+  setTimeout(()=>t.className='toast',2200); }
+async function refreshPill(){ try{ const s=await api('GET','/api/stats');
+  $('#pill').innerHTML=`<b>${s.pending}</b> pending · <b>${s.accepted}</b> memory · <b>${s.doc_chunks}</b> doc chunks`;
+}catch(e){ $('#pill').textContent=e.message; } }
+
+// ---- router ----
+const routes={dashboard:renderDashboard,review:renderReview,memory:renderMemory,docs:renderDocs,graph:renderGraph,audit:renderAudit};
+function route(){ const tab=(location.hash.slice(1)||'review');
+  document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('on',a.hash==='#'+tab));
+  (routes[tab]||renderReview)(); refreshPill(); }
+window.addEventListener('hashchange',route);
+
+// ---- Dashboard ----
+async function renderDashboard(){
+  view.innerHTML='<div class="pad"><div class="empty">Loading…</div></div>';
+  try{ const s=await api('GET','/api/stats');
+    const bars=(title,obj)=>{ const es=Object.entries(obj).sort((a,b)=>b[1]-a[1]); const mx=Math.max(1,...es.map(e=>e[1]));
+      return `<div class="barwrap"><h3>${title}</h3>${es.map(([k,v])=>
+        `<div class="bar"><span class="lbl">${esc(k)}</span><span class="track"><span class="fill" style="width:${v/mx*100}%"></span></span><span class="v">${v}</span></div>`).join('')||'<div class="empty">none</div>'}</div>`; };
+    view.innerHTML=`<div class="pad">
+      <div class="cards">
+        <div class="card"><div class="n">${s.pending}</div><div class="l">pending review</div></div>
+        <div class="card"><div class="n">${s.accepted}</div><div class="l">accepted memory</div></div>
+        <div class="card"><div class="n">${s.doc_chunks}</div><div class="l">doc chunks</div></div>
+      </div>
+      ${bars('Pending by category', s.pending_by_category)}
+      ${bars('Accepted by scope', s.accepted_by_scope)}
+      ${bars('Accepted by category', s.accepted_by_category)}
     </div>`;
-  $('#bAccept').onclick = ()=>act(id,'accept');
-  $('#bReject').onclick = ()=>act(id,'reject');
-  $('#bDefer').onclick  = ()=>act(id,'defer');
-  $('#bEdit').onclick   = ()=>act(id,'edit',{replacement:$('#body').value});
+  }catch(e){ view.innerHTML=`<div class="pad"><div class="empty">${esc(e.message)}</div></div>`; }
 }
-async function act(id, action, extra) {
-  try {
-    await api('POST', q('/api/review/'+encodeURIComponent(id)+'/'+action),
-      Object.assign({reviewer:reviewer()}, extra||{}));
-    toast(action==='accept'?'Accepted + promoted':action+'ed');
-    checks.delete(id); if(selected===id){ selected=null;
-      $('#detail').innerHTML='<div class="empty">Select a pending item to review.</div>'; }
-    await refresh();
-  } catch(e){ toast(e.message, true); }
+
+// ---- Review ----
+let rvItems=[], rvSel=null, rvChecks=new Set();
+async function renderReview(){
+  view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
+    <div class="toolbar">
+      <input type="checkbox" id="selAll"><span class="pill"><span id="selN">0</span> selected</span>
+      <button class="primary" id="bAcc">Accept selected</button>
+      <button class="danger" id="bRej">Reject selected</button>
+      <select id="catF"><option value="">all categories</option></select>
+      <span class="grow"></span>
+      <span class="meta"><span class="kbd">j/k</span> move <span class="kbd">a</span>ccept <span class="kbd">r</span>eject <span class="kbd">e</span>dit <span class="kbd">d</span>efer <span class="kbd">x</span> select</span>
+      <button id="rvRefresh">Refresh</button>
+    </div>
+    <div class="split" style="flex:1;min-height:0">
+      <div class="listcol" id="rvList"></div>
+      <div class="detailcol" id="rvDetail"><div class="empty">Select a pending item.</div></div>
+    </div></div>`;
+  $('#rvRefresh').onclick=loadReview; $('#catF').onchange=drawReview;
+  $('#bAcc').onclick=()=>bulkReview('accept'); $('#bRej').onclick=()=>bulkReview('reject');
+  $('#selAll').onclick=e=>{ const f=$('#catF').value; const sh=rvItems.filter(i=>!f||i.category===f);
+    if(e.target.checked) sh.forEach(i=>rvChecks.add(i.id)); else rvChecks.clear(); drawReview(); };
+  await loadReview();
 }
-async function bulk(action) {
-  if (!checks.size) return toast('Nothing selected', true);
-  if (!confirm(`${action} ${checks.size} item(s)?`)) return;
-  try {
-    const r = await api('POST', q('/api/review/bulk'),
-      {action, ids:[...checks], reviewer:reviewer()});
-    toast(`${action}: ${r.done} done${r.errors.length?', '+r.errors.length+' failed':''}`, r.errors.length>0);
-    checks.clear(); selected=null;
-    $('#detail').innerHTML='<div class="empty">Select a pending item to review.</div>';
-    await refresh();
-  } catch(e){ toast(e.message, true); }
+async function loadReview(){ const d=await api('GET','/api/review?state=Pending'); rvItems=d.items;
+  const cats=[...new Set(rvItems.map(i=>i.category))].sort(); const cf=$('#catF'); const cur=cf.value;
+  cf.innerHTML='<option value="">all categories</option>'+cats.map(c=>`<option ${c===cur?'selected':''}>${c}</option>`).join('');
+  drawReview(); }
+function drawReview(){ const f=$('#catF').value; const list=$('#rvList'); list.innerHTML='';
+  const shown=rvItems.filter(i=>!f||i.category===f);
+  if(!shown.length){ list.innerHTML='<div class="empty">Queue empty. 🎉</div>'; }
+  shown.forEach(it=>{ const row=document.createElement('div'); row.className='row'+(rvSel===it.id?' sel':'');
+    row.innerHTML=`<input type="checkbox" ${rvChecks.has(it.id)?'checked':''}>
+      <div class="txt"><span class="sum"><span class="chip">${esc(it.category)}</span>${esc(it.summary)}</span><span class="id">${esc(it.id)}</span></div>`;
+    row.querySelector('input').addEventListener('click',e=>{ e.stopPropagation();
+      e.target.checked?rvChecks.add(it.id):rvChecks.delete(it.id); $('#selN').textContent=rvChecks.size; });
+    row.addEventListener('click',()=>selReview(it.id)); list.appendChild(row); });
+  $('#selN').textContent=rvChecks.size; }
+function selReview(id){ rvSel=id; drawReview(); const it=rvItems.find(i=>i.id===id); if(!it) return;
+  $('#rvDetail').innerHTML=`<div class="meta"><span class="chip">${esc(it.category)}</span>
+    confidence ${(+it.confidence).toFixed(2)} · ${esc(it.id)} · session ${esc(it.session)}</div>
+    ${it.rationale?`<div class="meta">⚠ ${esc(it.rationale)}</div>`:''}
+    <textarea class="edit" id="rvBody">${esc(it.replacement||it.summary)}</textarea>
+    <div class="actions"><button class="primary" id="aAcc">Accept &amp; promote</button>
+      <button id="aEdit">Save edit</button><button id="aDef">Defer</button>
+      <button class="danger" id="aRej">Reject</button></div>`;
+  $('#aAcc').onclick=()=>actReview(id,'accept'); $('#aRej').onclick=()=>actReview(id,'reject');
+  $('#aDef').onclick=()=>actReview(id,'defer'); $('#aEdit').onclick=()=>actReview(id,'edit',{replacement:$('#rvBody').value}); }
+async function actReview(id,action,extra){ try{
+  await api('POST','/api/review/'+encodeURIComponent(id)+'/'+action,Object.assign({reviewer:reviewer()},extra||{}));
+  toast(action==='accept'?'Accepted + promoted':action+'ed'); rvChecks.delete(id);
+  if(rvSel===id){ rvSel=null; $('#rvDetail').innerHTML='<div class="empty">Select a pending item.</div>'; }
+  await loadReview(); refreshPill(); }catch(e){ toast(e.message,true); } }
+async function bulkReview(action){ if(!rvChecks.size) return toast('Nothing selected',true);
+  if(!confirm(`${action} ${rvChecks.size} item(s)?`)) return;
+  try{ const r=await api('POST','/api/review/bulk',{action,ids:[...rvChecks],reviewer:reviewer()});
+    toast(`${action}: ${r.done} done${r.errors.length?', '+r.errors.length+' failed':''}`,r.errors.length>0);
+    rvChecks.clear(); rvSel=null; $('#rvDetail').innerHTML='<div class="empty">Select a pending item.</div>';
+    await loadReview(); refreshPill(); }catch(e){ toast(e.message,true); } }
+
+// ---- Memory ----
+let memItems=[];
+async function renderMemory(){
+  view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
+    <div class="toolbar">
+      <input type="text" id="memQ" placeholder="search accepted memory…" size="26">
+      <input type="text" id="memScope" placeholder="scope" size="8">
+      <input type="text" id="memCat" placeholder="category" size="12">
+      <button id="memGo">Search</button><span class="grow"></span><span class="pill" id="memN"></span>
+    </div>
+    <div class="split" style="flex:1;min-height:0">
+      <div class="listcol" id="memList"></div>
+      <div class="detailcol" id="memDetail"><div class="empty">Select a memory.</div></div>
+    </div></div>`;
+  const go=()=>loadMemory(); $('#memGo').onclick=go;
+  $('#memQ').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+  await loadMemory();
 }
-async function refresh(){ await Promise.all([loadStatus(), loadList()]); }
-$('#refresh').onclick = refresh;
-$('#catFilter').onchange = render;
-$('#bulkAccept').onclick = ()=>bulk('accept');
-$('#bulkReject').onclick = ()=>bulk('reject');
-$('#selAll').onclick = e=>{ const filter=$('#catFilter').value;
-  const shown=items.filter(i=>!filter||i.category===filter);
-  if(e.target.checked) shown.forEach(i=>checks.add(i.id)); else checks.clear(); render(); };
-refresh();
+async function loadMemory(){ const query=$('#memQ').value.trim(), scope=$('#memScope').value.trim(), cat=$('#memCat').value.trim();
+  const url='/api/memory?'+new URLSearchParams({query,scope,category:cat}).toString();
+  const d=await api('GET',url); memItems=d.items; $('#memN').textContent=`${d.items.length} (${d.mode})`;
+  const list=$('#memList'); list.innerHTML=''; if(!memItems.length){ list.innerHTML='<div class="empty">No memory.</div>'; }
+  memItems.forEach(it=>{ const row=document.createElement('div'); row.className='row';
+    row.innerHTML=`<div class="txt"><span class="sum"><span class="chip">${esc(it.category)}</span>${esc(it.snippet)}
+      ${it.stale?'<span class="badge stale">stale</span>':''}${it.contradicted?'<span class="badge conflict">conflict</span>':''}</span>
+      <span class="id">${esc(it.id)}${it.scope?' · '+esc(it.scope):''}${it.score!=null?' · score '+it.score:''} · used ${it.hit_count??0}</span></div>`;
+    row.addEventListener('click',()=>selMemory(it.id)); list.appendChild(row); }); }
+async function selMemory(id){ try{ const m=await api('GET','/api/memory/'+encodeURIComponent(id));
+  const p=m.provenance; $('#memDetail').innerHTML=`
+    <div class="meta"><span class="chip">${esc(m.category)}</span>${esc(m.scope)} · ${esc(m.status)} · used ${m.hit_count}
+      ${m.stale?'<span class="badge stale">stale</span>':''}${m.contradicted?'<span class="badge conflict">conflict</span>':''}</div>
+    <div class="meta">${esc(m.id)}</div>
+    <div class="body">${esc(m.body)}</div>
+    ${p?`<div class="meta" style="margin-top:12px">provenance — confidence ${(+p.confidence).toFixed(2)} · ${esc(p.epistemic_status)}
+      ${p.source_session?' · session '+esc(p.source_session):''}${p.contradicts.length?' · contradicts '+p.contradicts.map(esc).join(', '):''}</div>`:''}
+    <div class="actions"><button class="danger" id="memDel">Delete</button></div>`;
+  $('#memDel').onclick=async()=>{ if(!confirm('Delete this memory permanently?')) return;
+    try{ await api('DELETE','/api/memory/'+encodeURIComponent(id)); toast('Deleted');
+      $('#memDetail').innerHTML='<div class="empty">Select a memory.</div>'; await loadMemory(); refreshPill(); }
+    catch(e){ toast(e.message,true); } };
+}catch(e){ toast(e.message,true); } }
+
+// ---- Docs ----
+async function renderDocs(){
+  view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
+    <div class="toolbar"><input type="text" id="docQ" placeholder="semantic search across all repo docs…" size="40">
+      <button id="docGo">Search</button><span class="grow"></span><span class="pill" id="docN"></span></div>
+    <div class="pad" id="docRes"><div class="empty">Search the ingested documentation semantically.</div></div></div>`;
+  const go=async()=>{ const query=$('#docQ').value.trim(); if(!query) return;
+    $('#docRes').innerHTML='<div class="empty">Searching…</div>';
+    try{ const d=await api('GET','/api/docs?'+new URLSearchParams({q:query,limit:'12'}));
+      $('#docN').textContent=d.results.length+' passages';
+      $('#docRes').innerHTML=d.results.map(r=>`<div class="result"><div class="h">
+        📄 ${esc(r.path)}${r.heading?' › '+esc(r.heading):''} · score ${(+r.score).toFixed(3)}</div>
+        <div class="body">${esc(r.body)}</div></div>`).join('')||'<div class="empty">No matches.</div>';
+    }catch(e){ $('#docRes').innerHTML=`<div class="empty">${esc(e.message)}</div>`; } };
+  $('#docGo').onclick=go; $('#docQ').addEventListener('keydown',e=>{if(e.key==='Enter')go();}); $('#docQ').focus();
+}
+
+// ---- Graph ----
+async function renderGraph(){
+  view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
+    <div class="toolbar">
+      <select id="gTool"><option value="neighborhood">neighborhood</option><option value="coverage">coverage</option>
+        <option value="knowledge">knowledge</option><option value="connection">connection</option></select>
+      <input type="text" id="gSym" placeholder="symbol (or qualified name)" size="30">
+      <input type="text" id="gTo" placeholder="…to symbol (connection)" size="22" style="display:none">
+      <button id="gGo">Query</button><span class="grow"></span><span class="pill">${'code graph'}</span></div>
+    <div class="pad" id="gRes"><div class="empty">Query the code graph. Try a qualified name like <span class="kbd">path/to/file.rs::fn_name</span>.</div></div></div>`;
+  $('#gTool').onchange=()=>{ $('#gTo').style.display=$('#gTool').value==='connection'?'':'none'; };
+  const go=async()=>{ const tool=$('#gTool').value, symbol=$('#gSym').value.trim(), to=$('#gTo').value.trim();
+    const p=new URLSearchParams({tool}); if(tool==='connection'){p.set('from',symbol);p.set('to',to);} else p.set('symbol',symbol);
+    $('#gRes').innerHTML='<div class="empty">Querying…</div>';
+    try{ const d=await api('GET','/api/graph?'+p.toString()); $('#gRes').innerHTML=renderGraphResult(d); }
+    catch(e){ $('#gRes').innerHTML=`<div class="empty">${esc(e.message)}</div>`; } };
+  $('#gGo').onclick=go; $('#gSym').addEventListener('keydown',e=>{if(e.key==='Enter')go();}); $('#gSym').focus();
+}
+function sym(s){ return `<div class="result"><div class="h">${esc(s.kind)} · ${esc(s.qualified_name)}</div>
+  ${s.skeleton?`<div class="body">${esc(s.skeleton)}</div>`:''}</div>`; }
+function renderGraphResult(d){
+  if(d.graph_error) return `<div class="empty">${esc(d.graph_error)}</div>`;
+  if(d.result==='neighborhood') return sym(d.symbol)+'<h3 class="h" style="margin:10px 0">neighbors</h3>'+(d.neighbors.map(sym).join('')||'<div class="empty">none</div>');
+  if(d.result==='coverage') return sym(d.symbol)+'<h3 class="h" style="margin:10px 0">tests</h3>'+(d.tests.map(sym).join('')||'<div class="empty">no tests</div>');
+  if(d.result==='knowledge') return sym(d.symbol)+'<h3 class="h" style="margin:10px 0">anchored knowledge</h3>'+(d.knowledge.map(k=>`<div class="result">memory ${esc(k.memory_id)} · confidence ${(+k.confidence).toFixed(2)}</div>`).join('')||'<div class="empty">none</div>');
+  if(d.result==='connection') return '<h3 class="h">path</h3>'+d.steps.map(sym).join('');
+  if(d.result==='no_connection') return '<div class="empty">No connection within the hop bound.</div>';
+  return `<div class="body">${esc(JSON.stringify(d,null,2))}</div>`;
+}
+
+// ---- Audit ----
+async function renderAudit(){
+  view.innerHTML='<div class="pad"><div class="empty">Loading…</div></div>';
+  try{ const d=await api('GET','/api/audit?limit=200');
+    view.innerHTML=`<div class="pad"><table><thead><tr><th>#</th><th>when</th><th>kind</th><th>actor</th><th>subject</th></tr></thead>
+      <tbody>${d.items.map(r=>`<tr><td class="mono">${r.id}</td><td class="mono">${esc(r.at)}</td>
+        <td>${esc(r.kind)}</td><td>${esc(r.actor)}</td><td class="mono">${esc(r.subject)}</td></tr>`).join('')}</tbody></table></div>`;
+  }catch(e){ view.innerHTML=`<div class="pad"><div class="empty">${esc(e.message)}</div></div>`; }
+}
+
+// ---- keyboard (review tab) ----
+document.addEventListener('keydown',e=>{
+  if((location.hash.slice(1)||'review')!=='review') return;
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+  const f=$('#catF')?$('#catF').value:''; const shown=rvItems.filter(i=>!f||i.category===f);
+  const idx=shown.findIndex(i=>i.id===rvSel);
+  if(e.key==='j'||e.key==='k'){ e.preventDefault(); const n=e.key==='j'?idx+1:idx-1;
+    if(shown[n]) selReview(shown[n].id); }
+  else if(rvSel){ if(e.key==='a') actReview(rvSel,'accept'); else if(e.key==='r') actReview(rvSel,'reject');
+    else if(e.key==='d') actReview(rvSel,'defer'); else if(e.key==='e'){ const t=$('#rvBody'); if(t) t.focus(); }
+    else if(e.key==='x'){ rvChecks.has(rvSel)?rvChecks.delete(rvSel):rvChecks.add(rvSel); drawReview(); } }
+});
+route();
 </script>
 </body>
 </html>
