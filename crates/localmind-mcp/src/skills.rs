@@ -28,6 +28,16 @@ pub fn list_active_skills(
         .collect())
 }
 
+/// Fetches one active skill by id, or `None` if no active skill has that id.
+pub fn fetch_active_skill(
+    project_root: impl AsRef<Path>,
+    id: &str,
+) -> Result<Option<ActiveSkillSummary>, SkillToolError> {
+    Ok(list_active_skills(project_root)?
+        .into_iter()
+        .find(|skill| skill.id == id))
+}
+
 #[derive(Debug, Error)]
 pub enum SkillToolError {
     #[error(transparent)]

@@ -13,6 +13,9 @@ use localmind_store::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod graph;
+mod mcp;
+
 #[derive(Debug, Parser)]
 #[command(name = "localmind")]
 #[command(version)]
@@ -105,6 +108,16 @@ enum Command {
         #[command(subcommand)]
         command: InsightCommand,
     },
+    /// Build the code graph over a repository tree (structure ingest).
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommand,
+    },
+    /// Serve LocalMind query tools to an MCP client over stdio.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Score memory quality (extraction precision/recall, retrieval recall@k)
     /// over the built-in golden fixtures.
     Eval {
@@ -121,6 +134,28 @@ enum Command {
         #[arg(long)]
         with_lift: bool,
         /// Project root whose [inference] config the --with-lift pass reads.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GraphCommand {
+    /// Walk a tree, parse supported sources, and reindex the code graph.
+    Reindex {
+        /// Repository root to ingest.
+        path: PathBuf,
+        /// Project root containing .localmind.toml (holds the graph store).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Serve the MCP protocol over stdin/stdout (JSON-RPC 2.0).
+    Serve {
+        /// Project root containing .localmind.toml.
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -783,6 +818,12 @@ fn main() -> Result<()> {
                     report.enqueued, report.accepted_by_mode
                 );
             }
+        },
+        Command::Graph { command } => match command {
+            GraphCommand::Reindex { path, project } => graph::reindex(path, project)?,
+        },
+        Command::Mcp { command } => match command {
+            McpCommand::Serve { project } => mcp::serve(project)?,
         },
         Command::Eval {
             k,

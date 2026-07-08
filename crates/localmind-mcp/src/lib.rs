@@ -4,16 +4,19 @@
 //! query tools (names, request/response contracts, and a dispatcher over the
 //! project store); a host MCP server mounts them by name.
 
+mod catalog;
 mod graph;
 mod skills;
 
+pub use catalog::{catalog, ToolSpec, TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_SEARCH};
 pub use graph::{
     handle, tool_names, AnchoredKnowledge, GraphToolError, GraphToolRequest, GraphToolResponse,
     SymbolSummary, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE,
     TOOL_SYMBOL_NEIGHBORHOOD,
 };
 pub use skills::{
-    list_active_skills, ActiveSkillSummary, SkillToolError, TOOL_SKILL_FETCH, TOOL_SKILL_LIST,
+    fetch_active_skill, list_active_skills, ActiveSkillSummary, SkillToolError, TOOL_SKILL_FETCH,
+    TOOL_SKILL_LIST,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
