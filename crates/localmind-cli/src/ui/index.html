@@ -260,17 +260,20 @@ async function renderDocs(){
     <div class="toolbar"><input type="text" id="docQ" placeholder="ask a question — search by meaning…" size="34">
       <button id="docGo">Search</button><span class="grow"></span><span class="pill" id="docN"></span></div>
     <div class="split" style="flex:1;min-height:0">
-      <div class="listcol"><div class="subhead">Browse files by repo<input type="text" id="docFilter" placeholder="filter files…" style="width:92%;margin-top:6px;display:block"></div><div id="docFiles"></div></div>
+      <div class="listcol"><div class="subhead">Browse files<select id="docRepo" style="width:92%;margin:6px 0;display:block"></select><input type="text" id="docFilter" placeholder="filter files…" style="width:92%;display:block"></div><div id="docFiles"></div></div>
       <div class="detailcol" id="docRes">
         <div class="meta">Every repo's Markdown — READMEs, vision, ADRs, plans — searchable by <b>meaning</b>, not just keywords. Open a file on the left, or ask:</div>
         <div class="actions">${examples.map(q=>`<button class="sm" data-ex="${esc(q)}">${esc(q)}</button>`).join('')}</div></div></div></div>`;
   $('#docGo').onclick=docSearch; $('#docQ').addEventListener('keydown',e=>{if(e.key==='Enter')docSearch();});
   $('#docFilter').addEventListener('input',drawDocFiles);
   document.querySelectorAll('#docRes [data-ex]').forEach(b=>b.onclick=()=>{$('#docQ').value=b.dataset.ex;docSearch();});
-  const d=await api('GET','/api/docs/files'); docFiles=d.files; $('#docN').textContent=`${d.total} files`; drawDocFiles();
+  const d=await api('GET','/api/docs/files'); docFiles=d.files; $('#docN').textContent=`${d.total} files`;
+  const repos={}; docFiles.forEach(x=>{ const r=x.path.split('/')[0]; repos[r]=(repos[r]||0)+1; });
+  $('#docRepo').innerHTML=`<option value="">all repos (${docFiles.length})</option>`+Object.entries(repos).sort((a,b)=>b[1]-a[1]).map(([r,c])=>`<option value="${esc(r)}">${esc(r)} (${c})</option>`).join('');
+  $('#docRepo').onchange=drawDocFiles; drawDocFiles();
 }
-function drawDocFiles(){ const f=($('#docFilter')?.value||'').toLowerCase(); const el=$('#docFiles'); el.innerHTML='';
-  const files=docFiles.filter(x=>!f||x.path.toLowerCase().includes(f));
+function drawDocFiles(){ const f=($('#docFilter')?.value||'').toLowerCase(); const repoF=$('#docRepo')?.value||''; const el=$('#docFiles'); el.innerHTML='';
+  const files=docFiles.filter(x=>(!repoF||x.path.split('/')[0]===repoF)&&(!f||x.path.toLowerCase().includes(f)));
   const groups={}; files.forEach(x=>{ const repo=x.path.split('/')[0]; (groups[repo]=groups[repo]||[]).push(x); });
   Object.keys(groups).sort().forEach(repo=>{ const h=document.createElement('div'); h.className='subhead'; h.style.position='static';
     h.innerHTML=`<b>${esc(repo)}</b> · ${groups[repo].length}`; el.appendChild(h);
@@ -420,10 +423,10 @@ function forceGraph(host, data, onRecenter, token){
 let auditItems=[];
 async function renderAudit(){ view.innerHTML='<div class="pad"><div class="empty">Loading…</div></div>';
   try{ const d=await api('GET','/api/audit?limit=300'); auditItems=d.items;
-    const kinds=[...new Set(auditItems.map(r=>r.kind))].sort();
+    const counts={}; auditItems.forEach(r=>counts[r.kind]=(counts[r.kind]||0)+1);
     view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
       <div class="toolbar"><span class="meta">Append-only log — entries are never edited or deleted.</span>
-        <select id="akF"><option value="">all kinds</option>${kinds.map(k=>`<option>${esc(k)}</option>`).join('')}</select><span class="grow"></span><span class="pill">${auditItems.length} events</span></div>
+        <select id="akF"><option value="">all kinds (${auditItems.length})</option>${Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([k,c])=>`<option value="${esc(k)}">${esc(k)} (${c})</option>`).join('')}</select><span class="grow"></span><span class="pill">${auditItems.length} events</span></div>
       <div class="pad" style="padding-top:0"><table><thead><tr><th>#</th><th>when</th><th>kind</th><th>actor</th><th>subject</th></tr></thead><tbody id="akBody"></tbody></table></div></div>`;
     $('#akF').onchange=drawAudit; drawAudit();
   }catch(e){ view.innerHTML=`<div class="pad"><div class="empty">${esc(e.message)}</div></div>`; } }
