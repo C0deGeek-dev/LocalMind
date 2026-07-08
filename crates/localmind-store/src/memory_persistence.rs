@@ -820,6 +820,49 @@ impl MemoryPersistence {
             .map_err(MemoryPersistenceError::Sqlite)
     }
 
+    /// Every ingested documentation file with its chunk count, path-ordered —
+    /// for browsing what has been ingested without a search query.
+    pub fn doc_files(&self) -> Result<Vec<(String, i64)>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, COUNT(*) FROM doc_chunk GROUP BY path ORDER BY path")
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
+    /// Every chunk of one ingested documentation file, in order — for reading a
+    /// file's passages after picking it from the browser.
+    pub fn doc_chunks_for(
+        &self,
+        path: &str,
+    ) -> Result<Vec<(i64, Option<String>, String)>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT ordinal, heading, body FROM doc_chunk WHERE path = ?1 ORDER BY ordinal")
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map(params![path], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
     pub fn vector_search(
         &self,
         query_vector: &[f32],

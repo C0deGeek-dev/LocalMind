@@ -12,7 +12,8 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId};
+use localmind_codegraph::{compute_overview, OverviewOptions};
+use localmind_core::{MemoryEntryId, NodeKind, ReviewAction, ReviewDecision, ReviewItemId};
 use localmind_mcp::{handle, GraphToolRequest};
 use localmind_store::{GraphStore, MemoryPersistence, ReviewQueue};
 use serde_json::{json, Value};
@@ -75,7 +76,11 @@ fn route(
         (Method::Get, ["api", "memory", id]) => api_memory_get(project, id),
         (Method::Delete, ["api", "memory", id]) => api_memory_delete(project, id),
         (Method::Get, ["api", "docs"]) => api_docs(project, query),
+        (Method::Get, ["api", "docs", "files"]) => api_doc_files(project),
+        (Method::Get, ["api", "docs", "file"]) => api_doc_file(project, query),
         (Method::Get, ["api", "graph"]) => api_graph(project, query),
+        (Method::Get, ["api", "graph", "overview"]) => api_graph_overview(project),
+        (Method::Get, ["api", "graph", "symbols"]) => api_graph_symbols(project, query),
         (Method::Get, ["api", "audit"]) => api_audit(project, query),
         (Method::Get, ["api", "stats"]) => api_stats(project),
         _ => Err(anyhow!("not found: {method:?} {path}")),
@@ -153,6 +158,10 @@ fn api_review_action(project: &Path, id: &str, action: &str, body: &str) -> Resu
             decide(project, &item_id, ReviewAction::Accept, reviewer, note, None)?;
             let entry = persistence.promote_review_item(&item_id)?;
             Ok(json!({ "id": id, "state": "Accepted", "promoted": entry.id.to_string() }))
+        }
+        "accept_only" => {
+            let state = decide(project, &item_id, ReviewAction::Accept, reviewer, note, None)?;
+            Ok(json!({ "id": id, "state": state, "promoted": Value::Null }))
         }
         "reject" => {
             let state = decide(project, &item_id, ReviewAction::Reject, reviewer, note, None)?;
@@ -332,6 +341,69 @@ fn api_docs(project: &Path, query: &str) -> Result<Value> {
     Ok(json!({ "results": results }))
 }
 
+/// Every ingested documentation file with its chunk count (browse sidebar).
+fn api_doc_files(project: &Path) -> Result<Value> {
+    let persistence = MemoryPersistence::open_project(project)?;
+    let files: Vec<Value> = persistence
+        .doc_files()?
+        .into_iter()
+        .map(|(path, chunks)| json!({ "path": path, "chunks": chunks }))
+        .collect();
+    Ok(json!({ "total": files.len(), "files": files }))
+}
+
+/// One ingested file's chunks, in order (read after picking from the browser).
+fn api_doc_file(project: &Path, query: &str) -> Result<Value> {
+    let path = query_param(query, "path").ok_or_else(|| anyhow!("path is required"))?;
+    let persistence = MemoryPersistence::open_project(project)?;
+    let chunks: Vec<Value> = persistence
+        .doc_chunks_for(&path)?
+        .into_iter()
+        .map(|(ordinal, heading, body)| json!({ "ordinal": ordinal, "heading": heading, "body": body }))
+        .collect();
+    Ok(json!({ "path": path, "chunks": chunks }))
+}
+
+/// Architecture overview of the code graph: file/symbol counts, languages,
+/// busiest packages, and hotspots — the "what do I have" landing.
+fn api_graph_overview(project: &Path) -> Result<Value> {
+    let store = GraphStore::open_project(project)?;
+    let overview = compute_overview(&store, OverviewOptions::default())?;
+    Ok(serde_json::to_value(&overview)?)
+}
+
+/// Search/list code symbols by (qualified) name, so the graph is browsable.
+fn api_graph_symbols(project: &Path, query: &str) -> Result<Value> {
+    let needle = query_param(query, "query")
+        .or_else(|| query_param(query, "q"))
+        .unwrap_or_default()
+        .to_lowercase();
+    let limit = query_param(query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let store = GraphStore::open_project(project)?;
+    let mut symbols = Vec::new();
+    for kind in [NodeKind::Function, NodeKind::Test] {
+        for node in store.nodes_by_kind(kind)? {
+            if needle.is_empty() || node.qualified_name.to_lowercase().contains(&needle) {
+                symbols.push(json!({
+                    "qualified_name": node.qualified_name,
+                    "kind": node.kind.as_str(),
+                    "path": node.location.as_ref().map(|location| location.path.clone()),
+                }));
+                if symbols.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if symbols.len() >= limit {
+            break;
+        }
+    }
+    Ok(json!({ "symbols": symbols }))
+}
+
 /// Code-graph query: one of neighborhood / connection / coverage / knowledge.
 fn api_graph(project: &Path, query: &str) -> Result<Value> {
     let tool = query_param(query, "tool").unwrap_or_else(|| "neighborhood".to_string());
@@ -381,6 +453,7 @@ fn api_audit(project: &Path, query: &str) -> Result<Value> {
                 "actor": r.actor,
                 "subject": r.subject,
                 "at": r.happened_at,
+                "metadata": r.metadata_json,
             })
         })
         .collect();
