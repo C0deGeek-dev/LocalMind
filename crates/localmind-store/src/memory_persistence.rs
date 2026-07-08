@@ -105,6 +105,9 @@ pub struct MemoryRecord {
     pub stale_candidate: bool,
     /// In a `contradicts` relationship with another memory.
     pub contradicted: bool,
+    /// The single programming language this memory is about, or `None` when it is
+    /// language-agnostic / cross-cutting.
+    pub language: Option<String>,
 }
 
 /// The machine-wide global memory store: a separate SQLite index and Markdown
@@ -436,7 +439,7 @@ impl MemoryPersistence {
             .prepare(
                 r#"
                 SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at,
-                       stale_candidate, contradicted
+                       stale_candidate, contradicted, language
                 FROM memory_index
                 WHERE status = 'active'
                 ORDER BY created_at, memory_id
@@ -456,6 +459,7 @@ impl MemoryPersistence {
                     last_used_at: row.get(7)?,
                     stale_candidate: row.get::<_, i64>(8)? != 0,
                     contradicted: row.get::<_, i64>(9)? != 0,
+                    language: row.get(10)?,
                 })
             })
             .map_err(MemoryPersistenceError::Sqlite)?;

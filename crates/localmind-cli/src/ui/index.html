@@ -206,28 +206,42 @@ async function bulkReview(action){ if(!rvChecks.size) return toast('Nothing sele
     await loadReview(); refreshPill(); }catch(e){ toast(e.message,true); } }
 
 // ---------- Memory ----------
-let memItems=[];
+let memAll=[];
 async function renderMemory(){
   view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
-    <div class="toolbar"><input type="text" id="memQ" placeholder="search accepted memory…" size="26">
-      <input type="text" id="memScope" placeholder="scope" size="8"><input type="text" id="memCat" placeholder="category" size="12">
-      <button id="memGo">Search</button><button class="sm" id="memClear">clear</button><span class="grow"></span><span class="pill" id="memN"></span></div>
+    <div class="toolbar" style="gap:6px">
+      <input type="text" id="memQ" placeholder="search by meaning…" size="20"><button id="memGo">Search</button>
+      <select id="fScope"></select><select id="fCat"></select><select id="fLang"></select><select id="fStatus"></select>
+      <label class="hint"><input type="checkbox" id="fStale"> stale</label>
+      <label class="hint"><input type="checkbox" id="fConf"> conflict</label>
+      <button class="sm" id="memClear">clear</button><span class="grow"></span><span class="pill" id="memN"></span></div>
     <div class="split" style="flex:1;min-height:0"><div class="listcol" id="memList"></div>
-      <div class="detailcol" id="memDetail"><div class="empty">Browse accepted memory, or search above.</div></div></div></div>`;
-  $('#memGo').onclick=loadMemory; $('#memClear').onclick=()=>{$('#memQ').value='';$('#memScope').value='';$('#memCat').value='';loadMemory();};
-  $('#memQ').addEventListener('keydown',e=>{if(e.key==='Enter')loadMemory();}); await loadMemory();
+      <div class="detailcol" id="memDetail"><div class="empty">Pick filters above (each shows how many), or search by meaning. Click a memory to open it.</div></div></div></div>`;
+  const f=await api('GET','/api/memory/facets');
+  const fill=(sel,label,obj)=>{ const el=$(sel); const total=Object.values(obj).reduce((a,b)=>a+b,0);
+    el.innerHTML=`<option value="">${label}: all (${total})</option>`+Object.entries(obj).sort((a,b)=>b[1]-a[1])
+      .map(([k,v])=>`<option value="${esc(k)}">${esc(k)} (${v})</option>`).join(''); el.onchange=applyMem; };
+  fill('#fScope','scope',f.scope); fill('#fCat','category',f.category); fill('#fLang','language',f.language); fill('#fStatus','status',f.status);
+  $('#fStale').onchange=applyMem; $('#fConf').onchange=applyMem;
+  $('#memGo').onclick=()=>loadMemory(true); $('#memQ').addEventListener('keydown',e=>{if(e.key==='Enter')loadMemory(true);});
+  $('#memClear').onclick=()=>{ ['#fScope','#fCat','#fLang','#fStatus'].forEach(s=>$(s).value=''); $('#fStale').checked=false; $('#fConf').checked=false; $('#memQ').value=''; loadMemory(false); };
+  loadMemory(false);
 }
-async function loadMemory(){ const query=$('#memQ').value.trim(),scope=$('#memScope').value.trim(),cat=$('#memCat').value.trim();
-  const d=await api('GET','/api/memory?'+new URLSearchParams({query,scope,category:cat})); memItems=d.items;
-  $('#memN').textContent=`${d.items.length} (${d.mode})`; const list=$('#memList'); list.innerHTML='';
-  if(!memItems.length) list.innerHTML='<div class="empty">No memory.</div>';
-  memItems.forEach(it=>{ const row=document.createElement('div'); row.className='row';
+async function loadMemory(search){ const q=search?$('#memQ').value.trim():'';
+  const d=await api('GET','/api/memory?'+new URLSearchParams(q?{query:q}:{})); memAll=d.items; applyMem(); }
+function applyMem(){ const sc=$('#fScope').value,ca=$('#fCat').value,la=$('#fLang').value,st=$('#fStatus').value,stale=$('#fStale').checked,conf=$('#fConf').checked;
+  const has=(v,fv)=> !fv || v==null || String(v)===fv;
+  const lang=m=> !la || m.language===undefined || (la==='(agnostic)' ? !m.language : m.language===la);
+  const items=memAll.filter(m=> has(m.scope,sc) && has(m.category,ca) && has(m.status,st) && lang(m) && (!stale||m.stale) && (!conf||m.contradicted));
+  $('#memN').textContent=`${items.length} of ${memAll.length}`;
+  const list=$('#memList'); list.innerHTML=items.length?'':'<div class="empty">Nothing matches these filters.</div>';
+  items.forEach(it=>{ const row=document.createElement('div'); row.className='row';
     row.innerHTML=`<div class="txt"><span class="sum"><span class="chip">${esc(it.category)}</span>${esc(it.snippet)}
       ${it.stale?'<span class="badge stale">stale</span>':''}${it.contradicted?'<span class="badge conflict">conflict</span>':''}</span>
-      <span class="id">${esc(it.id)}${it.scope?' · '+esc(it.scope):''}${it.score!=null?' · score '+it.score:''} · used ${it.hit_count??0}</span></div>`;
+      <span class="id">${esc(it.id)}${it.scope?' · '+esc(it.scope):''}${it.language?' · '+esc(it.language):''}${it.score!=null?' · score '+it.score:''} · used ${it.hit_count??0}</span></div>`;
     row.addEventListener('click',()=>selMemory(it.id)); list.appendChild(row); }); }
 async function selMemory(id){ try{ const m=await api('GET','/api/memory/'+encodeURIComponent(id)); const p=m.provenance;
-  $('#memDetail').innerHTML=`<div class="meta"><span class="chip">${esc(m.category)}</span>${esc(m.scope)} · ${esc(m.status)} · used ${m.hit_count}
+  $('#memDetail').innerHTML=`<div class="meta"><span class="chip">${esc(m.category)}</span>${esc(m.scope)} · ${esc(m.status)}${m.language?' · '+esc(m.language):''} · used ${m.hit_count}
     ${m.stale?'<span class="badge stale">stale</span>':''}${m.contradicted?'<span class="badge conflict">conflict</span>':''}</div>
     <div class="meta">${esc(m.id)}</div><div class="body">${esc(m.body)}</div>
     ${p?`<div class="meta" style="margin-top:12px">provenance — confidence ${(+p.confidence).toFixed(2)} · ${esc(p.epistemic_status)}

@@ -75,6 +75,7 @@ fn route(
             api_review_action(project, id, action, &body)
         }
         (Method::Get, ["api", "memory"]) => api_memory_list(project, query),
+        (Method::Get, ["api", "memory", "facets"]) => api_memory_facets(project),
         (Method::Get, ["api", "memory", id]) => api_memory_get(project, id),
         (Method::Delete, ["api", "memory", id]) => api_memory_delete(project, id),
         (Method::Get, ["api", "docs"]) => api_docs(project, query),
@@ -264,17 +265,20 @@ fn api_memory_list(project: &Path, query: &str) -> Result<Value> {
         return Ok(json!({ "mode": "search", "items": items }));
     }
 
+    let language_filter = query_param(query, "language");
     let items: Vec<Value> = persistence
         .list_memory()?
         .into_iter()
         .filter(|r| matches_filter(&r.scope, scope_filter.as_deref()))
         .filter(|r| matches_filter(&r.category, category_filter.as_deref()))
+        .filter(|r| matches_filter(r.language.as_deref().unwrap_or(""), language_filter.as_deref()))
         .map(|r| {
             json!({
                 "id": r.memory_id.to_string(),
                 "category": r.category,
                 "scope": r.scope,
                 "status": r.status,
+                "language": r.language,
                 "snippet": truncate(&r.body, 200),
                 "hit_count": r.hit_count,
                 "stale": r.stale_candidate,
@@ -283,6 +287,42 @@ fn api_memory_list(project: &Path, query: &str) -> Result<Value> {
         })
         .collect();
     Ok(json!({ "mode": "list", "items": items }))
+}
+
+/// Distinct filterable values in accepted memory, with counts — so the UI can
+/// offer real dropdown choices instead of free-text guessing.
+fn api_memory_facets(project: &Path) -> Result<Value> {
+    let persistence = MemoryPersistence::open_project(project)?;
+    let memory = persistence.list_memory()?;
+    let mut scope: BTreeMap<String, usize> = BTreeMap::new();
+    let mut category: BTreeMap<String, usize> = BTreeMap::new();
+    let mut language: BTreeMap<String, usize> = BTreeMap::new();
+    let mut status: BTreeMap<String, usize> = BTreeMap::new();
+    let mut stale = 0usize;
+    let mut conflict = 0usize;
+    for record in &memory {
+        *scope.entry(record.scope.clone()).or_default() += 1;
+        *category.entry(record.category.clone()).or_default() += 1;
+        *language
+            .entry(record.language.clone().unwrap_or_else(|| "(agnostic)".to_string()))
+            .or_default() += 1;
+        *status.entry(record.status.clone()).or_default() += 1;
+        if record.stale_candidate {
+            stale += 1;
+        }
+        if record.contradicted {
+            conflict += 1;
+        }
+    }
+    Ok(json!({
+        "total": memory.len(),
+        "scope": scope,
+        "category": category,
+        "language": language,
+        "status": status,
+        "stale": stale,
+        "conflict": conflict,
+    }))
 }
 
 /// One accepted memory in full, with its provenance ("why do you think that?").
@@ -310,6 +350,7 @@ fn api_memory_get(project: &Path, id: &str) -> Result<Value> {
         "category": record.category,
         "scope": record.scope,
         "status": record.status,
+        "language": record.language,
         "body": record.body,
         "hit_count": record.hit_count,
         "last_used_at": record.last_used_at,
