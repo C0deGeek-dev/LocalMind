@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use localmind_codegraph::{compute_overview, OverviewOptions};
-use localmind_core::{MemoryEntryId, NodeKind, ReviewAction, ReviewDecision, ReviewItemId};
+use localmind_core::{
+    GraphEndpoint, MemoryEntryId, NodeKind, ReviewAction, ReviewDecision, ReviewItemId,
+};
 use localmind_mcp::{handle, GraphToolRequest};
 use localmind_store::{GraphStore, MemoryPersistence, ReviewQueue};
 use serde_json::{json, Value};
@@ -81,6 +83,7 @@ fn route(
         (Method::Get, ["api", "graph"]) => api_graph(project, query),
         (Method::Get, ["api", "graph", "overview"]) => api_graph_overview(project),
         (Method::Get, ["api", "graph", "symbols"]) => api_graph_symbols(project, query),
+        (Method::Get, ["api", "graph", "local"]) => api_graph_local(project, query),
         (Method::Get, ["api", "audit"]) => api_audit(project, query),
         (Method::Get, ["api", "stats"]) => api_stats(project),
         _ => Err(anyhow!("not found: {method:?} {path}")),
@@ -402,6 +405,59 @@ fn api_graph_symbols(project: &Path, query: &str) -> Result<Value> {
         }
     }
     Ok(json!({ "symbols": symbols }))
+}
+
+/// A focus symbol's local graph — nodes (the symbol plus its neighbours) and the
+/// edges among them — for the interactive force-graph view. Click-to-recenter on
+/// the client turns this into free graph exploration.
+fn api_graph_local(project: &Path, query: &str) -> Result<Value> {
+    let symbol = query_param(query, "symbol").unwrap_or_default();
+    let depth = query_param(query, "depth")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1)
+        .clamp(1, 2);
+    let store = GraphStore::open_project(project)?;
+    let focus = store
+        .find_symbol(&symbol)?
+        .into_iter()
+        .find(|node| node.kind != NodeKind::Repository)
+        .ok_or_else(|| anyhow!("symbol not in the graph: {symbol}"))?;
+
+    let mut nodes = vec![focus.clone()];
+    nodes.extend(store.neighbors(&focus.id, depth)?);
+    let mut seen = std::collections::HashSet::new();
+    nodes.retain(|node| seen.insert(node.id.as_str().to_string()));
+    let ids: std::collections::HashSet<String> =
+        nodes.iter().map(|node| node.id.as_str().to_string()).collect();
+    let focus_id = focus.id.as_str().to_string();
+
+    let node_json: Vec<Value> = nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "id": node.id.as_str(),
+                "name": node.name,
+                "kind": node.kind.as_str(),
+                "qualified_name": node.qualified_name,
+                "path": node.location.as_ref().map(|l| l.path.clone()),
+                "focus": node.id.as_str() == focus_id,
+            })
+        })
+        .collect();
+
+    let mut edges = Vec::new();
+    for edge in store.active_edges()? {
+        if let (GraphEndpoint::Node(from), GraphEndpoint::Node(to)) = (&edge.from, &edge.to) {
+            if ids.contains(from.as_str()) && ids.contains(to.as_str()) {
+                edges.push(json!({
+                    "from": from.as_str(),
+                    "to": to.as_str(),
+                    "kind": edge.kind.as_str(),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "focus": focus_id, "nodes": node_json, "edges": edges }))
 }
 
 /// Code-graph query: one of neighborhood / connection / coverage / knowledge.
