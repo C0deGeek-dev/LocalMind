@@ -7,7 +7,7 @@
 //! way to bypass the review gate. The frontend is one self-contained HTML file
 //! embedded at build time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -84,6 +84,7 @@ fn route(
         (Method::Get, ["api", "graph", "overview"]) => api_graph_overview(project),
         (Method::Get, ["api", "graph", "symbols"]) => api_graph_symbols(project, query),
         (Method::Get, ["api", "graph", "local"]) => api_graph_local(project, query),
+        (Method::Get, ["api", "graph", "global"]) => api_graph_global(project, query),
         (Method::Get, ["api", "audit"]) => api_audit(project, query),
         (Method::Get, ["api", "stats"]) => api_stats(project),
         _ => Err(anyhow!("not found: {method:?} {path}")),
@@ -458,6 +459,90 @@ fn api_graph_local(project: &Path, query: &str) -> Result<Value> {
         }
     }
     Ok(json!({ "focus": focus_id, "nodes": node_json, "edges": edges }))
+}
+
+/// A file-level view of the whole graph: files are nodes, and a symbol-to-symbol
+/// edge is aggregated up to a file-to-file edge. Optionally filtered to a path
+/// prefix (a repo), capped to the most-connected files so it stays drawable.
+fn api_graph_global(project: &Path, query: &str) -> Result<Value> {
+    let prefix = query_param(query, "path").unwrap_or_default();
+    let limit = query_param(query, "limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(20, 600);
+    let store = GraphStore::open_project(project)?;
+
+    // Map every symbol node to the file it lives in (a File node's file is its own
+    // qualified name; another symbol's is its source location path).
+    let mut id_to_file: HashMap<String, String> = HashMap::new();
+    for kind in [
+        NodeKind::File,
+        NodeKind::Function,
+        NodeKind::Test,
+        NodeKind::Type,
+        NodeKind::Module,
+    ] {
+        for node in store.nodes_by_kind(kind)? {
+            let file = if kind == NodeKind::File {
+                node.qualified_name.clone()
+            } else {
+                node.location.as_ref().map(|l| l.path.clone()).unwrap_or_default()
+            };
+            if !file.is_empty() && (prefix.is_empty() || file.starts_with(&prefix)) {
+                id_to_file.insert(node.id.as_str().to_string(), file);
+            }
+        }
+    }
+
+    // Aggregate symbol→symbol edges into file→file edges, counting degree.
+    let mut edge_set: HashSet<(String, String)> = HashSet::new();
+    let mut degree: HashMap<String, usize> = HashMap::new();
+    for edge in store.active_edges()? {
+        if let (GraphEndpoint::Node(from), GraphEndpoint::Node(to)) = (&edge.from, &edge.to) {
+            if let (Some(from_file), Some(to_file)) =
+                (id_to_file.get(from.as_str()), id_to_file.get(to.as_str()))
+            {
+                if from_file != to_file
+                    && edge_set.insert((from_file.clone(), to_file.clone()))
+                {
+                    *degree.entry(from_file.clone()).or_default() += 1;
+                    *degree.entry(to_file.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    // Keep the most-connected files (a drawable slice), then the edges among them.
+    let mut ranked: Vec<(String, usize)> = degree.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let kept: HashSet<String> = ranked.iter().take(limit).map(|(f, _)| f.clone()).collect();
+    let total = ranked.len();
+
+    let nodes: Vec<Value> = kept
+        .iter()
+        .map(|path| {
+            json!({
+                "id": path,
+                "name": path.rsplit('/').next().unwrap_or(path),
+                "kind": "file",
+                "qualified_name": path,
+                "path": path,
+                "focus": false,
+            })
+        })
+        .collect();
+    let edges: Vec<Value> = edge_set
+        .into_iter()
+        .filter(|(f, t)| kept.contains(f) && kept.contains(t))
+        .map(|(f, t)| json!({ "from": f, "to": t, "kind": "depends" }))
+        .collect();
+
+    Ok(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "shown": kept.len(),
+        "total_connected": total,
+    }))
 }
 
 /// Code-graph query: one of neighborhood / connection / coverage / knowledge.

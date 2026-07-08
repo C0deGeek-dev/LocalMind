@@ -277,11 +277,11 @@ async function docSearch(){ const query=$('#docQ').value.trim(); if(!query) retu
 
 // ---------- Graph ----------
 const GKIND={function:'#59b0e6',test:'#69d987',file:'#d9b25f',type:'#c98bdb',module:'#e5745f',dependency:'#9aa4b2',repository:'#8a93a3'};
-let gToken=0;
+let gToken=0, gHistory=[];
 async function renderGraph(){
   view.innerHTML=`<div style="display:flex;flex-direction:column;height:100%">
     <div class="toolbar"><input type="text" id="gSym" placeholder="search a function or test by name…" size="26">
-      <button id="gGo">Search</button><button class="sm" id="gHome">overview</button><span class="grow"></span>
+      <button id="gGo">Search</button><button class="sm" id="gHome">overview</button><button class="sm" id="gGlobal">global map</button><span class="grow"></span>
       <span class="hint" id="gLegend"></span><span class="pill" id="gN">code graph</span></div>
     <div class="split" style="flex:1;min-height:0"><div class="listcol" id="gList"><div class="empty">Search a symbol, or open a hotspot from the overview →</div></div>
       <div class="detailcol" id="gRes" style="padding:0;display:flex;flex-direction:column"></div></div></div>`;
@@ -291,10 +291,12 @@ async function renderGraph(){
     d.symbols.forEach(s=>{ const row=document.createElement('div'); row.className='row';
       row.innerHTML=`<div class="txt"><span class="sum"><span style="color:${GKIND[s.kind]||'#9aa4b2'}">●</span> ${esc(s.qualified_name.split('::').pop())}</span><span class="id">${esc(s.qualified_name)}</span></div>`;
       row.addEventListener('click',()=>graphShow(s.qualified_name)); el.appendChild(row); }); };
-  $('#gGo').onclick=go; $('#gSym').addEventListener('keydown',e=>{if(e.key==='Enter')go();}); $('#gHome').onclick=graphOverview;
+  $('#gGo').onclick=go; $('#gSym').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+  $('#gHome').onclick=graphOverview; $('#gGlobal').onclick=renderGlobal;
   graphOverview();
 }
-async function graphOverview(){ gToken++; const el=$('#gRes'); el.style.padding='20px 24px'; el.innerHTML='<div class="empty">Loading overview…</div>';
+function gBack(){ gHistory.pop(); const prev=gHistory[gHistory.length-1]; if(prev) graphShow(prev,false); else graphOverview(); }
+async function graphOverview(){ gToken++; gHistory=[]; const el=$('#gRes'); el.style.padding='20px 24px'; el.innerHTML='<div class="empty">Loading overview…</div>';
   try{ const o=await api('GET','/api/graph/overview');
     const clickList=(t,items,label,val)=>`<div class="barwrap"><h3>${t}</h3>${(items||[]).map(x=>{const v=val(x);
       return `<div class="bar" data-sym="${x.qualified_name?esc(x.qualified_name):''}" style="${x.qualified_name?'cursor:pointer':''}">
@@ -309,16 +311,37 @@ async function graphOverview(){ gToken++; const el=$('#gRes'); el.style.padding=
   }catch(e){ el.innerHTML=`<div class="empty">${esc(e.message)}</div>`; } }
 
 // Interactive graph view for one symbol.
-async function graphShow(symbol){ gToken++; const my=gToken; const el=$('#gRes'); el.style.padding='0';
-  el.innerHTML=`<div class="toolbar" style="z-index:1"><b style="font-family:ui-monospace,monospace;font-size:12px">${esc(symbol.split('::').pop())}</b>
+async function graphShow(symbol,record=true){ gToken++; const my=gToken; if(record) gHistory.push(symbol);
+  const el=$('#gRes'); el.style.padding='0';
+  el.innerHTML=`<div class="toolbar" style="z-index:1"><button class="sm" id="gBack" title="Back">←</button>
+    <b style="font-family:ui-monospace,monospace;font-size:12px">${esc(symbol.split('::').pop())}</b>
     <span class="hint">${esc(symbol)}</span><span class="grow"></span>
     <span class="hint">drag pan · scroll zoom · click a node to recenter</span><button class="sm" id="gInfo">details</button></div>
     <div id="gCanvas" style="flex:1;min-height:0;position:relative"><div class="empty">Loading…</div></div>`;
-  $('#gInfo').onclick=()=>graphDetails(symbol);
+  $('#gBack').onclick=gBack; $('#gInfo').onclick=()=>graphDetails(symbol);
   try{ const d=await api('GET','/api/graph/local?'+new URLSearchParams({symbol,depth:'1'})); if(my!==gToken) return;
     if(!d.nodes.length){ $('#gCanvas').innerHTML='<div class="empty">Not in the graph.</div>'; return; }
     forceGraph($('#gCanvas'), d, graphShow, my);
   }catch(e){ $('#gCanvas').innerHTML=`<div class="empty">${esc(e.message)}</div>`; } }
+
+// The whole-repo file map (files as nodes, dependencies as edges).
+async function renderGlobal(){ gToken++; const my=gToken; gHistory=[]; const el=$('#gRes'); el.style.padding='0';
+  el.innerHTML=`<div class="toolbar" style="z-index:1"><b>Global map</b>
+    <select id="glRepo"><option value="">all repos</option></select>
+    <span class="hint" id="glNote"></span><span class="grow"></span>
+    <span class="hint">files as nodes · click a file to open it</span></div>
+    <div id="gCanvas" style="flex:1;min-height:0;position:relative"><div class="empty">Loading the map…</div></div>`;
+  const load=async(prefix)=>{ const d=await api('GET','/api/graph/global?'+new URLSearchParams({path:prefix||'',limit:'200'})); if(my!==gToken)return;
+    $('#glNote').textContent=`showing ${d.shown} of ${d.total_connected} connected files`;
+    if(!d.nodes.length){ $('#gCanvas').innerHTML='<div class="empty">No connected files here.</div>'; return; }
+    forceGraph($('#gCanvas'), d, s=>graphShow(s), my); };
+  try{ const first=await api('GET','/api/graph/global?limit=400'); if(my!==gToken)return;
+    const repos=[...new Set(first.nodes.map(n=>n.path.split('/')[0]))].sort();
+    $('#glRepo').innerHTML='<option value="">all repos</option>'+repos.map(r=>`<option>${esc(r)}</option>`).join('');
+    $('#glRepo').onchange=()=>load($('#glRepo').value);
+    load('');
+  }catch(e){ $('#gCanvas').innerHTML=`<div class="empty">${esc(e.message)}</div>`; }
+}
 
 async function graphDetails(symbol){ gToken++; const el=$('#gRes'); el.style.padding='16px 20px';
   el.innerHTML=`<div class="actions" style="margin-bottom:12px"><button class="sm" id="dBack">← graph</button>
@@ -348,15 +371,17 @@ function forceGraph(host, data, onRecenter, token){
   const lineEls=links.map(()=>{ const l=document.createElementNS(NS,'line'); l.setAttribute('stroke','var(--line)'); l.setAttribute('stroke-width','1.2'); g.appendChild(l); return l; });
   const drag={node:null,moved:false,pan:null}; let tx=0,ty=0,scale=1;
   const applyView=()=>g.setAttribute('transform',`translate(${tx},${ty}) scale(${scale})`);
+  const showLabels=nodes.length<=55;
   const nodeEls=nodes.map(n=>{ const grp=document.createElementNS(NS,'g'); grp.style.cursor='pointer'; const r=n.focus?10:6;
     const c=document.createElementNS(NS,'circle'); c.setAttribute('r',r); c.setAttribute('fill',GKIND[n.kind]||'#9aa4b2');
     if(n.focus){ c.setAttribute('stroke','var(--fg)'); c.setAttribute('stroke-width','2.5'); }
     const t=document.createElementNS(NS,'text'); t.textContent=n.name; t.setAttribute('x',r+4); t.setAttribute('y',4);
     t.setAttribute('font-size','11'); t.setAttribute('fill','var(--fg)'); t.style.pointerEvents='none';
+    t.style.opacity=showLabels?'1':'0';
     grp.appendChild(c); grp.appendChild(t); g.appendChild(grp);
     grp.addEventListener('mousedown',ev=>{ ev.stopPropagation(); drag.node=n; drag.moved=false; n.pin=true; });
-    grp.addEventListener('mouseenter',()=>t.setAttribute('font-weight','700'));
-    grp.addEventListener('mouseleave',()=>t.setAttribute('font-weight','400'));
+    grp.addEventListener('mouseenter',()=>{ t.style.opacity='1'; t.setAttribute('font-weight','700'); });
+    grp.addEventListener('mouseleave',()=>{ t.style.opacity=showLabels?'1':'0'; t.setAttribute('font-weight','400'); });
     return {n,grp}; });
   const toGraph=ev=>{ const b=svg.getBoundingClientRect(); return {x:(ev.clientX-b.left-tx)/scale, y:(ev.clientY-b.top-ty)/scale}; };
   svg.addEventListener('mousedown',ev=>{ if(drag.node)return; drag.pan={x:ev.clientX,y:ev.clientY,tx,ty}; svg.style.cursor='grabbing'; });
