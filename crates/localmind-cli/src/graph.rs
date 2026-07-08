@@ -22,6 +22,22 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
 ];
 
+/// File extensions admitted as candidates: the supported source languages plus
+/// Markdown (for doc-mention resolution). Everything else — binaries, images,
+/// lockfiles — is skipped, because the engine reads every admitted file as
+/// UTF-8 text and a binary would abort the reindex.
+const SOURCE_EXTS: &[&str] = &[
+    "rs", "py", "go", "js", "mjs", "cjs", "jsx", "ts", "tsx", "cs", "java", "c", "h", "cpp", "cxx",
+    "cc", "hpp", "hh", "rb", "php", "lua", "ml", "mli", "ex", "exs", "ps1", "psm1", "md",
+];
+
+fn is_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| SOURCE_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Plan actions applied per resumable batch.
 const BATCH: usize = 256;
 
@@ -81,7 +97,10 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             }
             collect_files(&entry.path(), out)?;
         } else if file_type.is_file() {
-            out.push(entry.path());
+            let path = entry.path();
+            if is_source(&path) {
+                out.push(path);
+            }
         }
     }
     Ok(())
