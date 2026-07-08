@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalMind Review</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e9ef; --muted:#9aa4b2; --accent:#69d987; --danger:#e5745f;
+    --warn:#d9b25f; --chip:#2a2f3a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --panel2:#f0f2f5; --line:#dde1e8;
+      --fg:#1b1f27; --muted:#5b6472; --chip:#e7eaf0; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 18px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:700; }
+  .stat { color:var(--muted); font-size:13px; }
+  .stat b { color:var(--fg); }
+  .grow { flex:1; }
+  label.rev { color:var(--muted); font-size:13px; }
+  input, textarea, select, button { font:inherit; color:inherit; }
+  input[type=text] { background:var(--panel2); border:1px solid var(--line);
+    border-radius:6px; padding:5px 8px; color:var(--fg); }
+  button { background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+    border-radius:6px; padding:6px 11px; cursor:pointer; }
+  button:hover { border-color:var(--muted); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#0b130d; font-weight:600; }
+  button.danger { color:var(--danger); }
+  main { display:grid; grid-template-columns:minmax(280px,380px) 1fr; height:calc(100vh - 106px); }
+  #list { overflow:auto; border-right:1px solid var(--line); }
+  .row { display:flex; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line);
+    cursor:pointer; align-items:flex-start; }
+  .row:hover { background:var(--panel); }
+  .row.sel { background:var(--panel2); }
+  .row .txt { flex:1; min-width:0; }
+  .row .sum { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .id { color:var(--muted); font-size:12px; }
+  .chip { display:inline-block; font-size:11px; padding:1px 7px; border-radius:20px;
+    background:var(--chip); color:var(--muted); margin-right:6px; }
+  #detail { overflow:auto; padding:18px 22px; }
+  #detail .meta { color:var(--muted); font-size:13px; margin-bottom:10px; }
+  #detail textarea { width:100%; min-height:320px; background:var(--panel2);
+    border:1px solid var(--line); border-radius:8px; padding:12px; color:var(--fg);
+    resize:vertical; font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .bulkbar { display:flex; align-items:center; gap:8px; padding:8px 18px;
+    background:var(--panel); border-bottom:1px solid var(--line); }
+  .empty { color:var(--muted); padding:40px; text-align:center; }
+  .toast { position:fixed; bottom:16px; right:16px; background:var(--panel2);
+    border:1px solid var(--line); border-radius:8px; padding:10px 14px; opacity:0;
+    transition:opacity .2s; }
+  .toast.show { opacity:1; }
+  .toast.err { border-color:var(--danger); color:var(--danger); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 LocalMind Review</h1>
+  <span class="stat" id="stat">…</span>
+  <span class="grow"></span>
+  <label class="rev">reviewer <input type="text" id="reviewer" value="david" size="10"></label>
+  <select id="catFilter"><option value="">all categories</option></select>
+  <button id="refresh">Refresh</button>
+</header>
+<div class="bulkbar">
+  <input type="checkbox" id="selAll"> <span class="stat"><span id="selCount">0</span> selected</span>
+  <button id="bulkAccept" class="primary">Accept selected</button>
+  <button id="bulkReject" class="danger">Reject selected</button>
+</div>
+<main>
+  <div id="list"></div>
+  <div id="detail"><div class="empty">Select a pending item to review.</div></div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+let items = [], selected = null, checks = new Set();
+const $ = s => document.querySelector(s);
+const api = async (m, url, body) => {
+  const r = await fetch(url, { method:m, headers:{'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(()=>({error:'bad response'}));
+  if (!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+};
+const token = new URLSearchParams(location.search).get('token');
+const q = u => token ? u + (u.includes('?')?'&':'?') + 'token=' + encodeURIComponent(token) : u;
+const reviewer = () => $('#reviewer').value.trim() || 'ui';
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (err?' err':'');
+  setTimeout(()=>t.className='toast', 2200);
+}
+async function loadStatus() {
+  try { const s = await api('GET', q('/api/status'));
+    $('#stat').innerHTML = `<b>${s.pending}</b> pending · <b>${s.accepted}</b> accepted`;
+  } catch(e){ $('#stat').textContent = e.message; }
+}
+async function loadList() {
+  const data = await api('GET', q('/api/review?state=Pending'));
+  items = data.items;
+  const cats = [...new Set(items.map(i=>i.category))].sort();
+  const cf = $('#catFilter'), cur = cf.value;
+  cf.innerHTML = '<option value="">all categories</option>' +
+    cats.map(c=>`<option ${c===cur?'selected':''}>${c}</option>`).join('');
+  render();
+}
+function render() {
+  const filter = $('#catFilter').value;
+  const list = $('#list'); list.innerHTML = '';
+  const shown = items.filter(i=>!filter || i.category===filter);
+  if (!shown.length) { list.innerHTML = '<div class="empty">Queue is empty. 🎉</div>'; }
+  for (const it of shown) {
+    const row = document.createElement('div');
+    row.className = 'row' + (selected===it.id?' sel':'');
+    row.innerHTML = `<input type="checkbox" ${checks.has(it.id)?'checked':''}>
+      <div class="txt"><span class="sum"><span class="chip">${it.category}</span>${esc(it.summary)}</span>
+      <span class="id">${it.id}</span></div>`;
+    row.querySelector('input').addEventListener('click', e=>{ e.stopPropagation();
+      e.target.checked ? checks.add(it.id) : checks.delete(it.id); updateSel(); });
+    row.addEventListener('click', ()=>select(it.id));
+    list.appendChild(row);
+  }
+  updateSel();
+}
+function updateSel(){ $('#selCount').textContent = checks.size; }
+function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function select(id) {
+  selected = id; render();
+  const it = items.find(i=>i.id===id); if(!it) return;
+  $('#detail').innerHTML = `
+    <div class="meta"><span class="chip">${it.category}</span>
+      confidence ${it.confidence.toFixed(2)} · ${it.id} · session ${it.session}</div>
+    ${it.rationale?`<div class="meta">⚠ ${esc(it.rationale)}</div>`:''}
+    <textarea id="body">${esc(it.replacement || it.summary)}</textarea>
+    <div class="actions">
+      <button class="primary" id="bAccept">Accept &amp; promote</button>
+      <button id="bEdit">Save edit</button>
+      <button id="bDefer">Defer</button>
+      <button class="danger" id="bReject">Reject</button>
+    </div>`;
+  $('#bAccept').onclick = ()=>act(id,'accept');
+  $('#bReject').onclick = ()=>act(id,'reject');
+  $('#bDefer').onclick  = ()=>act(id,'defer');
+  $('#bEdit').onclick   = ()=>act(id,'edit',{replacement:$('#body').value});
+}
+async function act(id, action, extra) {
+  try {
+    await api('POST', q('/api/review/'+encodeURIComponent(id)+'/'+action),
+      Object.assign({reviewer:reviewer()}, extra||{}));
+    toast(action==='accept'?'Accepted + promoted':action+'ed');
+    checks.delete(id); if(selected===id){ selected=null;
+      $('#detail').innerHTML='<div class="empty">Select a pending item to review.</div>'; }
+    await refresh();
+  } catch(e){ toast(e.message, true); }
+}
+async function bulk(action) {
+  if (!checks.size) return toast('Nothing selected', true);
+  if (!confirm(`${action} ${checks.size} item(s)?`)) return;
+  try {
+    const r = await api('POST', q('/api/review/bulk'),
+      {action, ids:[...checks], reviewer:reviewer()});
+    toast(`${action}: ${r.done} done${r.errors.length?', '+r.errors.length+' failed':''}`, r.errors.length>0);
+    checks.clear(); selected=null;
+    $('#detail').innerHTML='<div class="empty">Select a pending item to review.</div>';
+    await refresh();
+  } catch(e){ toast(e.message, true); }
+}
+async function refresh(){ await Promise.all([loadStatus(), loadList()]); }
+$('#refresh').onclick = refresh;
+$('#catFilter').onchange = render;
+$('#bulkAccept').onclick = ()=>bulk('accept');
+$('#bulkReject').onclick = ()=>bulk('reject');
+$('#selAll').onclick = e=>{ const filter=$('#catFilter').value;
+  const shown=items.filter(i=>!filter||i.category===filter);
+  if(e.target.checked) shown.forEach(i=>checks.add(i.id)); else checks.clear(); render(); };
+refresh();
+</script>
+</body>
+</html>

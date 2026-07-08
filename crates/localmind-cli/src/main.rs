@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 mod graph;
 mod ingest;
 mod mcp;
+mod ui;
 
 #[derive(Debug, Parser)]
 #[command(name = "localmind")]
@@ -123,6 +124,21 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Serve the local review/management web UI (localhost only).
+    Ui {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Port to bind on 127.0.0.1.
+        #[arg(long, default_value_t = 8091)]
+        port: u16,
+        /// Open the UI in the default browser on start.
+        #[arg(long)]
+        open: bool,
+        /// Require this token as a `?token=` query parameter (for LAN safety).
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Score memory quality (extraction precision/recall, retrieval recall@k)
     /// over the built-in golden fixtures.
@@ -846,6 +862,12 @@ fn main() -> Result<()> {
         Command::Mcp { command } => match command {
             McpCommand::Serve { project } => mcp::serve(project)?,
         },
+        Command::Ui {
+            project,
+            port,
+            open,
+            token,
+        } => ui::serve(project, port, open, token)?,
         Command::Eval {
             k,
             json,
