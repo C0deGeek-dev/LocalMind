@@ -29,7 +29,7 @@ pub fn serve(project: PathBuf, port: u16, open: bool, token: Option<String>) -> 
     let server = Server::http(&addr).map_err(|error| anyhow!("failed to bind {addr}: {error}"))?;
     let url = format!("http://{addr}");
     println!("LocalMind review UI: {url}");
-    println!("Project: {}", project.display());
+    println!("Store: {}", project.display());
     if token.is_some() {
         println!("Token required (pass ?token=... in the browser URL).");
     }
@@ -667,6 +667,7 @@ fn api_stats(project: &Path) -> Result<Value> {
             .or_default() += 1;
     }
     Ok(json!({
+        "store_path": project.display().to_string(),
         "pending": pending,
         "accepted": memory.len(),
         "doc_chunks": persistence.doc_chunk_count()?,

@@ -16,6 +16,15 @@ learning is **on** and `local_only` + review-gated by default, and the defaults
 below apply to any key you omit. It lives at the project root, is where you opt
 out (`enabled = false`), and is where you tune the engine:
 
+> **Store resolution (CLI).** `.localmind.toml` marks the project root. The
+> operational commands that take `--project` and open the store — `localmind ui`
+> and `localmind review list` — resolve the root by walking up from the given
+> directory (default: the current directory) to the **nearest** ancestor holding
+> a `.localmind.toml` (a nearer project shadows a farther one), so they work from
+> any subdirectory of a project. An explicit `--project <path>` is used as given.
+> When no `.localmind.toml` is found at or above the directory, the command
+> reports it rather than opening or creating an empty store elsewhere.
+
 ```toml
 [learning]
 enabled = true                       # the default; `false` opts out (refuses all writes)

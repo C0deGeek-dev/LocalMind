@@ -5,6 +5,21 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- `localmind ui` and `localmind review list` now find the project store by
+  walking up from the given directory (default: the current directory) to the
+  nearest ancestor holding `.localmind.toml`, so running either from a
+  subdirectory finds the project's store instead of silently opening a
+  different, empty one. An explicit `--project` still points where you say. When
+  no store is found at or above the directory, both print an actionable message
+  instead of opening an empty store; the UI dashboard shows the resolved store
+  path and marks an empty store as empty (rather than an ambiguous `0/0/0`). See
+  `docs/on-disk-contract.md`.
+- `localmind_store` exposes `ingest_docs`/`ingest_docs_into` (with
+  `DocIngestSummary`/`DocIngestError`): the Markdown chunk+ingest previously
+  inline in the `ingest docs` CLI command, extracted so other hosts can reuse
+  the same chunker and store path in-process. The CLI command is unchanged in
+  behaviour.
+
 ## v2.3.0 - 2026-07-07
 
 Coordinated LocalX release.

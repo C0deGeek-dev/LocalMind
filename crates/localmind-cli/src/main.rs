@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 mod graph;
 mod ingest;
 mod mcp;
+mod store_root;
 mod ui;
 
 #[derive(Debug, Parser)]
@@ -615,7 +616,10 @@ fn main() -> Result<()> {
         }
         Command::Review { command } => match command {
             ReviewCommand::List { project } => {
-                let queue = ReviewQueue::open_project(project)?;
+                let Some(root) = store_root::resolve_or_report(&project) else {
+                    return Ok(());
+                };
+                let queue = ReviewQueue::open_project(&root)?;
                 for item in queue.list()? {
                     println!(
                         "{}\t{:?}\t{}\t{}",
@@ -867,7 +871,11 @@ fn main() -> Result<()> {
             port,
             open,
             token,
-        } => ui::serve(project, port, open, token)?,
+        } => {
+            if let Some(root) = store_root::resolve_or_report(&project) {
+                ui::serve(root, port, open, token)?;
+            }
+        }
         Command::Eval {
             k,
             json,

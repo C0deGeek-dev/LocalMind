@@ -79,6 +79,8 @@
   .hint { color:var(--muted); font-size:12px; margin-left:6px; }
   .pad { padding:20px 24px; overflow:auto; height:100%; }
   .empty { color:var(--muted); padding:40px; text-align:center; }
+  .storebar { color:var(--muted); font-size:12px; margin-bottom:14px; }
+  .storebar code { color:var(--fg); background:rgba(255,255,255,.06); padding:1px 6px; border-radius:5px; }
   .cards { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:22px; }
   .card { background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.015));
     border:1px solid var(--line); border-radius:16px; padding:16px 22px; min-width:150px;
@@ -185,7 +187,9 @@ async function renderDashboard(){ view.innerHTML='<div class="pad"><div class="e
     const bars=(t,o)=>{ const es=Object.entries(o).sort((a,b)=>b[1]-a[1]); const mx=Math.max(1,...es.map(e=>e[1]));
       return `<div class="barwrap"><h3>${t}</h3>${es.map(([k,v])=>`<div class="bar"><span class="lbl">${esc(k)}</span>
         <span class="track"><span class="fill" style="width:${v/mx*100}%"></span></span><span class="v">${v}</span></div>`).join('')||'<div class="empty">none</div>'}</div>`; };
-    view.innerHTML=`<div class="pad"><div class="cards">
+    const empty=(s.pending+s.accepted+s.doc_chunks)===0;
+    const store=`<div class="storebar">Store: <code>${esc(s.store_path||'?')}</code>${empty?' · <b>this store is empty</b> (nothing ingested or reviewed here yet)':''}</div>`;
+    view.innerHTML=`<div class="pad">${store}<div class="cards">
       <div class="card"><div class="n">${s.pending}</div><div class="l">pending review</div></div>
       <div class="card"><div class="n">${s.accepted}</div><div class="l">accepted memory</div></div>
       <div class="card"><div class="n">${s.doc_chunks}</div><div class="l">doc chunks</div></div></div>
