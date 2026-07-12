@@ -17,6 +17,7 @@ mod graph;
 mod ingest;
 mod mcp;
 mod store_root;
+mod sync;
 mod ui;
 
 #[derive(Debug, Parser)]
@@ -100,6 +101,11 @@ enum Command {
     Okf {
         #[command(subcommand)]
         command: OkfCommand,
+    },
+    /// Cross-device sync: enroll this machine's other devices and manage them.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
     },
     /// Generate and inspect disabled skill suggestions.
     Skills {
@@ -344,6 +350,58 @@ impl From<ScopeArg> for localmind_store::BundleScope {
             ScopeArg::Both => Self::Both,
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Print this machine's shareable device card (public keys + fingerprint).
+    DeviceCard {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Label for this device; defaults to `[sync] device_label` or the hostname.
+        #[arg(long)]
+        label: Option<String>,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enroll a peer device from its card, confirming the out-of-band fingerprint.
+    Enroll {
+        /// Path to the peer's device card JSON (`-` or omitted reads stdin).
+        #[arg(long)]
+        card: Option<PathBuf>,
+        /// The fingerprint read off the other machine; enrollment fails if it
+        /// does not match the card.
+        #[arg(long)]
+        confirm_fingerprint: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List this machine's identity and its enrolled peer devices.
+    Devices {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke an enrolled device by its fingerprint or label.
+    Revoke {
+        /// The device's fingerprint or label.
+        device: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -769,6 +827,25 @@ fn main() -> Result<()> {
                 scope,
                 json,
             } => okf_export(&out, &project, scope.into(), json)?,
+        },
+        Command::Sync { command } => match command {
+            SyncCommand::DeviceCard {
+                project,
+                label,
+                json,
+            } => sync::device_card(&project, label, json)?,
+            SyncCommand::Enroll {
+                card,
+                confirm_fingerprint,
+                project,
+                json,
+            } => sync::enroll(&project, card, &confirm_fingerprint, json)?,
+            SyncCommand::Devices { project, json } => sync::devices(&project, json)?,
+            SyncCommand::Revoke {
+                device,
+                project,
+                json,
+            } => sync::revoke(&project, &device, json)?,
         },
         Command::Skills { command } => match command {
             SkillsCommand::Generate { project } => {

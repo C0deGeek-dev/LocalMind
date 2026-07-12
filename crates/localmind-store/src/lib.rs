@@ -88,8 +88,8 @@ pub use review_queue::{
 };
 pub use schema::SchemaError;
 pub use signing::{
-    author_fingerprint, digest_hex, sign_bundle, verify_signed, KeyStore, RejectReason,
-    SignatureEnvelope, SignedBundle, SigningError, TrustClass, VerificationOutcome,
+    author_fingerprint, digest_hex, sign_bundle, verify_signed, Device, DeviceCard, KeyStore,
+    RejectReason, SignatureEnvelope, SignedBundle, SigningError, TrustClass, VerificationOutcome,
     SIGNATURE_SCHEMA_VERSION,
 };
 pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};

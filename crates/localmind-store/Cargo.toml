@@ -12,6 +12,7 @@ workspace = true
 localmind-core = { path = "../localmind-core" }
 localmind-review = { path = "../localmind-review" }
 localmind-inference = { path = "../localmind-inference" }
+crypto_box = { version = "=0.9.1", features = ["seal"] }
 ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
 regex = { workspace = true }

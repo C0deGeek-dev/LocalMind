@@ -21,6 +21,7 @@
 //! into a bundle, logged, or `Debug`-printed.
 
 use crate::{MemoryBundle, ProjectConfig, StoreConfigError, MEMORY_BUNDLE_FORMAT_VERSION};
+use crypto_box::SecretKey as EncryptionSecretKey;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,6 +35,10 @@ const SIGNATURE_ALG: &str = "ed25519";
 const DIGEST_ALG: &str = "sha256";
 const SIGNING_KEY_FILE: &str = "signing.json";
 const TRUSTED_KEYS_FILE: &str = "trusted.json";
+/// The per-device X25519 encryption key, stored beside the Ed25519 signing key.
+/// Separate from the signing key: signing proves authorship, this key receives
+/// encrypted sync bundles.
+const DEVICE_KEY_FILE: &str = "device.json";
 
 /// The tamper-evidence + attribution envelope attached to a bundle. Carries only
 /// public material (digest, signature, public key, fingerprint) — never a secret.
@@ -273,6 +278,14 @@ struct StoredKeyPair {
     public_key: String,
 }
 
+/// The on-disk X25519 device-key file. Same protection posture as the signing
+/// key — the secret is owner-only and never leaves this module.
+#[derive(Serialize, Deserialize)]
+struct StoredDeviceKey {
+    private_key: String,
+    public_key: String,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct TrustedKeys {
     #[serde(default)]
@@ -284,6 +297,73 @@ struct TrustedKey {
     public_key: String,
     #[serde(default)]
     label: String,
+    /// The device's X25519 encryption public key (hex). Present for an enrolled
+    /// sync *device*; absent for a legacy signer-only trusted key, which stays
+    /// trusted for verification but is not an encryption target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encryption_key: Option<String>,
+}
+
+/// The shareable public identity of a device: its label and its two public keys
+/// (Ed25519 signing + X25519 encryption). Carried out-of-band to another of the
+/// owner's machines to enroll it; contains **no** secret material. The
+/// fingerprint (of the signing key) is what the two machines compare by hand.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeviceCard {
+    pub label: String,
+    /// Hex Ed25519 signing public key (32 bytes).
+    pub signing_key: String,
+    /// Hex X25519 encryption public key (32 bytes).
+    pub encryption_key: String,
+}
+
+impl DeviceCard {
+    /// The key-bound fingerprint the two machines verify out-of-band (first 16
+    /// hex of `sha256(signing_key)`), matching bundle-author fingerprints.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        from_hex_array::<32>(&self.signing_key)
+            .map(|key| author_fingerprint(&key))
+            .unwrap_or_default()
+    }
+
+    /// The signing/encryption keys as raw bytes, or an error if either is not
+    /// 32 hex bytes.
+    fn key_bytes(&self) -> Result<([u8; 32], [u8; 32]), SigningError> {
+        let signing = from_hex_array::<32>(&self.signing_key).ok_or_else(|| {
+            SigningError::Malformed("device signing key is not 32 hex bytes".into())
+        })?;
+        let encryption = from_hex_array::<32>(&self.encryption_key).ok_or_else(|| {
+            SigningError::Malformed("device encryption key is not 32 hex bytes".into())
+        })?;
+        Ok((signing, encryption))
+    }
+
+    /// Pretty JSON for sharing the card between machines.
+    ///
+    /// # Errors
+    /// [`SigningError::Serialize`] if serialization fails.
+    pub fn to_pretty_json(&self) -> Result<String, SigningError> {
+        serde_json::to_string_pretty(self).map_err(|e| SigningError::Serialize(e.to_string()))
+    }
+
+    /// Parse a device card from JSON.
+    ///
+    /// # Errors
+    /// [`SigningError::Malformed`] on malformed JSON.
+    pub fn from_json(text: &str) -> Result<Self, SigningError> {
+        serde_json::from_str(text).map_err(|e| SigningError::Malformed(e.to_string()))
+    }
+}
+
+/// An enrolled peer device, resolved from the registry: its label, both public
+/// keys, and the fingerprint. This is what sync encrypts to and trusts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Device {
+    pub label: String,
+    pub signing_key: [u8; 32],
+    pub encryption_key: [u8; 32],
+    pub fingerprint: String,
 }
 
 impl KeyStore {
@@ -398,11 +478,10 @@ impl KeyStore {
             trusted.trusted.push(TrustedKey {
                 public_key: hex,
                 label: label.to_string(),
+                encryption_key: None,
             });
         }
-        let body = serde_json::to_vec_pretty(&trusted)
-            .map_err(|e| SigningError::Serialize(e.to_string()))?;
-        write_owner_only(&self.keys_dir.join(TRUSTED_KEYS_FILE), &body)
+        self.write_trusted(&trusted)
     }
 
     fn load_trusted(&self) -> Result<TrustedKeys, SigningError> {
@@ -417,6 +496,191 @@ impl KeyStore {
             Err(source) => Err(SigningError::Read { path, source }),
         }
     }
+
+    fn write_trusted(&self, trusted: &TrustedKeys) -> Result<(), SigningError> {
+        let body = serde_json::to_vec_pretty(trusted)
+            .map_err(|e| SigningError::Serialize(e.to_string()))?;
+        write_owner_only(&self.keys_dir.join(TRUSTED_KEYS_FILE), &body)
+    }
+
+    /// The X25519 device-key file path.
+    #[must_use]
+    pub fn device_key_path(&self) -> PathBuf {
+        self.keys_dir.join(DEVICE_KEY_FILE)
+    }
+
+    /// Load this device's X25519 secret key, generating and persisting a fresh
+    /// keypair (owner-only `0600`) the first time. Independent of the signing
+    /// key so an existing signing identity keeps working.
+    ///
+    /// # Errors
+    /// [`SigningError`] if the store cannot be read/written or randomness fails.
+    pub fn load_or_generate_device_key(&self) -> Result<EncryptionSecretKey, SigningError> {
+        if let Some(key) = self.load_device_key()? {
+            return Ok(key);
+        }
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).map_err(|e| SigningError::Random(e.to_string()))?;
+        let secret = EncryptionSecretKey::from(seed);
+        let stored = StoredDeviceKey {
+            private_key: to_hex(&secret.to_bytes()),
+            public_key: to_hex(secret.public_key().as_bytes()),
+        };
+        let body = serde_json::to_vec_pretty(&stored)
+            .map_err(|e| SigningError::Serialize(e.to_string()))?;
+        write_owner_only(&self.device_key_path(), &body)?;
+        Ok(secret)
+    }
+
+    /// Load this device's X25519 secret key if one exists, without generating.
+    ///
+    /// # Errors
+    /// [`SigningError`] if the file exists but cannot be read or is malformed.
+    pub fn load_device_key(&self) -> Result<Option<EncryptionSecretKey>, SigningError> {
+        let path = self.device_key_path();
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(SigningError::Read { path, source }),
+        };
+        let stored: StoredDeviceKey =
+            serde_json::from_str(&content).map_err(|e| SigningError::Malformed(e.to_string()))?;
+        let seed = from_hex_array::<32>(&stored.private_key).ok_or_else(|| {
+            SigningError::Malformed("device private key is not 32 hex bytes".to_string())
+        })?;
+        Ok(Some(EncryptionSecretKey::from(seed)))
+    }
+
+    /// This device's X25519 encryption public key, when a device key exists.
+    ///
+    /// # Errors
+    /// [`SigningError`] if the key file cannot be read or is malformed.
+    pub fn device_public_key(&self) -> Result<Option<[u8; 32]>, SigningError> {
+        Ok(self
+            .load_device_key()?
+            .map(|secret| *secret.public_key().as_bytes()))
+    }
+
+    /// Build this machine's shareable device card, generating the signing and
+    /// device keys if they do not yet exist. The card carries only public keys.
+    ///
+    /// # Errors
+    /// [`SigningError`] if a key cannot be generated, read, or written.
+    pub fn own_device_card(&self, label: &str) -> Result<DeviceCard, SigningError> {
+        let signing = self.load_or_generate()?;
+        let device = self.load_or_generate_device_key()?;
+        Ok(DeviceCard {
+            label: label.to_string(),
+            signing_key: to_hex(&signing.verifying_key().to_bytes()),
+            encryption_key: to_hex(device.public_key().as_bytes()),
+        })
+    }
+
+    /// Enroll a peer device after out-of-band fingerprint verification. The
+    /// caller passes the fingerprint the user read off the *other* machine;
+    /// enrollment is refused ([`SigningError::FingerprintMismatch`]) unless it
+    /// matches the card's key-bound fingerprint, so a swapped or tampered card
+    /// cannot be enrolled. Idempotent/upsert on the signing key: re-enrolling
+    /// updates the label and encryption key, and a legacy signer-only trusted
+    /// key is upgraded in place to a full device.
+    ///
+    /// # Errors
+    /// [`SigningError::FingerprintMismatch`] on a fingerprint mismatch;
+    /// [`SigningError::Malformed`] if the card's keys are not valid;
+    /// [`SigningError`] if the store cannot be written.
+    pub fn enroll_device(
+        &self,
+        card: &DeviceCard,
+        expected_fingerprint: &str,
+    ) -> Result<(), SigningError> {
+        let (signing, _encryption) = card.key_bytes()?;
+        let actual = author_fingerprint(&signing);
+        if !fingerprints_match(&actual, expected_fingerprint) {
+            return Err(SigningError::FingerprintMismatch {
+                expected: expected_fingerprint.trim().to_lowercase(),
+                actual,
+            });
+        }
+        let signing_hex = to_hex(&signing);
+        let mut trusted = self.load_trusted()?;
+        if let Some(entry) = trusted
+            .trusted
+            .iter_mut()
+            .find(|entry| entry.public_key == signing_hex)
+        {
+            entry.label = card.label.clone();
+            entry.encryption_key = Some(card.encryption_key.clone());
+        } else {
+            trusted.trusted.push(TrustedKey {
+                public_key: signing_hex,
+                label: card.label.clone(),
+                encryption_key: Some(card.encryption_key.clone()),
+            });
+        }
+        self.write_trusted(&trusted)
+    }
+
+    /// Every enrolled peer device (registry entries carrying an encryption key).
+    /// Legacy signer-only trusted keys are excluded — they are not sync devices.
+    ///
+    /// # Errors
+    /// [`SigningError`] if the store cannot be read.
+    pub fn enrolled_devices(&self) -> Result<Vec<Device>, SigningError> {
+        let mut devices = Vec::new();
+        for entry in self.load_trusted()?.trusted {
+            let Some(encryption_hex) = &entry.encryption_key else {
+                continue;
+            };
+            let (Some(signing_key), Some(encryption_key)) = (
+                from_hex_array::<32>(&entry.public_key),
+                from_hex_array::<32>(encryption_hex),
+            ) else {
+                continue;
+            };
+            devices.push(Device {
+                label: entry.label.clone(),
+                signing_key,
+                encryption_key,
+                fingerprint: author_fingerprint(&signing_key),
+            });
+        }
+        Ok(devices)
+    }
+
+    /// Revoke an enrolled device by its fingerprint or its label: it is removed
+    /// from the registry, so later exports stop encrypting to it and its
+    /// signature is no longer trusted for sync import. Returns whether a device
+    /// was removed. Nothing else is deleted.
+    ///
+    /// # Errors
+    /// [`SigningError`] if the store cannot be read or written.
+    pub fn revoke_device(&self, selector: &str) -> Result<bool, SigningError> {
+        let selector = selector.trim();
+        let mut trusted = self.load_trusted()?;
+        let before = trusted.trusted.len();
+        trusted.trusted.retain(|entry| {
+            // Only enrolled devices (with an encryption key) are revocable here.
+            let is_device = entry.encryption_key.is_some();
+            let fingerprint = from_hex_array::<32>(&entry.public_key)
+                .map(|key| author_fingerprint(&key))
+                .unwrap_or_default();
+            let matches = fingerprints_match(&fingerprint, selector)
+                || entry.label.eq_ignore_ascii_case(selector);
+            !(is_device && matches)
+        });
+        if trusted.trusted.len() == before {
+            return Ok(false);
+        }
+        self.write_trusted(&trusted)?;
+        Ok(true)
+    }
+}
+
+/// Compare two author fingerprints case-insensitively after trimming, so a
+/// user-entered fingerprint matches the stored lowercase hex regardless of case
+/// or surrounding whitespace.
+fn fingerprints_match(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 /// Write `body` to `path` owner-only (unix `0o600`; other platforms rely on the
@@ -520,6 +784,9 @@ pub enum SigningError {
     /// The OS randomness source failed.
     #[error("failed to gather randomness: {0}")]
     Random(String),
+    /// A device card's fingerprint did not match the one confirmed out-of-band.
+    #[error("device fingerprint mismatch: confirmed {expected}, card is {actual}")]
+    FingerprintMismatch { expected: String, actual: String },
 }
 
 #[cfg(test)]
@@ -608,6 +875,118 @@ mod tests {
             signed.signature.author,
             author_fingerprint(&key.verifying_key().to_bytes())
         );
+    }
+
+    #[test]
+    fn device_key_persists_reloads_and_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeyStore::open(project(&dir)).unwrap();
+
+        let secret = store.load_or_generate_device_key().unwrap();
+        // Idempotent load-or-generate: reloading yields the same public key.
+        let reloaded = store.load_device_key().unwrap().unwrap();
+        assert_eq!(
+            secret.public_key().as_bytes(),
+            reloaded.public_key().as_bytes()
+        );
+        assert_eq!(
+            store.device_public_key().unwrap().unwrap(),
+            *secret.public_key().as_bytes()
+        );
+        // The device secret must never appear in the card the store hands out.
+        let card = store.own_device_card("this-machine").unwrap();
+        let private_hex = to_hex(&secret.to_bytes());
+        assert!(!card.to_pretty_json().unwrap().contains(&private_hex));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(store.device_key_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "device key must be owner-only");
+        }
+    }
+
+    /// Two independent stores on one machine stand in for two devices.
+    fn two_devices() -> (tempfile::TempDir, tempfile::TempDir, KeyStore, KeyStore) {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = KeyStore::open(project(&dir_a)).unwrap();
+        let store_b = KeyStore::open(project(&dir_b)).unwrap();
+        (dir_a, dir_b, store_a, store_b)
+    }
+
+    #[test]
+    fn enrollment_requires_the_confirmed_fingerprint() {
+        let (_a, _b, store_a, store_b) = two_devices();
+        let card_b = store_b.own_device_card("laptop").unwrap();
+
+        // A wrong fingerprint is refused and enrolls nothing.
+        let wrong = store_a.enroll_device(&card_b, "0000000000000000");
+        assert!(matches!(
+            wrong,
+            Err(SigningError::FingerprintMismatch { .. })
+        ));
+        assert!(store_a.enrolled_devices().unwrap().is_empty());
+
+        // The out-of-band fingerprint the user reads off the other machine.
+        store_a
+            .enroll_device(&card_b, &card_b.fingerprint())
+            .unwrap();
+        let devices = store_a.enrolled_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].label, "laptop");
+        assert_eq!(devices[0].fingerprint, card_b.fingerprint());
+        assert_eq!(
+            devices[0].encryption_key,
+            store_b.device_public_key().unwrap().unwrap()
+        );
+        // An enrolled device's signing key is trusted for verification.
+        assert!(store_a
+            .trusted_keys()
+            .unwrap()
+            .contains(&devices[0].signing_key));
+    }
+
+    #[test]
+    fn revoking_a_device_stops_encrypting_to_it_and_untrusts_its_signature() {
+        let (_a, _b, store_a, store_b) = two_devices();
+        let card_b = store_b.own_device_card("laptop").unwrap();
+        store_a
+            .enroll_device(&card_b, &card_b.fingerprint())
+            .unwrap();
+        let signing_b = from_hex_array::<32>(&card_b.signing_key).unwrap();
+        assert!(store_a.trusted_keys().unwrap().contains(&signing_b));
+
+        // Revoke by fingerprint: the device leaves the encryption target list
+        // *and* its signing key leaves the trust set.
+        assert!(store_a.revoke_device(&card_b.fingerprint()).unwrap());
+        assert!(store_a.enrolled_devices().unwrap().is_empty());
+        assert!(!store_a.trusted_keys().unwrap().contains(&signing_b));
+        // Revoking again is a no-op.
+        assert!(!store_a.revoke_device(&card_b.fingerprint()).unwrap());
+    }
+
+    #[test]
+    fn re_enrolling_updates_the_label_and_revocation_by_label_works() {
+        let (_a, _b, store_a, store_b) = two_devices();
+        let mut card_b = store_b.own_device_card("old-name").unwrap();
+        store_a
+            .enroll_device(&card_b, &card_b.fingerprint())
+            .unwrap();
+        // Re-enroll the same signing identity under a new label (upsert, no dup).
+        card_b.label = "new-name".to_string();
+        store_a
+            .enroll_device(&card_b, &card_b.fingerprint())
+            .unwrap();
+        let devices = store_a.enrolled_devices().unwrap();
+        assert_eq!(devices.len(), 1, "upsert must not duplicate the device");
+        assert_eq!(devices[0].label, "new-name");
+        // Revocation also works by label.
+        assert!(store_a.revoke_device("new-name").unwrap());
+        assert!(store_a.enrolled_devices().unwrap().is_empty());
     }
 
     #[cfg(unix)]

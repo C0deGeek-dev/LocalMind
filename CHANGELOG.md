@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- `localmind sync` gains **device enrollment**: each machine has a per-device
+  X25519 encryption keypair (`device.json`, owner-only) beside its signing key,
+  and the trust list doubles as a device registry. `sync device-card` publishes
+  a machine's public card + fingerprint, `sync enroll --confirm-fingerprint`
+  adds a peer only when the out-of-band fingerprint matches (fail-closed),
+  `sync devices` lists them, and `sync revoke` removes a device so future
+  exports stop encrypting to it and its signature is no longer trusted for sync.
+  See `docs/on-disk-contract.md`.
 - Accepted memory now carries **cross-device sync scoping**, the foundation for
   syncing memory between a user's machines. Each memory has a *sync disposition*
   (`sync` / `machine_local` / `sync_annotated`) layered over its scope — durable

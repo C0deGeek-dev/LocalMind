@@ -338,6 +338,48 @@ envelope (`SignedBundle`), the on-disk shared/portable form:
   The author is a key-bound fingerprint, so it cannot be spoofed with another
   key. See `docs/decisions.md` D-LM-0018.
 
+## Device identity and enrollment (cross-device sync)
+
+A machine that participates in cross-device sync has, beside its Ed25519 signing
+key, a per-device **X25519 encryption keypair** at
+`<home>/.localmind/keys/device.json` (`0600`, owner-only, same posture as the
+signing key — the secret never leaves the key store, is never serialized into a
+card, logged, or `Debug`-printed). Signing proves *authorship*; the X25519 key
+*receives* encrypted sync bundles.
+
+The trust list doubles as the **device registry**: a `trusted.json` entry is
+`{ public_key (Ed25519, hex), label, encryption_key? (X25519, hex) }`. An entry
+that carries an `encryption_key` is an **enrolled device** (an encryption target
+and a trusted signer for sync); a legacy entry without one stays a signer-only
+trusted key and is not an encryption target. The field is additive, so existing
+`trusted.json` files keep working.
+
+Enrollment is out-of-band and fingerprint-gated:
+
+- `localmind sync device-card` prints this machine's **device card** — its
+  label plus its two public keys — and the key-bound **fingerprint**
+  (`sha256(signing_key)[..16]`). The card JSON deliberately omits the
+  fingerprint: it must be read off the *other* machine and confirmed by hand, so
+  a tampered card cannot vouch for itself.
+- `localmind sync enroll --card <card.json> --confirm-fingerprint <fp>` adds the
+  peer to the registry **only if** `fp` matches the card's key-bound
+  fingerprint; a mismatch fails closed (nonzero exit), enrolling nothing.
+  Re-enrolling the same signing identity upserts (updates the label / encryption
+  key) rather than duplicating.
+- `localmind sync devices` lists this machine's identity and its enrolled peers.
+- `localmind sync revoke <fingerprint|label>` removes a device from the registry:
+  later exports stop encrypting to it **and** its signature is no longer trusted
+  for sync import. Nothing else is deleted.
+
+**Key rotation.** To rotate a device's identity, delete its
+`device.json`/`signing.json` (the next command regenerates a fresh keypair) and
+re-run `sync device-card`, then re-enroll the new card on each peer and
+`sync revoke` the old fingerprint there. A lost or stolen device is handled the
+same way from the *other* machines: `sync revoke` it so no future bundle is
+encrypted to it. The sync folder only ever holds ciphertext of *synced*
+knowledge (see the encrypted-bundle contract), so revocation bounds exposure to
+what was already exported.
+
 ## OKF (Open Knowledge Format) interop
 
 LocalMind reads and writes Google Cloud's **Open Knowledge Format (OKF) v0.1** —
