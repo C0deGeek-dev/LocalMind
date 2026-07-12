@@ -62,7 +62,7 @@ pub struct SyncOp {
 }
 
 impl SyncOp {
-    fn new(
+    pub(crate) fn new(
         kind: OpKind,
         memory_id: String,
         version: String,
@@ -321,7 +321,7 @@ impl SyncCursor {
 
 /// The content version of a memory: a digest of its canonical serialization, so
 /// any change to a synced field yields a new version.
-fn memory_version(entry: &MemoryEntry) -> String {
+pub(crate) fn memory_version(entry: &MemoryEntry) -> String {
     match serde_json::to_vec(entry) {
         Ok(bytes) => digest_hex(&bytes)[..16].to_string(),
         // A memory that cannot serialize cannot sync; a stable sentinel keeps the

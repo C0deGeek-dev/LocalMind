@@ -175,6 +175,29 @@ localmind skills export <skill-id> --project .
 
 LocalMind never installs or activates a generated skill by itself.
 
+## Cross-device sync
+
+Memory can follow you between your machines, encrypted end-to-end. LocalMind
+opens no sockets — you point it at a folder your own transport already syncs
+(Syncthing, OneDrive, a network share, a private git repo).
+
+```sh
+# On each machine: publish its card, then enroll the other after checking the
+# fingerprint matches on both screens.
+localmind sync device-card --project .
+localmind sync enroll --card ./their-card.json --confirm-fingerprint <fingerprint> --project .
+localmind sync devices --project .
+
+# Exchange memory through the folder, then review what arrived.
+localmind sync run --folder /path/to/synced/folder --project .
+localmind sync status --project .
+```
+
+Every synced memory is signed and sealed to your enrolled devices, so the folder
+only ever holds ciphertext. Incoming memory lands in the **review queue**, never
+straight into active memory; an unknown signer is rejected, and a conflicting
+edit is surfaced for you to reconcile rather than silently overwritten.
+
 ## Evidence so far
 
 In the controlled `localbench-uplift-v1` evaluation, injecting accepted lessons

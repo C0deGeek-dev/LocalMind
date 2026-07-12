@@ -33,6 +33,7 @@ mod schema;
 mod signing;
 mod skill_drafts;
 mod sync_bundle;
+mod sync_engine;
 
 pub use bundle::{
     BundleError, BundleMetadata, BundleScope, ExportOutcome, MemoryBundle, MemoryBundleExporter,
@@ -99,6 +100,7 @@ pub use sync_bundle::{
     SyncBundleError, SyncCursor, SyncOp, ENCRYPTED_BUNDLE_FORMAT_VERSION,
     SYNC_BUNDLE_FORMAT_VERSION,
 };
+pub use sync_engine::{SyncEngine, SyncEngineError, SyncRunReport, SyncStatus};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 

@@ -7,11 +7,23 @@
 //! encryption targets and trusted signers for sync; revoking one removes both.
 
 use anyhow::{Context, Result};
-use localmind_store::{DeviceCard, KeyStore, ProjectConfig, SigningError};
+use localmind_store::{DeviceCard, KeyStore, ProjectConfig, SigningError, SyncEngine};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::store_root;
+
+/// Resolve the sync folder: the explicit `--folder`, else `[sync] folder` from
+/// config. Errors when neither is set.
+fn resolve_folder(root: &Path, folder: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(folder) = folder {
+        return Ok(folder);
+    }
+    let config = ProjectConfig::discover(root).context("reading project config")?;
+    config.sync_folder().map(Path::to_path_buf).context(
+        "no sync folder configured — pass --folder <path> or set [sync] folder in .localmind.toml",
+    )
+}
 
 /// Open the machine-wide key store for the resolved project root, or `None`
 /// (message already printed) when no project store is found.
@@ -181,6 +193,83 @@ pub fn devices(project: &Path, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `localmind sync run` — export this device's snapshot and import peers'.
+pub fn run(project: &Path, folder: Option<PathBuf>, json: bool) -> Result<()> {
+    let Some(root) = store_root::resolve_or_report(project) else {
+        return Ok(());
+    };
+    let folder = resolve_folder(&root, folder)?;
+    let report = SyncEngine::open(&root).run(&folder)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.exported {
+        println!(
+            "Exported {} memor{} to {}.",
+            report.exported_ops,
+            if report.exported_ops == 1 { "y" } else { "ies" },
+            folder.display()
+        );
+    } else {
+        println!(
+            "Nothing exported: no enrolled devices to encrypt to (run `localmind sync enroll` \
+             first)."
+        );
+    }
+    println!(
+        "Imported {} new review candidate{} from {} peer{} ({} conflict{}, {} proposed \
+         deletion{} flagged, {} from unknown signers rejected, {} skipped).",
+        report.imported_candidates,
+        plural(report.imported_candidates),
+        report.peers_scanned,
+        plural(report.peers_scanned),
+        report.conflicts,
+        plural(report.conflicts),
+        report.tombstones_flagged,
+        plural(report.tombstones_flagged),
+        report.rejected_unknown_signer,
+        report.skipped_files,
+    );
+    if report.imported_candidates > 0 || report.tombstones_flagged > 0 {
+        println!("Review them with `localmind review list`.");
+    }
+    Ok(())
+}
+
+/// `localmind sync status` — show folder, peers, cursors, pending review.
+pub fn status(project: &Path, folder: Option<PathBuf>, json: bool) -> Result<()> {
+    let Some(root) = store_root::resolve_or_report(project) else {
+        return Ok(());
+    };
+    let folder = resolve_folder(&root, folder)?;
+    let status = SyncEngine::open(&root).status(&folder)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+    println!("Sync folder:      {}", status.folder);
+    match &status.own_fingerprint {
+        Some(fingerprint) => println!("This device:      {fingerprint}"),
+        None => println!("This device:      no identity yet"),
+    }
+    println!("Enrolled devices: {}", status.enrolled_devices);
+    println!("Peer bundles:     {}", status.peer_bundles);
+    println!("Tracked peers:    {}", status.tracked_peers);
+    println!("Pending review:   {}", status.pending_review);
+    Ok(())
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// `localmind sync revoke` — revoke an enrolled device by fingerprint or label.

@@ -114,6 +114,11 @@ pub struct SyncConfig {
     pub project_key: Option<String>,
     #[serde(default)]
     pub device_label: Option<String>,
+    /// The folder this project exchanges encrypted sync bundles through (carried
+    /// by Syncthing/OneDrive/a share/a private git repo — LocalMind opens no
+    /// sockets). Absolute. When unset, `localmind sync` needs `--folder`.
+    #[serde(default)]
+    pub folder: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -378,6 +383,12 @@ impl ProjectConfig {
             .device_label
             .clone()
             .unwrap_or_else(localmind_core::host_device_label)
+    }
+
+    /// The configured `[sync] folder`, if any.
+    #[must_use]
+    pub fn sync_folder(&self) -> Option<&Path> {
+        self.config.sync.folder.as_deref()
     }
 }
 

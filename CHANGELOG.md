@@ -5,6 +5,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- `localmind sync run` / `localmind sync status` **exchange memory through a sync
+  folder** (`[sync] folder`) — LocalMind opens no sockets; the folder is carried
+  by the user's own transport. A run exports this device's syncable memory as one
+  opaque, encrypted bundle and imports peers': every incoming op is **review-
+  gated** (never straight to active memory), an unknown signer is rejected
+  fail-closed, a same-memory divergence routes to review as a conflict without
+  ever overwriting the local memory (no last-writer-wins), and a proposed
+  deletion flags the memory for review (never auto-deletes). Re-runs are
+  idempotent. See `docs/on-disk-contract.md`.
 - The **encrypted sync payload** is in place: an incremental op-bundle
   (create/update/supersede/tombstone over accepted memory), signed with the
   device's Ed25519 identity and then sealed to every enrolled device's X25519

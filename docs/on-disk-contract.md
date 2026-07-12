@@ -411,6 +411,40 @@ to the exported versions so a re-export sends only changes and never echoes a
 memory back. Derived state (vectors, graph, usage) is never in an op-bundle; the
 destination re-embeds locally.
 
+## Sync-folder exchange
+
+`localmind sync run` exchanges memory through a user-configured folder
+(`[sync] folder`, carried by Syncthing/OneDrive/a share/a private git repo —
+LocalMind opens no sockets). Layout:
+
+```
+<sync folder>/
+  <device-fingerprint>.sync        # one encrypted bundle per device (opaque name)
+  <device-fingerprint>.sync.tmp    # transient; an in-progress atomic write
+```
+
+Each device writes exactly one `<own-fingerprint>.sync` file — a full-snapshot
+export, overwritten each run via a temp-then-rename so a peer never reads a
+half-written bundle. A run reads every `*.sync` file except its own, tolerantly
+skipping any it cannot parse (a partial transport write) or decrypt (not
+addressed to it). Import routing is **review-gated**: a verified op from an
+enrolled device becomes a review candidate (never straight to active memory); an
+unknown signer is rejected fail-closed; a same-memory divergence becomes a
+conflict candidate under a fresh `sync-conflict-<id>-<ver>` id so promotion can
+never overwrite the local memory (never last-writer-wins); a proposed deletion
+flags the local memory for review (never auto-deletes, D-LM-0016).
+
+Per-project sync state (never synced, rebuildable) lives under the project:
+
+```
+<project root>/.localmind/sync/
+  cursor-<peer-fingerprint>.json   # versions already imported from that peer
+```
+
+`localmind sync status` reports the folder, this device's fingerprint, the
+enrolled-device count, the peer-bundle count, the tracked peers, and the pending
+review count.
+
 **Key rotation.** To rotate a device's identity, delete its
 `device.json`/`signing.json` (the next command regenerates a fresh keypair) and
 re-run `sync device-card`, then re-enroll the new card on each peer and

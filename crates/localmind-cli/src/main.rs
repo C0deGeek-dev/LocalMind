@@ -402,6 +402,30 @@ enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Export this device's memory and import peers' via the sync folder.
+    Run {
+        /// Sync folder; defaults to `[sync] folder` in .localmind.toml.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the sync folder, enrolled peers, cursors, and pending review count.
+    Status {
+        /// Sync folder; defaults to `[sync] folder` in .localmind.toml.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -846,6 +870,16 @@ fn main() -> Result<()> {
                 project,
                 json,
             } => sync::revoke(&project, &device, json)?,
+            SyncCommand::Run {
+                folder,
+                project,
+                json,
+            } => sync::run(&project, folder, json)?,
+            SyncCommand::Status {
+                folder,
+                project,
+                json,
+            } => sync::status(&project, folder, json)?,
         },
         Command::Skills { command } => match command {
             SkillsCommand::Generate { project } => {
