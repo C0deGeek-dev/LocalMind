@@ -72,6 +72,7 @@ fn seed_lesson(
         supersedes: Vec::new(),
         contradicts: Vec::new(),
         status: MemoryStatus::Active,
+        sync_meta: localmind_core::SyncMeta::default(),
     };
     memory.persist_memory_entry(&entry)?;
     let report = anchor_memory(store, &entry.id, &entry.related_entities)?;

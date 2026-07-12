@@ -1,6 +1,7 @@
 use localmind_core::{
-    Confidence, EpistemicStatus, EvidenceId, EvidenceKind, EvidenceRef, LessonCategory,
-    MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, SessionId,
+    Confidence, EnvFingerprint, EpistemicStatus, EvidenceId, EvidenceKind, EvidenceRef,
+    LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, SessionId,
+    SyncDisposition, SyncMeta,
 };
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
@@ -32,6 +33,7 @@ impl MarkdownMemoryFormat {
         push_string_list(&mut output, "related_entities", &entry.related_entities);
         push_id_list(&mut output, "supersedes", &entry.supersedes);
         push_id_list(&mut output, "contradicts", &entry.contradicts);
+        push_sync_meta(&mut output, &entry.sync_meta);
         push_evidence(&mut output, &entry.evidence);
         output.push_str("---\n\n");
         output.push_str(entry.body.trim());
@@ -69,6 +71,11 @@ impl MarkdownMemoryFormat {
         let mut supersedes: Vec<MemoryEntryId> = Vec::new();
         let mut contradicts: Vec<MemoryEntryId> = Vec::new();
         let mut evidence: Vec<EvidenceRef> = Vec::new();
+        let mut disposition: Option<SyncDisposition> = None;
+        let mut origin_os: Option<String> = None;
+        let mut origin_arch: Option<String> = None;
+        let mut origin_device: Option<String> = None;
+        let mut origin_toolchain: Option<String> = None;
 
         let mut cursor = 0;
         while cursor < front_matter.len() {
@@ -109,6 +116,14 @@ impl MarkdownMemoryFormat {
                 "evidence" => {
                     collect_evidence(&front_matter, &mut cursor, &mut evidence);
                 }
+                // Cross-device sync scoping (all optional). An unknown
+                // disposition token reads as absent rather than an error, so a
+                // future disposition never fails an older parser.
+                "sync" => disposition = SyncDisposition::from_token(value),
+                "origin_os" => origin_os = Some(unescape_yaml_scalar(value)),
+                "origin_arch" => origin_arch = Some(unescape_yaml_scalar(value)),
+                "origin_device" => origin_device = Some(unescape_yaml_scalar(value)),
+                "origin_toolchain" => origin_toolchain = Some(unescape_yaml_scalar(value)),
                 // Unknown keys are skipped so a forward-compatible field never
                 // fails an older parser.
                 _ => {}
@@ -134,7 +149,40 @@ impl MarkdownMemoryFormat {
             supersedes,
             contradicts,
             status: MemoryStatus::Active,
+            sync_meta: assemble_sync_meta(
+                disposition,
+                origin_os,
+                origin_arch,
+                origin_device,
+                origin_toolchain,
+            ),
         })
+    }
+}
+
+/// Rebuild a [`SyncMeta`] from the flat `sync`/`origin_*` front-matter fields.
+/// An origin environment is present only when at least one `origin_*` field was
+/// written, so a file with none round-trips to an empty (pre-sync) `SyncMeta`.
+fn assemble_sync_meta(
+    disposition: Option<SyncDisposition>,
+    origin_os: Option<String>,
+    origin_arch: Option<String>,
+    origin_device: Option<String>,
+    origin_toolchain: Option<String>,
+) -> SyncMeta {
+    let has_origin = origin_os.is_some()
+        || origin_arch.is_some()
+        || origin_device.is_some()
+        || origin_toolchain.is_some();
+    let origin_env = has_origin.then(|| EnvFingerprint {
+        os: origin_os.unwrap_or_default(),
+        arch: origin_arch.unwrap_or_default(),
+        device_label: origin_device.unwrap_or_default(),
+        toolchain: origin_toolchain,
+    });
+    SyncMeta {
+        disposition,
+        origin_env,
     }
 }
 
@@ -400,6 +448,32 @@ fn push_id_list(output: &mut String, key: &str, values: &[MemoryEntryId]) {
     }
 }
 
+/// Emit the cross-device sync fields, each only when present. The disposition
+/// is a scalar token; the origin environment is written as flat `origin_*`
+/// scalars (reusing the standard scalar escaping) rather than a nested block, so
+/// the parser needs no new block reader.
+fn push_sync_meta(output: &mut String, meta: &SyncMeta) {
+    if let Some(disposition) = meta.disposition {
+        output.push_str(&format!("sync: {}\n", disposition.as_str()));
+    }
+    if let Some(env) = &meta.origin_env {
+        output.push_str(&format!("origin_os: {}\n", escape_yaml_scalar(&env.os)));
+        output.push_str(&format!("origin_arch: {}\n", escape_yaml_scalar(&env.arch)));
+        if !env.device_label.is_empty() {
+            output.push_str(&format!(
+                "origin_device: {}\n",
+                escape_yaml_scalar(&env.device_label)
+            ));
+        }
+        if let Some(toolchain) = &env.toolchain {
+            output.push_str(&format!(
+                "origin_toolchain: {}\n",
+                escape_yaml_scalar(toolchain)
+            ));
+        }
+    }
+}
+
 fn push_evidence(output: &mut String, evidence: &[EvidenceRef]) {
     if evidence.is_empty() {
         return;
@@ -434,8 +508,8 @@ mod tests {
 
     use super::{MarkdownMemoryFormat, MarkdownParseError};
     use localmind_core::{
-        Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-        MemoryScope, MemoryStatus, SessionId,
+        Confidence, EnvFingerprint, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry,
+        MemoryEntryId, MemoryScope, MemoryStatus, SessionId, SyncDisposition, SyncMeta,
     };
     use time::OffsetDateTime;
 
@@ -460,6 +534,15 @@ mod tests {
             supersedes: vec![MemoryEntryId::new("mem-old")],
             contradicts: vec![MemoryEntryId::new("mem-other")],
             status: MemoryStatus::Active,
+            sync_meta: SyncMeta {
+                disposition: Some(SyncDisposition::SyncAnnotated),
+                origin_env: Some(EnvFingerprint {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    device_label: "David's PC: main".to_string(),
+                    toolchain: Some("cuda-13.3".to_string()),
+                }),
+            },
         }
     }
 
@@ -493,6 +576,13 @@ mod tests {
         );
         assert_eq!(parsed.evidence[1].label, "a manual: note");
         assert_eq!(parsed.evidence[1].uri.as_deref(), Some("repo@abc123"));
+        // Sync scoping survives: the disposition token and every origin-env
+        // field (including a colon-bearing device label that must be escaped).
+        assert_eq!(parsed.sync_meta, original.sync_meta);
+        assert_eq!(
+            parsed.effective_disposition(),
+            SyncDisposition::SyncAnnotated
+        );
     }
 
     #[test]
@@ -513,12 +603,17 @@ mod tests {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
         });
         let parsed = MarkdownMemoryFormat::parse(&text).unwrap();
         assert_eq!(parsed.id.as_str(), "mem-min");
         assert_eq!(parsed.scope, MemoryScope::Project);
         assert!(parsed.evidence.is_empty());
         assert!(parsed.tags.is_empty());
+        // No sync fields written ⇒ an empty (pre-sync) SyncMeta round-trips, and
+        // a Project memory falls back to the syncing per-scope default.
+        assert_eq!(parsed.sync_meta, SyncMeta::default());
+        assert_eq!(parsed.effective_disposition(), SyncDisposition::Sync);
     }
 
     #[test]

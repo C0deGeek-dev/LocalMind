@@ -22,6 +22,7 @@ mod okf;
 mod okf_export;
 mod okf_import;
 mod paths;
+mod project_identity;
 mod quality;
 mod redaction;
 mod research;
@@ -39,7 +40,7 @@ pub use bundle::{
 pub use bundle_import::{BundleImportError, BundleImportReport, BundleImporter, ImportTrust};
 pub use config::{
     LearningConfig, LocalMindConfig, ProjectConfig, RetrievalConfig, ReviewConfig,
-    ReviewModeConfig, StoreConfigError,
+    ReviewModeConfig, StoreConfigError, SyncConfig,
 };
 pub use context_export::{ContextExport, ContextExportError, ContextExportTarget, ContextExporter};
 pub use dedup::{
@@ -73,6 +74,7 @@ pub use okf::{OkfFormat, OkfParseError, OKF_VERSION};
 pub use okf_export::{OkfExportError, OkfExportReport, OkfExporter};
 pub use okf_import::{OkfImportError, OkfImportReport, OkfImporter};
 pub use paths::{MemoryPathError, MemoryPathResolver};
+pub use project_identity::{ProjectIdentity, ProjectIdentitySource};
 pub use quality::{classify_quality, Quality};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use research::{BatchInsightError, BatchInsightPipeline, BatchInsightReport};
@@ -296,6 +298,7 @@ mod tests {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: localmind_core::SyncMeta::default(),
         })
     }
 

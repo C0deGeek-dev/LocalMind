@@ -163,6 +163,7 @@ impl OkfFormat {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: localmind_core::SyncMeta::default(),
         })
     }
 }
@@ -397,6 +398,7 @@ mod tests {
             supersedes: vec![MemoryEntryId::new("mem-old")],
             contradicts: vec![MemoryEntryId::new("mem-other")],
             status: MemoryStatus::Active,
+            sync_meta: localmind_core::SyncMeta::default(),
         }
     }
 

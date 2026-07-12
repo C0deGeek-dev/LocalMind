@@ -16,6 +16,8 @@ pub struct LocalMindConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -98,6 +100,20 @@ impl Default for RetrievalConfig {
             rerank_window: default_rerank_window(),
         }
     }
+}
+
+/// Cross-device sync settings (`[sync]`). All optional; a project with no
+/// `[sync]` section is unchanged. `project_key` fixes the path-independent
+/// project identity (otherwise derived from the git remote, else the directory
+/// name); `device_label` names this machine on synced knowledge (otherwise a
+/// best-effort hostname is used). The sync folder and enrollment settings are
+/// added by later work.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct SyncConfig {
+    #[serde(default)]
+    pub project_key: Option<String>,
+    #[serde(default)]
+    pub device_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -344,6 +360,24 @@ impl ProjectConfig {
     #[must_use]
     pub fn rerank_window(&self) -> usize {
         self.config.retrieval.rerank_window
+    }
+
+    /// The explicit `[sync] project_key`, if the project pinned one.
+    #[must_use]
+    pub fn sync_project_key(&self) -> Option<&str> {
+        self.config.sync.project_key.as_deref()
+    }
+
+    /// The label this machine stamps on synced knowledge: the configured
+    /// `[sync] device_label` when set, otherwise a best-effort hostname (empty
+    /// when even that is unavailable). Never fails.
+    #[must_use]
+    pub fn sync_device_label(&self) -> String {
+        self.config
+            .sync
+            .device_label
+            .clone()
+            .unwrap_or_else(localmind_core::host_device_label)
     }
 }
 

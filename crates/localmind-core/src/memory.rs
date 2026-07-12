@@ -1,4 +1,5 @@
 use crate::{Confidence, EvidenceRef, LessonCategory, MemoryEntryId, SessionId};
+use crate::{SyncDisposition, SyncMeta};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -19,6 +20,26 @@ pub struct MemoryEntry {
     pub supersedes: Vec<MemoryEntryId>,
     pub contradicts: Vec<MemoryEntryId>,
     pub status: MemoryStatus,
+    /// Cross-device sync state (disposition override + origin machine). Defaults
+    /// empty so an entry that predates sync — or one deserialized from an older
+    /// bundle — keeps its exact prior meaning.
+    #[serde(default)]
+    pub sync_meta: SyncMeta,
+}
+
+impl MemoryEntry {
+    /// The sync disposition this memory actually takes: the per-memory override
+    /// if set, otherwise the per-scope default.
+    #[must_use]
+    pub fn effective_disposition(&self) -> SyncDisposition {
+        self.sync_meta.effective_disposition(&self.scope)
+    }
+
+    /// Whether this memory participates in cross-device sync at all.
+    #[must_use]
+    pub fn syncs(&self) -> bool {
+        self.effective_disposition().syncs()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -352,6 +352,7 @@ mod tests {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: localmind_core::SyncMeta::default(),
         };
         std::fs::write(bundle.join("convention.md"), OkfFormat::to_okf(&entry)).unwrap();
 

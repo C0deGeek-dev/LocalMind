@@ -53,6 +53,7 @@ fn entry(id: &str, body: &str) -> MemoryEntry {
         supersedes: Vec::new(),
         contradicts: Vec::new(),
         status: MemoryStatus::Active,
+        sync_meta: localmind_core::SyncMeta::default(),
     }
 }
 

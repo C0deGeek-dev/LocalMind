@@ -7,8 +7,9 @@ use crate::{
     StoreConfigError,
 };
 use localmind_core::{
-    content_fingerprint, AuditEventKind, CandidateDestination, Confidence, EpistemicStatus,
-    MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewItemId, ReviewState, SkillDraft,
+    content_fingerprint, AuditEventKind, CandidateDestination, Confidence, EnvFingerprint,
+    EpistemicStatus, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewItemId,
+    ReviewState, SkillDraft, SyncMeta,
 };
 use localmind_inference::{
     ChatEndpoint, ChatMessage, InferenceCapability, InferenceError, TokenUsage,
@@ -245,7 +246,7 @@ impl MemoryPersistence {
             MemoryScope::Project
         };
         let connection = self.connection_for(&scope)?;
-        let entry = MemoryEntry {
+        let mut entry = MemoryEntry {
             id: MemoryEntryId::new(item.candidate.id.as_str()),
             scope,
             body,
@@ -261,7 +262,9 @@ impl MemoryPersistence {
             supersedes: target.iter().cloned().collect(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
         };
+        self.stamp_origin_env(&mut entry);
         // The Markdown file is written first; the single transaction that
         // indexes it and records the audit row is the point of truth. A crash
         // after the file write leaves an unindexed file that the next
@@ -336,6 +339,12 @@ impl MemoryPersistence {
         // that owns the scope, so a global lesson lands in the machine-wide
         // database that every project reads.
         let connection = self.connection_for(&entry.scope)?;
+        // Stamp the origin machine on syncable knowledge before it is written.
+        // The caller's entry is left untouched; the persisted copy carries the
+        // fingerprint.
+        let mut entry = entry.clone();
+        self.stamp_origin_env(&mut entry);
+        let entry = &entry;
         // A directly-persisted (seeded) entry carries no session context; its
         // language comes from the body alone (the body-wins branch).
         let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
@@ -346,6 +355,19 @@ impl MemoryPersistence {
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         self.embed_memory_if_configured(connection, entry)?;
         Ok(path)
+    }
+
+    /// Stamp the origin-machine fingerprint on a memory that will sync, so the
+    /// destination device can tell same-machine from cross-machine knowledge.
+    /// Best-effort and total: machine-local knowledge (which never leaves this
+    /// device) is left unstamped, an already-stamped entry is untouched, and
+    /// capture reads only compile-time constants plus the configured device
+    /// label — it can never block or fail a write.
+    fn stamp_origin_env(&self, entry: &mut MemoryEntry) {
+        if !entry.syncs() || entry.sync_meta.origin_env.is_some() {
+            return;
+        }
+        entry.sync_meta.origin_env = Some(EnvFingerprint::capture(self.config.sync_device_label()));
     }
 
     pub fn record_review_audit(&self) -> Result<usize, MemoryPersistenceError> {

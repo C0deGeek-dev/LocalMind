@@ -17,6 +17,7 @@ mod review;
 mod session;
 mod skill;
 mod summary;
+mod sync;
 
 pub use adapter::{
     AgentSessionAdapter, AgentSessionInput, HostMappingRequirement, HostSessionMapper,
@@ -43,6 +44,7 @@ pub use session::{
 };
 pub use skill::SkillDraft;
 pub use summary::{DigestSection, DigestSectionKind, SessionSummary};
+pub use sync::{host_device_label, EnvFingerprint, SyncDisposition, SyncMeta};
 
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};

@@ -5,6 +5,17 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Accepted memory now carries **cross-device sync scoping**, the foundation for
+  syncing memory between a user's machines. Each memory has a *sync disposition*
+  (`sync` / `machine_local` / `sync_annotated`) layered over its scope — durable
+  `Project`/`GlobalUser` knowledge syncs by default, while `Session`/`Research`/
+  `Skill` stay machine-local — and syncing memory is stamped at write time with
+  a best-effort *environment fingerprint* (OS, arch, device label) recording the
+  machine that wrote it. A new `[sync]` config section adds `project_key`
+  (a path-independent project identity, otherwise derived from the git `origin`
+  remote so the same repo at different paths on two machines maps to one store)
+  and `device_label`. All fields are additive and forward-compatible: existing
+  memory files and older readers are unaffected. See `docs/on-disk-contract.md`.
 - `localmind ui` and `localmind review list` now find the project store by
   walking up from the given directory (default: the current directory) to the
   nearest ancestor holding `.localmind.toml`, so running either from a

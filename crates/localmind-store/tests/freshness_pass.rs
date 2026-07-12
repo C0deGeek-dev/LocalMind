@@ -58,6 +58,7 @@ fn entry_cat(id: &str, body: &str, scope: MemoryScope, category: LessonCategory)
         supersedes: Vec::new(),
         contradicts: Vec::new(),
         status: MemoryStatus::Active,
+        sync_meta: localmind_core::SyncMeta::default(),
     }
 }
 

@@ -55,7 +55,20 @@ semantic_dedup = false       # opt in to embedding-cosine dedup of accepted memo
 [retrieval]
 rerank = false               # opt in to the embedding rerank stage; off = deterministic blend only
 rerank_window = 20           # how many top blended hits rerank may reorder
+
+[sync]
+project_key = "github.com/org/repo"  # optional; a stable, path-independent project identity
+device_label = "David-PC"            # optional; names this machine on synced knowledge
 ```
+
+`[sync]` is optional and inert on its own — a project with no `[sync]` section
+behaves exactly as before. `project_key` fixes the **path-independent project
+identity** so the same repo at `D:\repos\X` on one machine and `C:\repos\X` on
+another map to the same project store; when unset it is derived from the git
+`origin` remote (HTTPS and SSH URLs normalize to the same `host/path` key), and
+failing that from the project directory name (a weak fallback that can collide —
+surfaced as such). `device_label` is the machine name stamped on synced
+knowledge; when unset a best-effort hostname (`COMPUTERNAME`/`HOSTNAME`) is used.
 
 A **missing file refuses all learning writes** (a typed `MissingConfig` error) —
 the file is the opt-in. Once it exists, an omitted key takes its default
@@ -191,7 +204,17 @@ matter between `---` fences, then the body.
 | `created_at` / `updated_at` | optional | RFC 3339 timestamps |
 | `tags`, `related_files`, `related_entities` | when non-empty | string lists |
 | `supersedes`, `contradicts` | when non-empty | memory-id lists |
+| `sync` | when overridden | cross-device disposition: `sync`, `machine_local`, or `sync_annotated`. Absent ⇒ the per-scope default (`Project`/`GlobalUser` sync; `Session`/`Research`/`Skill` are machine-local). An unknown token reads as absent, not an error |
+| `origin_os`, `origin_arch` | when stamped | the machine that wrote a *syncing* memory (`std::env::consts`). Stamped best-effort at write time; a machine-local memory is never stamped |
+| `origin_device` | when non-empty | the origin machine's device label (from `[sync] device_label` or a hostname) |
+| `origin_toolchain` | when set | reserved optional GPU/toolchain summary of the origin machine |
 | `evidence` | when non-empty | list of `{id, kind, label, redacted, uri?}` |
+
+The `sync`/`origin_*` fields are additive and forward-compatible: a reader that
+predates them skips unknown keys, and a memory file written without them parses
+to an empty sync state (the per-scope default disposition, no origin machine).
+Derived state — the vector index, code graph, and usage counters — is never part
+of this sync surface; it is rebuilt locally after an import.
 
 Scalars containing `: # ' "` or newlines are single-quoted with `''`
 escaping. The Markdown file is the human-readable source of truth; the
@@ -200,7 +223,7 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **8**); every component steps the schema on open and refuses
+(currently **9**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
