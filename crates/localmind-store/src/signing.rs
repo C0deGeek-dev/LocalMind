@@ -187,68 +187,66 @@ pub fn sign_bundle(
     let canonical = bundle
         .canonical_bytes()
         .map_err(|e| SigningError::Serialize(e.to_string()))?;
-    let signature = signing_key.sign(&canonical);
-    let public_key = signing_key.verifying_key();
-    let public_key_bytes = public_key.to_bytes();
-    let envelope = SignatureEnvelope {
-        alg: SIGNATURE_ALG.to_string(),
-        digest_alg: DIGEST_ALG.to_string(),
-        schema_version: SIGNATURE_SCHEMA_VERSION,
-        digest: digest_hex(&canonical),
-        signature: to_hex(&signature.to_bytes()),
-        public_key: to_hex(&public_key_bytes),
-        author: author_fingerprint(&public_key_bytes),
-    };
     Ok(SignedBundle {
         bundle: bundle.clone(),
-        signature: envelope,
+        signature: sign_detached(&canonical, signing_key),
     })
 }
 
-/// Verify a signed bundle, fail-closed. `trusted_keys` are the raw 32-byte public
-/// keys that classify a valid signature as [`TrustClass::Trusted`] (the caller
-/// includes its own public key here); any other valid key is `Untrusted`.
+/// Sign arbitrary canonical bytes, producing the shared [`SignatureEnvelope`].
+/// This is the one signer both the portable memory bundle and the sync op-bundle
+/// use, so there is no second signing path to keep in step.
 #[must_use]
-pub fn verify_signed(signed: &SignedBundle, trusted_keys: &[[u8; 32]]) -> VerificationOutcome {
-    let envelope = &signed.signature;
-    // 1. Schema / algorithm.
+pub fn sign_detached(canonical: &[u8], signing_key: &SigningKey) -> SignatureEnvelope {
+    let signature = signing_key.sign(canonical);
+    let public_key_bytes = signing_key.verifying_key().to_bytes();
+    SignatureEnvelope {
+        alg: SIGNATURE_ALG.to_string(),
+        digest_alg: DIGEST_ALG.to_string(),
+        schema_version: SIGNATURE_SCHEMA_VERSION,
+        digest: digest_hex(canonical),
+        signature: to_hex(&signature.to_bytes()),
+        public_key: to_hex(&public_key_bytes),
+        author: author_fingerprint(&public_key_bytes),
+    }
+}
+
+/// Verify a [`SignatureEnvelope`] over arbitrary canonical bytes, fail-closed —
+/// the algorithm/schema, key, author binding, digest, and signature checks
+/// shared by every signed artefact (a caller adds any payload-specific version
+/// check of its own). `trusted_keys` classify a valid signature as
+/// [`TrustClass::Trusted`]; any other valid key is `Untrusted`.
+#[must_use]
+pub fn verify_detached(
+    canonical: &[u8],
+    envelope: &SignatureEnvelope,
+    trusted_keys: &[[u8; 32]],
+) -> VerificationOutcome {
     if envelope.alg != SIGNATURE_ALG
         || envelope.digest_alg != DIGEST_ALG
         || envelope.schema_version > SIGNATURE_SCHEMA_VERSION
     {
         return reject(RejectReason::UnsupportedSchema);
     }
-    // 2. Bundle version.
-    if signed.bundle.format_version > MEMORY_BUNDLE_FORMAT_VERSION {
-        return reject(RejectReason::UnsupportedBundleVersion);
-    }
-    // 3. Public key.
     let Some(public_key_bytes) = from_hex_array::<32>(&envelope.public_key) else {
         return reject(RejectReason::MalformedKey);
     };
     let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key_bytes) else {
         return reject(RejectReason::MalformedKey);
     };
-    // 4. Author binds to the key.
     if author_fingerprint(&public_key_bytes) != envelope.author {
         return reject(RejectReason::AuthorMismatch);
     }
-    // 5. Recompute canonical bytes + digest (a serialization failure rejects).
-    let Ok(canonical) = signed.bundle.canonical_bytes() else {
-        return reject(RejectReason::BadDigest);
-    };
-    if digest_hex(&canonical) != envelope.digest {
+    if digest_hex(canonical) != envelope.digest {
         return reject(RejectReason::BadDigest);
     }
-    // 6. Signature.
     let Some(signature_bytes) = from_hex_array::<64>(&envelope.signature) else {
         return reject(RejectReason::MalformedSignature);
     };
     let signature = Signature::from_bytes(&signature_bytes);
-    if verifying_key.verify(&canonical, &signature).is_err() {
+    if verifying_key.verify(canonical, &signature).is_err() {
         return reject(RejectReason::BadSignature);
     }
-    // 7. Trust classification.
     let class = if trusted_keys.iter().any(|key| key == &public_key_bytes) {
         TrustClass::Trusted
     } else {
@@ -258,6 +256,23 @@ pub fn verify_signed(signed: &SignedBundle, trusted_keys: &[[u8; 32]]) -> Verifi
         class,
         author: envelope.author.clone(),
     }
+}
+
+/// Verify a signed bundle, fail-closed. `trusted_keys` are the raw 32-byte public
+/// keys that classify a valid signature as [`TrustClass::Trusted`] (the caller
+/// includes its own public key here); any other valid key is `Untrusted`.
+#[must_use]
+pub fn verify_signed(signed: &SignedBundle, trusted_keys: &[[u8; 32]]) -> VerificationOutcome {
+    // The bundle-version check is specific to the portable memory bundle; the
+    // rest of the fail-closed verification (schema/key/author/digest/signature/
+    // trust) is the shared detached path over the bundle's canonical bytes.
+    if signed.bundle.format_version > MEMORY_BUNDLE_FORMAT_VERSION {
+        return reject(RejectReason::UnsupportedBundleVersion);
+    }
+    let Ok(canonical) = signed.bundle.canonical_bytes() else {
+        return reject(RejectReason::BadDigest);
+    };
+    verify_detached(&canonical, &signed.signature, trusted_keys)
 }
 
 fn reject(reason: RejectReason) -> VerificationOutcome {

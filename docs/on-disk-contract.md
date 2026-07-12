@@ -371,6 +371,46 @@ Enrollment is out-of-band and fingerprint-gated:
   later exports stop encrypting to it **and** its signature is no longer trusted
   for sync import. Nothing else is deleted.
 
+## Encrypted sync payload
+
+A sync exchange moves an **op-bundle** — a set of ops over accepted memory —
+between the owner's devices. Three nested layers, innermost first:
+
+- **Op-bundle** (`SyncBundle`, `format_version` 1): `{ format_version, ops }`
+  where each op is `{ op_id, kind, memory_id, version, origin_device, entry? }`.
+  `kind` ∈ `create | update | supersede | tombstone`; `entry` is the full
+  `MemoryEntry` for the first three and absent for a tombstone. `version` is the
+  memory's content digest and `op_id` is content-addressed
+  (`sha256(kind:memory_id:version)`), so re-exports are idempotent. Ops are
+  ordered by `op_id`; the compact JSON of the sorted bundle is its canonical
+  bytes. Only **syncable** memory is included (disposition `sync`/`sync_annotated`;
+  machine-local is excluded), redacted defence-in-depth by the same exporter the
+  portable bundle uses. `origin_device` is provenance only — never a merge
+  tiebreak (conflicts route to review, never last-writer-wins).
+- **Signed op-bundle** (`SignedSyncBundle`): the op-bundle plus a
+  `SignatureEnvelope` over its canonical bytes, produced by the **same** Ed25519
+  signer as the portable bundle. Verified fail-closed against the trusted device
+  keys; a newer `format_version` is rejected.
+- **Encrypted bundle** (`EncryptedBundle`, `format_version` 1) — **the only thing
+  that reaches the sync folder**: `{ format_version, recipients: [{ fingerprint,
+  sealed }] }`. Each `sealed` is a NaCl sealed box (`crypto_box`, X25519 +
+  XSalsa20Poly1305) of the *signed op-bundle JSON* to one enrolled device's
+  X25519 key. **Fail-closed**: a bundle with no enrolled recipient is never
+  produced, so plaintext memory content never lands in the folder. The artefact
+  is named by an opaque content address (a digest of the ciphertext) — no memory
+  title, id, or count leaks into the filename. `fingerprint` identifies which
+  sealed copy is whose (the recipient's signing fingerprint); a non-recipient
+  device cannot open any copy. Residual, documented leakage: the number of
+  recipients and the ciphertext size/timing.
+
+**Per-peer cursor.** Incremental export diffs the current syncable memory against
+a per-peer `SyncCursor` (`{ versions: { memory_id: version } }`): an unseen
+memory is a `create`, a changed version an `update` (or `supersede` when the
+entry carries a `supersedes` edge), an unchanged one no op. The cursor advances
+to the exported versions so a re-export sends only changes and never echoes a
+memory back. Derived state (vectors, graph, usage) is never in an op-bundle; the
+destination re-embeds locally.
+
 **Key rotation.** To rotate a device's identity, delete its
 `device.json`/`signing.json` (the next command regenerates a fresh keypair) and
 re-run `sync device-card`, then re-enroll the new card on each peer and

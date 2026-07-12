@@ -32,6 +32,7 @@ mod review_queue;
 mod schema;
 mod signing;
 mod skill_drafts;
+mod sync_bundle;
 
 pub use bundle::{
     BundleError, BundleMetadata, BundleScope, ExportOutcome, MemoryBundle, MemoryBundleExporter,
@@ -88,11 +89,16 @@ pub use review_queue::{
 };
 pub use schema::SchemaError;
 pub use signing::{
-    author_fingerprint, digest_hex, sign_bundle, verify_signed, Device, DeviceCard, KeyStore,
-    RejectReason, SignatureEnvelope, SignedBundle, SigningError, TrustClass, VerificationOutcome,
-    SIGNATURE_SCHEMA_VERSION,
+    author_fingerprint, digest_hex, sign_bundle, sign_detached, verify_detached, verify_signed,
+    Device, DeviceCard, KeyStore, RejectReason, SignatureEnvelope, SignedBundle, SigningError,
+    TrustClass, VerificationOutcome, SIGNATURE_SCHEMA_VERSION,
 };
 pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};
+pub use sync_bundle::{
+    device_signing_fingerprint, EncryptedBundle, OpKind, SealedCopy, SignedSyncBundle, SyncBundle,
+    SyncBundleError, SyncCursor, SyncOp, ENCRYPTED_BUNDLE_FORMAT_VERSION,
+    SYNC_BUNDLE_FORMAT_VERSION,
+};
 
 use localmind_core::{LearningAuditEvent, MemoryEntry, ReviewItem};
 

@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- The **encrypted sync payload** is in place: an incremental op-bundle
+  (create/update/supersede/tombstone over accepted memory), signed with the
+  device's Ed25519 identity and then sealed to every enrolled device's X25519
+  key (`crypto_box` sealed box). Fail-closed — a bundle that cannot be encrypted
+  to at least one enrolled device is never produced, so the transport folder
+  only ever holds ciphertext with opaque, content-addressed names. A per-peer
+  cursor makes export incremental (only changed memory, no echo). See
+  `docs/on-disk-contract.md`.
 - `localmind sync` gains **device enrollment**: each machine has a per-device
   X25519 encryption keypair (`device.json`, owner-only) beside its signing key,
   and the trust list doubles as a device registry. `sync device-card` publishes
