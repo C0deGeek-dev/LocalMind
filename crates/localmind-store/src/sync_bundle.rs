@@ -16,8 +16,8 @@
 //! this layer does not need (see the plan's decision log).
 
 use crate::{
-    author_fingerprint, digest_hex, sign_detached, verify_detached, Device, SignatureEnvelope,
-    SigningError, VerificationOutcome,
+    digest_hex, sign_detached, verify_detached, Device, SignatureEnvelope, SigningError,
+    VerificationOutcome,
 };
 use crypto_box::{aead::OsRng, PublicKey as EncryptionPublicKey, SecretKey as EncryptionSecretKey};
 use ed25519_dalek::SigningKey;
@@ -355,13 +355,6 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The fingerprint of a device's *signing* key — how a recipient copy is
-/// labelled and how a device is named in diagnostics.
-#[must_use]
-pub fn device_signing_fingerprint(device: &Device) -> String {
-    author_fingerprint(&device.signing_key)
-}
-
 /// Errors producing or opening a sync payload. Never carries memory content.
 #[derive(Debug, Error)]
 pub enum SyncBundleError {
@@ -386,6 +379,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::author_fingerprint;
     use localmind_core::{
         Confidence, EnvFingerprint, LessonCategory, MemoryEntryId, MemoryScope, MemoryStatus,
         SyncMeta,

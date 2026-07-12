@@ -96,9 +96,8 @@ pub use signing::{
 };
 pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};
 pub use sync_bundle::{
-    device_signing_fingerprint, EncryptedBundle, OpKind, SealedCopy, SignedSyncBundle, SyncBundle,
-    SyncBundleError, SyncCursor, SyncOp, ENCRYPTED_BUNDLE_FORMAT_VERSION,
-    SYNC_BUNDLE_FORMAT_VERSION,
+    EncryptedBundle, OpKind, SealedCopy, SignedSyncBundle, SyncBundle, SyncBundleError, SyncCursor,
+    SyncOp, ENCRYPTED_BUNDLE_FORMAT_VERSION, SYNC_BUNDLE_FORMAT_VERSION,
 };
 pub use sync_engine::{SyncEngine, SyncEngineError, SyncRunReport, SyncStatus};
 

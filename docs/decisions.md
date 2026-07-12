@@ -4,6 +4,83 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0027 — Cross-device sync is encrypted, folder-carried, and review-gated; it reuses the signed-bundle machinery rather than forking it
+
+- **Date**: 2026-07-12
+- **Status**: accepted
+
+Memory should follow a user across their machines, but doing so safely rules out
+the obvious shapes: a cloud service (a third party holds the knowledge), plaintext
+in a synced folder (the transport provider reads it), and last-writer-wins merge
+(silent knowledge loss). LocalMind already had the hard parts from the
+signed-portable-bundle work (D-LM-0018): an Ed25519 identity, fail-closed
+verification against a local trust list, and a review-gated importer, plus the
+never-auto-delete/route-to-review invariant (D-LM-0016), embedding dedup
+(D-LM-0020), and the write-time quality gate (D-LM-0024). Sync is therefore a thin
+layer over that machinery, not a second system.
+
+Decision — five parts:
+
+1. **No networking; a dumb folder is the transport.** LocalMind opens no sockets
+   for sync. The user points it at a folder their own tooling already
+   replicates (Syncthing, OneDrive, a share, a private git repo). Sync is
+   command-driven (`localmind sync run`/`status`), not a daemon.
+
+2. **Per-device identity + out-of-band enrollment.** Each device gains an X25519
+   encryption keypair beside its Ed25519 signing key (same `0600` key-store
+   hygiene). A device publishes a **card** (its label + both public keys); the
+   local trust list doubles as a **device registry** (an added, optional
+   encryption key per entry). Enrollment is refused unless the fingerprint the
+   user confirms out-of-band matches the card — the card's own JSON deliberately
+   omits the fingerprint so it cannot vouch for itself. Revocation drops a device
+   as both an encryption target and a trusted signer.
+
+3. **Signed, then sealed, incremental op-bundles.** A payload is a set of
+   create/update/supersede/tombstone ops over accepted memory, signed by the
+   **same** Ed25519 signer as the portable bundle (the shared logic is extracted,
+   so there is one signer, not two) and then sealed to every enrolled device with
+   a NaCl sealed box (`crypto_box`: X25519 + XSalsa20Poly1305). **Fail-closed:** a
+   bundle that cannot be encrypted to at least one enrolled device is never
+   produced, so the folder only ever holds ciphertext under opaque,
+   content-addressed names. Op identity is content-addressed and conflicts route
+   to review, so the version stamp is a content fingerprint, not a causal counter
+   (a vector clock would be an optimization the never-auto-delete posture does not
+   need). The crypto crate is pinned pure-Rust within MSRV 1.82; no bespoke
+   crypto.
+
+4. **Review-gated import with fail-closed trust.** On a run, each peer bundle is
+   parsed tolerantly (a partial transport write or a foreign file is skipped),
+   decrypted with this device's key (skipped if not a recipient), and verified —
+   an **unknown signer is rejected fail-closed**. Every accepted op becomes a
+   *review candidate* (never straight to active memory), inheriting the existing
+   dedup + quality gate at the accept seam. A same-memory divergence routes to
+   review under a fresh id so promotion can never overwrite the local memory (no
+   last-writer-wins); a proposed deletion flags the memory for review (never
+   auto-deletes). A per-peer cursor plus a local-identical check make re-runs
+   idempotent and prevent echo loops. Auto-accepting an enrolled device's ops is
+   deliberately not done — the safe review-everything posture ships.
+
+5. **Environment scoping; derived state never syncs.** Every memory carries a
+   *sync disposition* (`sync`/`machine_local`/`sync_annotated`) over its scope —
+   durable `Project`/`GlobalUser` knowledge syncs, `Session`/`Research`/`Skill`
+   stay local — and syncable knowledge is stamped with the machine that wrote it.
+   A path-independent project identity (the normalized git remote, else an
+   explicit key) maps the same repo at different paths to one store. The vector
+   index, code graph, and usage counters are never in a payload; an import
+   re-embeds locally through the existing promotion hook. Retrieval down-weights —
+   never drops — a lesson whose origin machine differs from the one retrieving it,
+   so a machine-specific tip does not pollute the wrong box.
+
+Consequences: cross-device memory is confidential to the owner's devices,
+tamper-evident, and never merged without a human; the transport is replaceable and
+untrusted; and the whole feature is a module behind CLI subcommands that can be
+removed without touching the store. Reuses D-LM-0016 (route-to-review /
+never-auto-delete), D-LM-0018 (signed bundles, local trust, fail-closed verify),
+D-LM-0020 (dedup), and D-LM-0024 (quality gate). Known residual, documented
+limits: the ciphertext's size and the recipient count/timing leak even though the
+content does not; conflict reconciliation is human, not automatic. See
+`docs/on-disk-contract.md` for the storage contract.
+
 ## D-LM-0026 — The retrieval rerank stage is host-wired, not deleted; the stored-vector entry point is the host seam
 
 - **Date**: 2026-07-07

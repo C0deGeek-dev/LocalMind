@@ -10,6 +10,7 @@ Local-first learning engine: reviewed project memory and graph-connected knowled
 
 - **[[Getting-Started]]** — install and first run.
 - **[[How-To]]** — task-oriented recipes.
+- **[[Cross-Device-Sync]]** — encrypted memory sync between your machines.
 - **[[Examples]]** — runnable, copy-pasteable samples.
 - **[[Reference]]** — index into the in-repo `docs/`.
 - **[[Troubleshooting]]** — common problems and fixes.
