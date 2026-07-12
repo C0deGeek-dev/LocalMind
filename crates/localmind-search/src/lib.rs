@@ -124,6 +124,33 @@ pub fn hybrid_memory_search(
     Ok(results)
 }
 
+/// Down-weight — never drop — synced lessons whose origin machine differs from
+/// the one retrieving them, then re-sort. A machine-specific lesson (a local
+/// path, a GPU/driver quirk) should rank below an equally-relevant same-machine
+/// lesson on another box, but must stay retrievable. `current_device` is this
+/// machine's label; `weight` in `(0, 1)` is the penalty factor (a value `>= 1`,
+/// or an empty `current_device`, is a no-op). A hit with no recorded origin, or
+/// one from this machine, is untouched.
+pub fn downweight_foreign_env(hits: &mut [HybridMemoryResult], current_device: &str, weight: f32) {
+    if current_device.is_empty() || !(0.0..1.0).contains(&weight) {
+        return;
+    }
+    for hit in hits.iter_mut() {
+        if let Some(origin) = hit.memory.origin_device.as_deref() {
+            if !origin.is_empty() && origin != current_device {
+                hit.combined_score *= weight;
+            }
+        }
+    }
+    hits.sort_by(|left, right| {
+        right
+            .combined_score
+            .partial_cmp(&left.combined_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.memory.memory_id.cmp(&right.memory.memory_id))
+    });
+}
+
 pub fn query_needs_project_scope(query: &ContextQuery) -> bool {
     query.project_uri.is_some()
 }
@@ -154,6 +181,57 @@ mod tests {
         };
 
         assert!(query_needs_project_scope(&query));
+    }
+
+    #[test]
+    fn foreign_env_downweight_reorders_but_never_drops() {
+        use super::{downweight_foreign_env, HybridMemoryResult};
+        use localmind_core::{EpistemicStatus, MemoryEntryId};
+        use localmind_store::MemorySearchResult;
+        use std::path::PathBuf;
+
+        fn hit(id: &str, score: f32, origin: Option<&str>) -> HybridMemoryResult {
+            HybridMemoryResult {
+                memory: MemorySearchResult {
+                    memory_id: MemoryEntryId::new(id),
+                    path: PathBuf::new(),
+                    score: score as i64,
+                    snippet: String::new(),
+                    category: "CodePattern".to_string(),
+                    created_at: String::new(),
+                    stale_candidate: false,
+                    epistemic_status: EpistemicStatus::Procedure,
+                    contradicted: false,
+                    hit_count: 0,
+                    origin_device: origin.map(str::to_string),
+                },
+                keyword_score: score,
+                vector_score: 0.0,
+                combined_score: score,
+            }
+        }
+
+        // A foreign-machine hit narrowly outranks a same-machine one before the
+        // down-weight; after it, the same-machine hit leads — but both remain.
+        let mut hits = vec![
+            hit("foreign", 100.0, Some("Laptop")),
+            hit("local", 95.0, Some("PC")),
+            hit("unstamped", 90.0, None),
+        ];
+        downweight_foreign_env(&mut hits, "PC", 0.85);
+        assert_eq!(hits.len(), 3, "nothing is filtered out");
+        assert_eq!(hits[0].memory.memory_id.as_str(), "local");
+        // foreign: 100 * 0.85 = 85 < 90 (unstamped, untouched) < 95 (local).
+        assert_eq!(hits[1].memory.memory_id.as_str(), "unstamped");
+        assert_eq!(hits[2].memory.memory_id.as_str(), "foreign");
+
+        // A weight of 1.0 (disabled) leaves the original order.
+        let mut disabled = vec![
+            hit("foreign", 100.0, Some("Laptop")),
+            hit("local", 95.0, Some("PC")),
+        ];
+        downweight_foreign_env(&mut disabled, "PC", 1.0);
+        assert_eq!(disabled[0].memory.memory_id.as_str(), "foreign");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 9;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 10;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -90,6 +90,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 9 {
         apply_v9(&tx)?;
+    }
+    if current < 10 {
+        apply_v10(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -317,6 +320,17 @@ fn apply_v9(connection: &Connection) -> Result<(), SchemaError> {
                 ON doc_chunk(path);
             "#,
         )
+        .map_err(SchemaError::Sqlite)
+}
+
+/// Cross-device origin: the label of the machine that wrote a *synced* memory,
+/// so injection can down-weight (never drop) a lesson whose origin machine
+/// differs from the one retrieving it. Derived from the Markdown source of truth
+/// (the entry's origin environment); NULL for a memory with no origin stamp, so
+/// every pre-v10 row upgrades cleanly.
+fn apply_v10(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch("ALTER TABLE memory_index ADD COLUMN origin_device TEXT;")
         .map_err(SchemaError::Sqlite)
 }
 

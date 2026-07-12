@@ -56,6 +56,11 @@ pub struct MemorySearchResult {
     /// signal; 0 = never retrieved). Exposed read-only at retrieval; the bump is
     /// post-turn, never on this read path.
     pub hit_count: i64,
+    /// The label of the machine that wrote this memory, when it was synced from
+    /// another device (else `None`). Exposed at retrieval so injection can
+    /// down-weight — never drop — a lesson whose origin machine differs from the
+    /// one retrieving it.
+    pub origin_device: Option<String>,
 }
 
 /// The provenance answer for one memory — "why do you think that?". Source
@@ -69,6 +74,9 @@ pub struct MemoryProvenance {
     pub status: String,
     pub stale_candidate: bool,
     pub contradicts: Vec<MemoryEntryId>,
+    /// The machine that wrote this memory, when it was synced from another device
+    /// (else `None`) — the "which of my machines taught me this" surface.
+    pub origin_device: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1044,7 +1052,7 @@ impl MemoryPersistence {
             r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
                        m.epistemic_status, m.contradicted, m.category, m.hit_count,
-                       bm25(memory_fts) AS rank
+                       m.origin_device, bm25(memory_fts) AS rank
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'{language_clause}
@@ -1065,7 +1073,8 @@ impl MemoryPersistence {
                 row.get::<_, i64>(6)? != 0,
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
-                row.get::<_, f64>(9)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, f64>(10)?,
             ))
         };
         let rows = if let Some(language) = language {
@@ -1087,6 +1096,7 @@ impl MemoryPersistence {
                 contradicted,
                 category,
                 hit_count,
+                origin_device,
                 rank,
             ) = row.map_err(MemoryPersistenceError::Sqlite)?;
             // bm25 returns a more-negative value for better matches; expose a
@@ -1104,6 +1114,7 @@ impl MemoryPersistence {
                 epistemic_status: EpistemicStatus::from_token(&epistemic),
                 contradicted,
                 hit_count,
+                origin_device,
             });
         }
         Ok(results)
@@ -1123,7 +1134,7 @@ impl MemoryPersistence {
             .connection
             .query_row(
                 "SELECT source_session, status, epistemic_status, contradicted, confidence, \
-                 stale_candidate FROM memory_index WHERE memory_id = ?1",
+                 stale_candidate, origin_device FROM memory_index WHERE memory_id = ?1",
                 params![memory_id.as_str()],
                 |row| {
                     Ok((
@@ -1133,13 +1144,21 @@ impl MemoryPersistence {
                         row.get::<_, i64>(3)? != 0,
                         row.get::<_, f64>(4)?,
                         row.get::<_, i64>(5)? != 0,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
             .optional()
             .map_err(MemoryPersistenceError::Sqlite)?;
-        let Some((source_session, status, epistemic, _contradicted, confidence, stale_candidate)) =
-            row
+        let Some((
+            source_session,
+            status,
+            epistemic,
+            _contradicted,
+            confidence,
+            stale_candidate,
+            origin_device,
+        )) = row
         else {
             return Ok(None);
         };
@@ -1170,6 +1189,7 @@ impl MemoryPersistence {
             status,
             stale_candidate,
             contradicts,
+            origin_device,
         }))
     }
 
@@ -1707,8 +1727,8 @@ impl MemoryPersistence {
                 r#"
                 INSERT INTO memory_index
                 (memory_id, path, scope, category, body, source_session, status, created_at,
-                 epistemic_status, confidence, language)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10)
+                 epistemic_status, confidence, language, origin_device)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     path = excluded.path,
                     scope = excluded.scope,
@@ -1719,6 +1739,7 @@ impl MemoryPersistence {
                     epistemic_status = excluded.epistemic_status,
                     confidence = excluded.confidence,
                     language = excluded.language,
+                    origin_device = excluded.origin_device,
                     -- Re-promoting a memory refreshes it, clearing any prior
                     -- change-aware staleness flag.
                     stale_candidate = 0
@@ -1737,6 +1758,12 @@ impl MemoryPersistence {
                     epistemic_status.as_str(),
                     entry.confidence.value(),
                     language,
+                    entry
+                        .sync_meta
+                        .origin_env
+                        .as_ref()
+                        .map(|env| env.device_label.clone())
+                        .filter(|label| !label.is_empty()),
                 ],
             )
             .map_err(MemoryPersistenceError::Sqlite)?;

@@ -5,6 +5,16 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Synced memory is now **environment-aware**. A synced memory records the machine
+  that wrote it (`memory_index.origin_device`, schema v10), and retrieval can
+  **down-weight — never drop —** a lesson from another machine so a
+  machine-specific tip (a local path, a GPU/driver quirk) ranks below an
+  equally-relevant same-machine lesson, tunable via `[sync] foreign_env_weight`
+  (conservative default, `1.0` disables). Derived state (vectors, code graph,
+  usage counters) is never part of a sync payload — imports re-embed locally
+  through the existing promotion path. A synced memory's origin machine is
+  surfaced on `MemorySearchResult`/`MemoryProvenance` and in its review candidate.
+  See `docs/on-disk-contract.md`.
 - `localmind sync run` / `localmind sync status` **exchange memory through a sync
   folder** (`[sync] folder`) — LocalMind opens no sockets; the folder is carried
   by the user's own transport. A run exports this device's syncable memory as one

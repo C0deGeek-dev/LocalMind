@@ -59,6 +59,8 @@ rerank_window = 20           # how many top blended hits rerank may reorder
 [sync]
 project_key = "github.com/org/repo"  # optional; a stable, path-independent project identity
 device_label = "David-PC"            # optional; names this machine on synced knowledge
+folder = "/abs/path/to/synced/dir"   # optional; the ciphertext exchange folder
+foreign_env_weight = 0.85            # optional; injection down-weight for a foreign-machine lesson (0<w<=1; 1 disables)
 ```
 
 `[sync]` is optional and inert on its own — a project with no `[sync]` section
@@ -223,7 +225,7 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **9**); every component steps the schema on open and refuses
+(currently **10**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
@@ -231,7 +233,7 @@ databases newer than it understands. Tables:
 | `schema_migrations(version, applied_at)` | human-readable baseline marker | records only the baseline (`version = 1`); the stepper does **not** append a row per applied step, so `PRAGMA user_version` (above) is the authoritative schema version — read that, not this table, to gate on the schema |
 | `review_items(id, session_id, candidate_json, state, reviewer_action, reviewer, note, replacement_summary, created_at, updated_at)` | review queue | `candidate_json` is a serialized `CandidateLesson` |
 | `audit_events(id, kind, actor, subject, metadata_json, happened_at)` | audit log | `metadata_json` is always valid JSON (serde-built) |
-| `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language, hit_count, last_used_at)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval; `hit_count` (default 0) and `last_used_at` (NULL = never) are the **runtime usage signal** — bumped post-turn when a memory is injected, used by the freshness pass to surface never-retrieved dead weight. Unlike the other columns these two are **not** rebuildable from the Markdown source of truth: a reindex resets them to zero-usage (the same state as a pre-v8 upgrade), which is acceptable for a best-effort signal |
+| `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language, hit_count, last_used_at)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval; `hit_count` (default 0) and `last_used_at` (NULL = never) are the **runtime usage signal** — bumped post-turn when a memory is injected, used by the freshness pass to surface never-retrieved dead weight. Unlike the other columns these two are **not** rebuildable from the Markdown source of truth: a reindex resets them to zero-usage (the same state as a pre-v8 upgrade), which is acceptable for a best-effort signal; `origin_device` (schema v10, NULL when not synced) is the label of the machine that wrote a synced memory, derived from the Markdown origin stamp, so injection can down-weight a foreign-machine lesson without dropping it |
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |
 | `memory_relationships(memory_id, relation_kind, target)` | typed relations | kinds: `category`, `session`, `file`, `entity`, `contradicts` |
 | `vector_index(subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)` | rebuildable semantic index | f32 little-endian BLOBs; exact cosine in Rust |

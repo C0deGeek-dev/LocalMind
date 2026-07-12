@@ -108,7 +108,7 @@ impl Default for RetrievalConfig {
 /// name); `device_label` names this machine on synced knowledge (otherwise a
 /// best-effort hostname is used). The sync folder and enrollment settings are
 /// added by later work.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct SyncConfig {
     #[serde(default)]
     pub project_key: Option<String>,
@@ -119,6 +119,30 @@ pub struct SyncConfig {
     /// sockets). Absolute. When unset, `localmind sync` needs `--folder`.
     #[serde(default)]
     pub folder: Option<PathBuf>,
+    /// Injection down-weight factor in `(0, 1]` for a synced lesson whose origin
+    /// machine differs from this one. `1.0` (or unset) disables the down-weight;
+    /// a smaller value ranks foreign-machine lessons lower **without dropping
+    /// them**. Conservative default.
+    #[serde(default = "default_foreign_env_weight")]
+    pub foreign_env_weight: f32,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            project_key: None,
+            device_label: None,
+            folder: None,
+            foreign_env_weight: default_foreign_env_weight(),
+        }
+    }
+}
+
+fn default_foreign_env_weight() -> f32 {
+    // Conservative: a foreign-machine lesson keeps most of its rank; it drops
+    // only enough to prefer a same-machine lesson when both match, and is never
+    // filtered out.
+    0.85
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -389,6 +413,19 @@ impl ProjectConfig {
     #[must_use]
     pub fn sync_folder(&self) -> Option<&Path> {
         self.config.sync.folder.as_deref()
+    }
+
+    /// The injection down-weight factor for a synced lesson from another machine,
+    /// clamped to `(0, 1]` (a non-positive or `> 1` config value is treated as
+    /// disabled, `1.0`).
+    #[must_use]
+    pub fn foreign_env_weight(&self) -> f32 {
+        let weight = self.config.sync.foreign_env_weight;
+        if weight > 0.0 && weight <= 1.0 {
+            weight
+        } else {
+            1.0
+        }
     }
 }
 

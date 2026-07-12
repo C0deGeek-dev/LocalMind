@@ -492,6 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn an_op_bundle_carries_no_derived_state() {
+        // Derived state — vectors, code graph, usage counters — is never part of
+        // the sync payload; it is rebuilt locally after import. The op-bundle
+        // serializes only MemoryEntry (Markdown source-of-truth) fields, so a
+        // serialized bundle must contain none of those column/table markers.
+        let (ops, _) = SyncCursor::default().diff(&[entry("m1", "b", vec![])], "PC");
+        let json = serde_json::to_string(&SyncBundle::new(ops)).unwrap();
+        for marker in [
+            "hit_count",
+            "last_used_at",
+            "vector_blob",
+            "vector_index",
+            "graph_node",
+            "graph_edge",
+        ] {
+            assert!(
+                !json.contains(marker),
+                "op-bundle must not carry derived-state field `{marker}`:\n{json}"
+            );
+        }
+    }
+
+    #[test]
     fn encryption_is_fail_closed_with_no_recipients() {
         let signing = SigningKey::from_bytes(&[1u8; 32]);
         let (ops, _) = SyncCursor::default().diff(&[entry("m1", "b", vec![])], "PC");

@@ -453,7 +453,18 @@ fn base_candidate(
     for evidence in &entry.evidence {
         candidate = candidate.with_evidence(evidence.clone());
     }
-    let note = format!("imported from synced device {author}");
+    // Surface the origin in the review view: the sending device's fingerprint and,
+    // when stamped, the machine the memory was originally written on.
+    let origin = entry
+        .sync_meta
+        .origin_env
+        .as_ref()
+        .map(|env| format!("{} ({}/{})", env.device_label, env.os, env.arch))
+        .filter(|summary| !summary.starts_with(" ("));
+    let note = match origin {
+        Some(origin) => format!("imported from synced device {author}; origin machine {origin}"),
+        None => format!("imported from synced device {author}"),
+    };
     candidate =
         candidate.with_evidence(EvidenceRef::new(EvidenceKind::ManualNote, note).redacted());
     candidate.related_files = entry.related_files.clone();
