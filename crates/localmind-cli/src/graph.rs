@@ -13,14 +13,7 @@ use localmind_store::GraphStore;
 
 /// Directory names never descended into during the walk. Everything else that
 /// begins with a dot is also skipped (VCS metadata, tool caches).
-const SKIP_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-];
+const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", "build", ".venv", "venv"];
 
 /// File extensions admitted as candidates: the supported source languages plus
 /// Markdown (for doc-mention resolution). Everything else — binaries, images,

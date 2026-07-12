@@ -832,7 +832,9 @@ impl MemoryPersistence {
             .prepare("SELECT path, COUNT(*) FROM doc_chunk GROUP BY path ORDER BY path")
             .map_err(MemoryPersistenceError::Sqlite)?;
         let rows = statement
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(MemoryPersistenceError::Sqlite)?;
         let mut out = Vec::new();
         for row in rows {
@@ -849,7 +851,9 @@ impl MemoryPersistence {
     ) -> Result<Vec<(i64, Option<String>, String)>, MemoryPersistenceError> {
         let mut statement = self
             .connection
-            .prepare("SELECT ordinal, heading, body FROM doc_chunk WHERE path = ?1 ORDER BY ordinal")
+            .prepare(
+                "SELECT ordinal, heading, body FROM doc_chunk WHERE path = ?1 ORDER BY ordinal",
+            )
             .map_err(MemoryPersistenceError::Sqlite)?;
         let rows = statement
             .query_map(params![path], |row| {

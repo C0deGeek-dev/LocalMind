@@ -45,11 +45,7 @@ pub fn serve(project: PathBuf, port: u16, open: bool, token: Option<String>) -> 
     Ok(())
 }
 
-fn route(
-    project: &Path,
-    token: Option<&str>,
-    request: &mut Request,
-) -> Response<Cursor<Vec<u8>>> {
+fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response<Cursor<Vec<u8>>> {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
     let (path, query) = raw_url.split_once('?').unwrap_or((raw_url.as_str(), ""));
@@ -160,16 +156,37 @@ fn api_review_action(project: &Path, id: &str, action: &str, body: &str) -> Resu
 
     match action {
         "accept" => {
-            decide(project, &item_id, ReviewAction::Accept, reviewer, note, None)?;
+            decide(
+                project,
+                &item_id,
+                ReviewAction::Accept,
+                reviewer,
+                note,
+                None,
+            )?;
             let entry = persistence.promote_review_item(&item_id)?;
             Ok(json!({ "id": id, "state": "Accepted", "promoted": entry.id.to_string() }))
         }
         "accept_only" => {
-            let state = decide(project, &item_id, ReviewAction::Accept, reviewer, note, None)?;
+            let state = decide(
+                project,
+                &item_id,
+                ReviewAction::Accept,
+                reviewer,
+                note,
+                None,
+            )?;
             Ok(json!({ "id": id, "state": state, "promoted": Value::Null }))
         }
         "reject" => {
-            let state = decide(project, &item_id, ReviewAction::Reject, reviewer, note, None)?;
+            let state = decide(
+                project,
+                &item_id,
+                ReviewAction::Reject,
+                reviewer,
+                note,
+                None,
+            )?;
             Ok(json!({ "id": id, "state": state }))
         }
         "defer" => {
@@ -271,7 +288,12 @@ fn api_memory_list(project: &Path, query: &str) -> Result<Value> {
         .into_iter()
         .filter(|r| matches_filter(&r.scope, scope_filter.as_deref()))
         .filter(|r| matches_filter(&r.category, category_filter.as_deref()))
-        .filter(|r| matches_filter(r.language.as_deref().unwrap_or(""), language_filter.as_deref()))
+        .filter(|r| {
+            matches_filter(
+                r.language.as_deref().unwrap_or(""),
+                language_filter.as_deref(),
+            )
+        })
         .map(|r| {
             json!({
                 "id": r.memory_id.to_string(),
@@ -304,7 +326,12 @@ fn api_memory_facets(project: &Path) -> Result<Value> {
         *scope.entry(record.scope.clone()).or_default() += 1;
         *category.entry(record.category.clone()).or_default() += 1;
         *language
-            .entry(record.language.clone().unwrap_or_else(|| "(agnostic)".to_string()))
+            .entry(
+                record
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "(agnostic)".to_string()),
+            )
             .or_default() += 1;
         *status.entry(record.status.clone()).or_default() += 1;
         if record.stale_candidate {
@@ -333,18 +360,16 @@ fn api_memory_get(project: &Path, id: &str) -> Result<Value> {
         .into_iter()
         .find(|r| r.memory_id.as_str() == id)
         .ok_or_else(|| anyhow!("accepted memory not found: {id}"))?;
-    let provenance = persistence
-        .provenance(&MemoryEntryId::new(id))?
-        .map(|p| {
-            json!({
-                "source_session": p.source_session,
-                "confidence": p.confidence,
-                "epistemic_status": format!("{:?}", p.epistemic_status),
-                "status": p.status,
-                "stale": p.stale_candidate,
-                "contradicts": p.contradicts.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-            })
-        });
+    let provenance = persistence.provenance(&MemoryEntryId::new(id))?.map(|p| {
+        json!({
+            "source_session": p.source_session,
+            "confidence": p.confidence,
+            "epistemic_status": format!("{:?}", p.epistemic_status),
+            "status": p.status,
+            "stale": p.stale_candidate,
+            "contradicts": p.contradicts.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        })
+    });
     Ok(json!({
         "id": record.memory_id.to_string(),
         "category": record.category,
@@ -469,8 +494,10 @@ fn api_graph_local(project: &Path, query: &str) -> Result<Value> {
     nodes.extend(store.neighbors(&focus.id, depth)?);
     let mut seen = std::collections::HashSet::new();
     nodes.retain(|node| seen.insert(node.id.as_str().to_string()));
-    let ids: std::collections::HashSet<String> =
-        nodes.iter().map(|node| node.id.as_str().to_string()).collect();
+    let ids: std::collections::HashSet<String> = nodes
+        .iter()
+        .map(|node| node.id.as_str().to_string())
+        .collect();
     let focus_id = focus.id.as_str().to_string();
 
     let node_json: Vec<Value> = nodes
@@ -527,7 +554,10 @@ fn api_graph_global(project: &Path, query: &str) -> Result<Value> {
             let file = if kind == NodeKind::File {
                 node.qualified_name.clone()
             } else {
-                node.location.as_ref().map(|l| l.path.clone()).unwrap_or_default()
+                node.location
+                    .as_ref()
+                    .map(|l| l.path.clone())
+                    .unwrap_or_default()
             };
             if !file.is_empty() && (prefix.is_empty() || file.starts_with(&prefix)) {
                 id_to_file.insert(node.id.as_str().to_string(), file);
@@ -543,9 +573,7 @@ fn api_graph_global(project: &Path, query: &str) -> Result<Value> {
             if let (Some(from_file), Some(to_file)) =
                 (id_to_file.get(from.as_str()), id_to_file.get(to.as_str()))
             {
-                if from_file != to_file
-                    && edge_set.insert((from_file.clone(), to_file.clone()))
-                {
+                if from_file != to_file && edge_set.insert((from_file.clone(), to_file.clone())) {
                     *degree.entry(from_file.clone()).or_default() += 1;
                     *degree.entry(to_file.clone()).or_default() += 1;
                 }
