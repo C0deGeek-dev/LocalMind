@@ -70,14 +70,30 @@ fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     let result = match (&method, segments.as_slice()) {
         (Method::Get, [""] | ["index.html"]) => return html_response(INDEX_HTML),
-        (Method::Get, ["css", "localmind.css"]) => return static_response(CSS_LOCALMIND, "text/css; charset=utf-8"),
-        (Method::Get, ["js", "app.js"]) => return static_response(JS_APP, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "graph.js"]) => return static_response(JS_GRAPH, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "views", "dashboard.js"]) => return static_response(JS_DASHBOARD, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "views", "review.js"]) => return static_response(JS_REVIEW, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "views", "memory.js"]) => return static_response(JS_MEMORY, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "views", "docs.js"]) => return static_response(JS_DOCS, "application/javascript; charset=utf-8"),
-        (Method::Get, ["js", "views", "audit.js"]) => return static_response(JS_AUDIT, "application/javascript; charset=utf-8"),
+        (Method::Get, ["css", "localmind.css"]) => {
+            return static_response(CSS_LOCALMIND, "text/css; charset=utf-8")
+        }
+        (Method::Get, ["js", "app.js"]) => {
+            return static_response(JS_APP, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "graph.js"]) => {
+            return static_response(JS_GRAPH, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "views", "dashboard.js"]) => {
+            return static_response(JS_DASHBOARD, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "views", "review.js"]) => {
+            return static_response(JS_REVIEW, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "views", "memory.js"]) => {
+            return static_response(JS_MEMORY, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "views", "docs.js"]) => {
+            return static_response(JS_DOCS, "application/javascript; charset=utf-8")
+        }
+        (Method::Get, ["js", "views", "audit.js"]) => {
+            return static_response(JS_AUDIT, "application/javascript; charset=utf-8")
+        }
         (Method::Get, ["api", "status"]) => api_status(project),
         (Method::Get, ["api", "review"]) => api_review_list(project, query),
         (Method::Get, ["api", "review", id]) => api_review_get(project, id),
@@ -904,7 +920,13 @@ mod tests {
         assert!(super::CSS_LOCALMIND.contains("--cyan"));
         assert!(super::JS_APP.contains("route()"));
         assert!(super::JS_GRAPH.contains("forceGraph"));
-        for name in ["JS_DASHBOARD", "JS_REVIEW", "JS_MEMORY", "JS_DOCS", "JS_AUDIT"] {
+        for name in [
+            "JS_DASHBOARD",
+            "JS_REVIEW",
+            "JS_MEMORY",
+            "JS_DOCS",
+            "JS_AUDIT",
+        ] {
             let s = match name {
                 "JS_DASHBOARD" => super::JS_DASHBOARD,
                 "JS_REVIEW" => super::JS_REVIEW,

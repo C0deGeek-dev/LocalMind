@@ -42,9 +42,24 @@ async function renderDocs() {
     docSearch();
   });
 
-  const d = await api('GET', '/api/docs/files');
+  let d;
+  try {
+    d = await api('GET', '/api/docs/files');
+  } catch (e) {
+    document.querySelector('#docN').textContent = 'error';
+    document.querySelector('#docRes').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
   docFiles = d.files;
   document.querySelector('#docN').textContent = `${d.total} files`;
+  if (!docFiles.length) {
+    document.querySelector('#docRes').innerHTML = `<div class="empty">Nothing ingested yet — the doc index is empty.<br><br>
+      Run <code>localmind ingest docs &lt;path&gt; --project &lt;project-root&gt;</code> to index a tree's Markdown
+      (in a LocalPilot workspace, <code>localpilot ingest run</code> feeds this index too), then reload this tab.
+      Semantic search additionally needs <code>[inference] embedding_base_url</code> +
+      <code>embedding_model</code> in <code>.localmind.toml</code>; browsing works without embeddings.</div>`;
+    return;
+  }
 
   const repos = {};
   docFiles.forEach(x => { const r = x.path.split('/')[0]; repos[r] = (repos[r] || 0) + 1; });
