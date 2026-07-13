@@ -4,8 +4,7 @@
 //! exposing a small JSON API that calls the **same** store methods the CLI
 //! does — `ReviewQueue::decide`, `MemoryPersistence::{promote_review_item,
 //! record_review_item_audit, search}` — so there is no logic duplication and no
-//! way to bypass the review gate. The frontend is one self-contained HTML file
-//! embedded at build time.
+//! way to bypass the review gate. The frontend is split into a slim HTML shell, a cyberpunk-styled CSS file and modular ES modules (app, graph, per-view).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
@@ -21,8 +20,16 @@ use localmind_store::{GraphStore, MemoryPersistence, ReviewQueue};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-/// The self-contained review dashboard, embedded at build time.
+/// Static assets embedded at build time — the UI is now split into HTML, CSS and JS modules.
 const INDEX_HTML: &str = include_str!("ui/index.html");
+const CSS_LOCALMIND: &str = include_str!("ui/css/localmind.css");
+const JS_APP: &str = include_str!("ui/js/app.js");
+const JS_GRAPH: &str = include_str!("ui/js/graph.js");
+const JS_DASHBOARD: &str = include_str!("ui/js/views/dashboard.js");
+const JS_REVIEW: &str = include_str!("ui/js/views/review.js");
+const JS_MEMORY: &str = include_str!("ui/js/views/memory.js");
+const JS_DOCS: &str = include_str!("ui/js/views/docs.js");
+const JS_AUDIT: &str = include_str!("ui/js/views/audit.js");
 
 pub fn serve(project: PathBuf, port: u16, open: bool, token: Option<String>) -> Result<()> {
     let addr = format!("127.0.0.1:{port}");
@@ -63,6 +70,14 @@ fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     let result = match (&method, segments.as_slice()) {
         (Method::Get, [""] | ["index.html"]) => return html_response(INDEX_HTML),
+        (Method::Get, ["css", "localmind.css"]) => return static_response(CSS_LOCALMIND, "text/css; charset=utf-8"),
+        (Method::Get, ["js", "app.js"]) => return static_response(JS_APP, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "graph.js"]) => return static_response(JS_GRAPH, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "views", "dashboard.js"]) => return static_response(JS_DASHBOARD, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "views", "review.js"]) => return static_response(JS_REVIEW, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "views", "memory.js"]) => return static_response(JS_MEMORY, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "views", "docs.js"]) => return static_response(JS_DOCS, "application/javascript; charset=utf-8"),
+        (Method::Get, ["js", "views", "audit.js"]) => return static_response(JS_AUDIT, "application/javascript; charset=utf-8"),
         (Method::Get, ["api", "status"]) => api_status(project),
         (Method::Get, ["api", "review"]) => api_review_list(project, query),
         (Method::Get, ["api", "review", id]) => api_review_get(project, id),
@@ -818,6 +833,14 @@ fn json_response(status: u16, value: &Value) -> Response<Cursor<Vec<u8>>> {
     response
 }
 
+fn static_response(body: &str, content_type: &str) -> Response<Cursor<Vec<u8>>> {
+    let mut response = Response::from_string(body.to_string());
+    if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()) {
+        response = response.with_header(header);
+    }
+    response
+}
+
 fn html_response(html: &str) -> Response<Cursor<Vec<u8>>> {
     let mut response = Response::from_string(html.to_string());
     if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]) {
@@ -864,9 +887,29 @@ mod tests {
 
     #[test]
     fn index_html_is_embedded_and_self_contained() {
-        // No external asset references — the page must be self-contained.
+        // The HTML no longer inlines CSS/JS — it references external modules.
         assert!(super::INDEX_HTML.contains("LocalMind"));
-        assert!(!super::INDEX_HTML.contains("src=\"http"));
-        assert!(!super::INDEX_HTML.contains("cdn"));
+        assert!(super::INDEX_HTML.contains("/css/localmind.css"));
+        assert!(super::INDEX_HTML.contains("/js/app.js"));
+        // No external CDN references — all assets are served locally.
+        assert!(!super::INDEX_HTML.contains("cdn."));
+    }
+
+    #[test]
+    fn static_assets_are_embedded() {
+        assert!(super::CSS_LOCALMIND.contains("--cyan"));
+        assert!(super::JS_APP.contains("route()"));
+        assert!(super::JS_GRAPH.contains("forceGraph"));
+        for name in ["JS_DASHBOARD", "JS_REVIEW", "JS_MEMORY", "JS_DOCS", "JS_AUDIT"] {
+            let s = match name {
+                "JS_DASHBOARD" => super::JS_DASHBOARD,
+                "JS_REVIEW" => super::JS_REVIEW,
+                "JS_MEMORY" => super::JS_MEMORY,
+                "JS_DOCS" => super::JS_DOCS,
+                "JS_AUDIT" => super::JS_AUDIT,
+                _ => "",
+            };
+            assert!(!s.is_empty(), "{name} should be non-empty");
+        }
     }
 }
