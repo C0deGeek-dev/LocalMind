@@ -98,6 +98,15 @@ async function docSearch() {
   document.querySelector('#docRes').innerHTML = '<div class="empty">Searching…</div>';
   try {
     const d = await api('GET', '/api/docs?' + new URLSearchParams({ q: query, limit: '12' }));
+    if (!d.embeddings_configured) {
+      document.querySelector('#docN').textContent = 'semantic search unavailable';
+      document.querySelector('#docRes').innerHTML = `<div class="empty">Semantic search needs an embedding endpoint, and none is configured —
+        an empty result here says nothing about your docs.<br><br>Set <code>[inference] embedding_base_url</code> +
+        <code>embedding_model</code> in <code>.localmind.toml</code>, start the embed server
+        (<code>localbox embed-serve</code>), re-run <code>localmind ingest docs</code>, then search again.
+        Browsing files on the left works without embeddings.</div>`;
+      return;
+    }
     document.querySelector('#docN').textContent = d.results.length + ' passages';
     document.querySelector('#docRes').innerHTML = `<div class="meta">semantic results for "${esc(query)}"</div>` +
       d.results.map(r => `<div class="result">
