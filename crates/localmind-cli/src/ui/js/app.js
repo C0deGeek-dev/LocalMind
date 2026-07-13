@@ -3,15 +3,12 @@ import { renderDashboard } from './views/dashboard.js';
 import { renderReview } from './views/review.js';
 import { renderMemory } from './views/memory.js';
 import { renderDocs } from './views/docs.js';
-import { renderGraph, graphShow, graphOverview, renderGlobal, graphDetails, renderGraphResult } from './graph.js';
+import { renderGraph } from './graph.js';
 import { renderAudit } from './views/audit.js';
-
-const view = document.querySelector('#view');
 
 // ── Token / API helpers ──
 const token = new URLSearchParams(location.search).get('token');
 const q = u => token ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token) : u;
-const reviewer = () => document.querySelector('#reviewer').value.trim() || 'ui';
 
 export const esc = s => {
   if (s == null) return '';
