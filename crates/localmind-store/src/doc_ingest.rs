@@ -79,21 +79,9 @@ pub fn ingest_docs_into(
             source,
         })?;
         let rel = relative(root, file);
-        for (ordinal, chunk) in chunk_markdown(&text).into_iter().enumerate() {
-            let chunk_id = format!("{rel}#{ordinal}");
-            let ord = i64::try_from(ordinal).unwrap_or(i64::MAX);
-            let wrote = persistence.ingest_doc_chunk(
-                &chunk_id,
-                &rel,
-                ord,
-                chunk.heading.as_deref(),
-                &chunk.body,
-            )?;
-            chunks += 1;
-            if wrote {
-                embedded += 1;
-            }
-        }
+        let (wrote, vectored) = ingest_doc_text(persistence, &rel, &text)?;
+        chunks += wrote;
+        embedded += vectored;
     }
 
     Ok(DocIngestSummary {
@@ -102,6 +90,42 @@ pub fn ingest_docs_into(
         embedded,
         total_in_index: persistence.doc_chunk_count()?,
     })
+}
+
+/// Chunk one Markdown document's text and ingest it under `rel_path`, replacing
+/// whatever was stored for that path: chunks are upserted in ordinal order and
+/// the stale tail beyond the new chunk count is pruned (a shrunk file does not
+/// leave its old passages behind). Text that yields no chunks removes the
+/// path's previous chunks entirely. Returns `(chunks written, chunks embedded)`.
+///
+/// This is the entry for hosts that hold the document text already — e.g. a
+/// walker with its own ignore rules and redaction — rather than a tree for
+/// [`ingest_docs`] to walk itself.
+pub fn ingest_doc_text(
+    persistence: &MemoryPersistence,
+    rel_path: &str,
+    text: &str,
+) -> Result<(usize, usize), DocIngestError> {
+    let mut written = 0usize;
+    let mut embedded = 0usize;
+    let chunks = chunk_markdown(text);
+    for (ordinal, chunk) in chunks.iter().enumerate() {
+        let chunk_id = format!("{rel_path}#{ordinal}");
+        let ord = i64::try_from(ordinal).unwrap_or(i64::MAX);
+        let wrote = persistence.ingest_doc_chunk(
+            &chunk_id,
+            rel_path,
+            ord,
+            chunk.heading.as_deref(),
+            &chunk.body,
+        )?;
+        written += 1;
+        if wrote {
+            embedded += 1;
+        }
+    }
+    persistence.prune_doc_chunks_from(rel_path, i64::try_from(chunks.len()).unwrap_or(i64::MAX))?;
+    Ok((written, embedded))
 }
 
 /// One heading-scoped documentation chunk.
@@ -226,6 +250,7 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), DocIngestE
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
@@ -260,5 +285,63 @@ mod tests {
         let root = Path::new("/proj/docs");
         let file = Path::new("/proj/docs/sub/page.md");
         assert_eq!(relative(root, file), "sub/page.md");
+    }
+
+    /// A project store in a temp dir (empty config = defaults, no embeddings).
+    fn open_temp_project(dir: &tempfile::TempDir) -> MemoryPersistence {
+        std::fs::write(dir.path().join(".localmind.toml"), "").unwrap();
+        MemoryPersistence::open_project(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn reingesting_shrunk_text_prunes_the_stale_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let persistence = open_temp_project(&dir);
+
+        let long = "# One\n\nAlpha.\n\n# Two\n\nBeta.\n\n# Three\n\nGamma.\n";
+        let (written, _) = ingest_doc_text(&persistence, "guide.md", long).unwrap();
+        assert_eq!(written, 3);
+        assert_eq!(persistence.doc_chunks_for("guide.md").unwrap().len(), 3);
+
+        let short = "# One\n\nAlpha only now.\n";
+        let (written, _) = ingest_doc_text(&persistence, "guide.md", short).unwrap();
+        assert_eq!(written, 1);
+        let chunks = persistence.doc_chunks_for("guide.md").unwrap();
+        assert_eq!(chunks.len(), 1, "ordinals beyond the new count are pruned");
+        assert_eq!(chunks[0].2, "Alpha only now.");
+    }
+
+    #[test]
+    fn text_with_no_chunks_removes_the_previous_ingest() {
+        let dir = tempfile::tempdir().unwrap();
+        let persistence = open_temp_project(&dir);
+
+        ingest_doc_text(&persistence, "gone.md", "# Note\n\nBody.\n").unwrap();
+        assert_eq!(persistence.doc_chunks_for("gone.md").unwrap().len(), 1);
+
+        let (written, _) = ingest_doc_text(&persistence, "gone.md", "# Heading only\n").unwrap();
+        assert_eq!(written, 0);
+        assert!(
+            persistence.doc_chunks_for("gone.md").unwrap().is_empty(),
+            "a file that no longer yields chunks keeps no stale passages"
+        );
+    }
+
+    #[test]
+    fn deleting_a_doc_file_removes_all_its_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let persistence = open_temp_project(&dir);
+
+        ingest_doc_text(&persistence, "a.md", "# A\n\nAlpha.\n\n# B\n\nBeta.\n").unwrap();
+        ingest_doc_text(&persistence, "b.md", "# C\n\nGamma.\n").unwrap();
+
+        let removed = persistence.delete_doc_file("a.md").unwrap();
+        assert_eq!(removed, 2);
+        assert!(persistence.doc_chunks_for("a.md").unwrap().is_empty());
+        assert_eq!(
+            persistence.doc_chunks_for("b.md").unwrap().len(),
+            1,
+            "other files are untouched"
+        );
     }
 }

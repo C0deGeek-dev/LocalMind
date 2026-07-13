@@ -410,6 +410,10 @@ fn api_docs(project: &Path, query: &str) -> Result<Value> {
         .unwrap_or(10)
         .clamp(1, 50);
     let persistence = MemoryPersistence::open_project(project)?;
+    // Surfaced so the UI can tell "no matches" apart from "search cannot run":
+    // doc_search deliberately returns empty when no embedding endpoint is
+    // configured, which looks identical to a genuine miss.
+    let embeddings_configured = persistence.embeddings_configured()?;
     let results: Vec<Value> = persistence
         .doc_search(&q, limit)?
         .into_iter()
@@ -423,7 +427,7 @@ fn api_docs(project: &Path, query: &str) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({ "results": results }))
+    Ok(json!({ "results": results, "embeddings_configured": embeddings_configured }))
 }
 
 /// Every ingested documentation file with its chunk count (browse sidebar).

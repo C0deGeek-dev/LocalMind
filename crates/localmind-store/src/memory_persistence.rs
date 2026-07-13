@@ -798,6 +798,54 @@ impl MemoryPersistence {
         )
     }
 
+    /// Delete every stored chunk (and its vector) for one ingested file — for
+    /// when the file has vanished from its source tree. Returns how many text
+    /// rows were removed.
+    pub fn delete_doc_file(&self, path: &str) -> Result<usize, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                "DELETE FROM vector_index WHERE subject_kind = 'doc'
+                   AND subject_id IN (SELECT chunk_id FROM doc_chunk WHERE path = ?1)",
+                params![path],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute("DELETE FROM doc_chunk WHERE path = ?1", params![path])
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// Delete a file's chunks at or beyond `from_ordinal` (and their vectors) —
+    /// the stale tail left behind when a re-ingested file yields fewer chunks
+    /// than the previous ingest did. Returns how many text rows were removed.
+    pub fn prune_doc_chunks_from(
+        &self,
+        path: &str,
+        from_ordinal: i64,
+    ) -> Result<usize, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                "DELETE FROM vector_index WHERE subject_kind = 'doc'
+                   AND subject_id IN
+                       (SELECT chunk_id FROM doc_chunk WHERE path = ?1 AND ordinal >= ?2)",
+                params![path, from_ordinal],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute(
+                "DELETE FROM doc_chunk WHERE path = ?1 AND ordinal >= ?2",
+                params![path, from_ordinal],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// Whether an embedding endpoint is configured for this project. Lets a
+    /// caller distinguish "semantic search found nothing" from "semantic search
+    /// cannot run at all" instead of showing both as an empty result.
+    pub fn embeddings_configured(&self) -> Result<bool, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        Ok(capability.embeddings().is_some())
+    }
+
     /// Semantic search over ingested documentation chunks. Embeds the query,
     /// ranks it against every stored vector, keeps the `'doc'` hits, and joins
     /// their passage text. Returns an empty result when embeddings are not
