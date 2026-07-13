@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **The Docs tab now explains itself instead of sitting silently empty**
+  (LocalHub#18). An empty doc index shows the exact ingest command; a semantic
+  search without a configured embedding endpoint says so (browsing works
+  without embeddings) instead of an indistinguishable "no matches"
+  (`/api/docs` now reports `embeddings_configured`); a failed load surfaces
+  its error. Re-ingesting a shrunk or emptied file now prunes its stale
+  passages, and `localmind_store` gains `ingest_doc_text` (per-file doc ingest
+  for hosts with their own walker/redaction) and `delete_doc_file`.
 - Synced memory is now **environment-aware**. A synced memory records the machine
   that wrote it (`memory_index.origin_device`, schema v10), and retrieval can
   **down-weight — never drop —** a lesson from another machine so a

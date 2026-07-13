@@ -737,13 +737,15 @@ impl MemoryPersistence {
         Ok(true)
     }
 
-    /// Ingest one documentation chunk: store its text in `doc_chunk` and, when an
-    /// embedding endpoint is configured and reachable, embed the body into
-    /// `vector_index` under `subject_kind = 'doc'`. The text row is written
-    /// unconditionally (so re-ingest is idempotent and the passage is always
-    /// citable); the vector is a best-effort addendum — a down endpoint leaves
-    /// the chunk searchable only once re-ingested with embeddings up. Returns
-    /// whether a vector was written.
+    /// Ingest one documentation chunk: store its text in `doc_chunk` and, when
+    /// `embed` is set and an embedding endpoint is configured and reachable,
+    /// embed the body into `vector_index` under `subject_kind = 'doc'`. The text
+    /// row is written unconditionally (so re-ingest is idempotent and the
+    /// passage is always citable); the vector is a best-effort addendum — a down
+    /// endpoint leaves the chunk searchable only once re-ingested with
+    /// embeddings up. `embed = false` lets a host that suppresses ingest-time
+    /// embedding cost keep that promise here too. Returns whether a vector was
+    /// written.
     pub fn ingest_doc_chunk(
         &self,
         chunk_id: &str,
@@ -751,6 +753,7 @@ impl MemoryPersistence {
         ordinal: i64,
         heading: Option<&str>,
         body: &str,
+        embed: bool,
     ) -> Result<bool, MemoryPersistenceError> {
         self.connection
             .execute(
@@ -775,6 +778,9 @@ impl MemoryPersistence {
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
 
+        if !embed {
+            return Ok(false);
+        }
         let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
         let Some(endpoint) = capability.embeddings() else {
             return Ok(false);

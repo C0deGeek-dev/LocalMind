@@ -79,7 +79,7 @@ pub fn ingest_docs_into(
             source,
         })?;
         let rel = relative(root, file);
-        let (wrote, vectored) = ingest_doc_text(persistence, &rel, &text)?;
+        let (wrote, vectored) = ingest_doc_text(persistence, &rel, &text, true)?;
         chunks += wrote;
         embedded += vectored;
     }
@@ -96,7 +96,9 @@ pub fn ingest_docs_into(
 /// whatever was stored for that path: chunks are upserted in ordinal order and
 /// the stale tail beyond the new chunk count is pruned (a shrunk file does not
 /// leave its old passages behind). Text that yields no chunks removes the
-/// path's previous chunks entirely. Returns `(chunks written, chunks embedded)`.
+/// path's previous chunks entirely. `embed` gates the best-effort vector write,
+/// so a host that promises no ingest-time embedding cost can keep that promise.
+/// Returns `(chunks written, chunks embedded)`.
 ///
 /// This is the entry for hosts that hold the document text already — e.g. a
 /// walker with its own ignore rules and redaction — rather than a tree for
@@ -105,6 +107,7 @@ pub fn ingest_doc_text(
     persistence: &MemoryPersistence,
     rel_path: &str,
     text: &str,
+    embed: bool,
 ) -> Result<(usize, usize), DocIngestError> {
     let mut written = 0usize;
     let mut embedded = 0usize;
@@ -118,6 +121,7 @@ pub fn ingest_doc_text(
             ord,
             chunk.heading.as_deref(),
             &chunk.body,
+            embed,
         )?;
         written += 1;
         if wrote {
@@ -299,12 +303,12 @@ mod tests {
         let persistence = open_temp_project(&dir);
 
         let long = "# One\n\nAlpha.\n\n# Two\n\nBeta.\n\n# Three\n\nGamma.\n";
-        let (written, _) = ingest_doc_text(&persistence, "guide.md", long).unwrap();
+        let (written, _) = ingest_doc_text(&persistence, "guide.md", long, true).unwrap();
         assert_eq!(written, 3);
         assert_eq!(persistence.doc_chunks_for("guide.md").unwrap().len(), 3);
 
         let short = "# One\n\nAlpha only now.\n";
-        let (written, _) = ingest_doc_text(&persistence, "guide.md", short).unwrap();
+        let (written, _) = ingest_doc_text(&persistence, "guide.md", short, true).unwrap();
         assert_eq!(written, 1);
         let chunks = persistence.doc_chunks_for("guide.md").unwrap();
         assert_eq!(chunks.len(), 1, "ordinals beyond the new count are pruned");
@@ -316,10 +320,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let persistence = open_temp_project(&dir);
 
-        ingest_doc_text(&persistence, "gone.md", "# Note\n\nBody.\n").unwrap();
+        ingest_doc_text(&persistence, "gone.md", "# Note\n\nBody.\n", true).unwrap();
         assert_eq!(persistence.doc_chunks_for("gone.md").unwrap().len(), 1);
 
-        let (written, _) = ingest_doc_text(&persistence, "gone.md", "# Heading only\n").unwrap();
+        let (written, _) =
+            ingest_doc_text(&persistence, "gone.md", "# Heading only\n", true).unwrap();
         assert_eq!(written, 0);
         assert!(
             persistence.doc_chunks_for("gone.md").unwrap().is_empty(),
@@ -332,8 +337,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let persistence = open_temp_project(&dir);
 
-        ingest_doc_text(&persistence, "a.md", "# A\n\nAlpha.\n\n# B\n\nBeta.\n").unwrap();
-        ingest_doc_text(&persistence, "b.md", "# C\n\nGamma.\n").unwrap();
+        ingest_doc_text(
+            &persistence,
+            "a.md",
+            "# A\n\nAlpha.\n\n# B\n\nBeta.\n",
+            true,
+        )
+        .unwrap();
+        ingest_doc_text(&persistence, "b.md", "# C\n\nGamma.\n", true).unwrap();
 
         let removed = persistence.delete_doc_file("a.md").unwrap();
         assert_eq!(removed, 2);
