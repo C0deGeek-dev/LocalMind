@@ -48,7 +48,9 @@ pub use context_export::{ContextExport, ContextExportError, ContextExportTarget,
 pub use dedup::{
     canonical, canonical_hash, is_near_duplicate, similarity, token_set, NEAR_DUP_THRESHOLD,
 };
-pub use doc_ingest::{ingest_docs, ingest_docs_into, DocIngestError, DocIngestSummary};
+pub use doc_ingest::{
+    ingest_doc_text, ingest_docs, ingest_docs_into, DocIngestError, DocIngestSummary,
+};
 pub use eval::{
     default_fixtures, lift, load_fixtures, run_eval, run_eval_lift, run_eval_with, EvalError,
     EvalFixture, EvalLift, EvalReport, EvalReranker, FixtureScore, RetrievalCase,

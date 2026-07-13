@@ -314,7 +314,12 @@ async function renderDocs(){
   $('#docGo').onclick=docSearch; $('#docQ').addEventListener('keydown',e=>{if(e.key==='Enter')docSearch();});
   $('#docFilter').addEventListener('input',drawDocFiles);
   document.querySelectorAll('#docRes [data-ex]').forEach(b=>b.onclick=()=>{$('#docQ').value=b.dataset.ex;docSearch();});
-  const d=await api('GET','/api/docs/files'); docFiles=d.files; $('#docN').textContent=`${d.total} files`;
+  let d; try{ d=await api('GET','/api/docs/files'); }catch(e){ $('#docN').textContent='error'; $('#docRes').innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  docFiles=d.files; $('#docN').textContent=`${d.total} files`;
+  if(!docFiles.length){ $('#docRes').innerHTML=`<div class="empty">Nothing ingested yet — the doc index is empty.<br><br>
+    Run <code>localmind ingest docs &lt;path&gt; --project &lt;project-root&gt;</code> to index a tree's Markdown,
+    then reload this tab. Semantic search additionally needs <code>[inference] embedding_base_url</code> +
+    <code>embedding_model</code> in <code>.localmind.toml</code>; browsing works without embeddings.</div>`; return; }
   const repos={}; docFiles.forEach(x=>{ const r=x.path.split('/')[0]; repos[r]=(repos[r]||0)+1; });
   $('#docRepo').innerHTML=`<option value="">all repos (${docFiles.length})</option>`+Object.entries(repos).sort((a,b)=>b[1]-a[1]).map(([r,c])=>`<option value="${esc(r)}">${esc(r)} (${c})</option>`).join('');
   $('#docRepo').onchange=drawDocFiles; drawDocFiles();
@@ -334,7 +339,14 @@ async function openDocFile(path){ try{ const d=await api('GET','/api/docs/file?p
 }catch(e){ toast(e.message,true); } }
 async function docSearch(){ const query=$('#docQ').value.trim(); if(!query) return;
   $('#docRes').innerHTML='<div class="empty">Searching…</div>';
-  try{ const d=await api('GET','/api/docs?'+new URLSearchParams({q:query,limit:'12'})); $('#docN').textContent=d.results.length+' passages';
+  try{ const d=await api('GET','/api/docs?'+new URLSearchParams({q:query,limit:'12'}));
+    if(!d.embeddings_configured){ $('#docN').textContent='semantic search unavailable';
+      $('#docRes').innerHTML=`<div class="empty">Semantic search needs an embedding endpoint, and none is configured —
+        an empty result here says nothing about your docs.<br><br>Set <code>[inference] embedding_base_url</code> +
+        <code>embedding_model</code> in <code>.localmind.toml</code>, start the embed server
+        (<code>localbox embed-serve</code>), re-run <code>localmind ingest docs</code>, then search again.
+        Browsing files on the left works without embeddings.</div>`; return; }
+    $('#docN').textContent=d.results.length+' passages';
     $('#docRes').innerHTML=`<div class="meta">semantic results for “${esc(query)}”</div>`+d.results.map(r=>`<div class="result">
       <div class="h">📄 ${esc(r.path)}${r.heading?' › '+esc(r.heading):''} · score ${(+r.score).toFixed(3)}</div><div class="body">${esc(r.body)}</div></div>`).join('')||'<div class="empty">No matches.</div>';
   }catch(e){ $('#docRes').innerHTML=`<div class="empty">${esc(e.message)}</div>`; } }
