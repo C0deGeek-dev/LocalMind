@@ -12,7 +12,11 @@ Notable changes, newest first. Contract-relevant entries reference
   (`/api/docs` now reports `embeddings_configured`); a failed load surfaces
   its error. Re-ingesting a shrunk or emptied file now prunes its stale
   passages, and `localmind_store` gains `ingest_doc_text` (per-file doc ingest
-  for hosts with their own walker/redaction) and `delete_doc_file`.
+  for hosts with their own walker/redaction) and `delete_doc_file`. Doc-ingest
+  callers can also suppress the best-effort embedding pass (an `embed` flag on
+  `ingest_doc_text`/`ingest_doc_chunk`), so a host that promises no
+  ingest-time embedding cost can keep that promise; the tree-walking
+  `localmind ingest docs` is unchanged.
 - Synced memory is now **environment-aware**. A synced memory records the machine
   that wrote it (`memory_index.origin_device`, schema v10), and retrieval can
   **down-weight — never drop —** a lesson from another machine so a
@@ -73,6 +77,36 @@ Notable changes, newest first. Contract-relevant entries reference
   inline in the `ingest docs` CLI command, extracted so other hosts can reuse
   the same chunker and store path in-process. The CLI command is unchanged in
   behaviour.
+- **`localmind ui` — a local web app for reviewing and managing memory.** A
+  localhost-only sync HTTP server with a self-contained tabbed SPA (no
+  framework, no build step, no external assets): Dashboard (stat cards plus
+  scope/category bars), Review (the pending queue with bulk actions and
+  keyboard shortcuts), Memory (search/filter, full detail with provenance,
+  audited delete), Docs (semantic passages over the ingested documentation,
+  with a per-repo dropdown), Graph (an interactive Obsidian-style code-graph
+  browser backed by the four graph tools, plus a global map), and Audit (the
+  event table with kind-filter counts). Every endpoint is a thin wrapper over
+  the same store methods the CLI uses — no logic duplication, no review-gate
+  bypass. Localhost bind is the control; an optional `--token` guards LAN
+  exposure. Theme-aware light/dark.
+- **`localmind ingest docs <path>` — semantic documentation ingest**
+  (`doc_chunk`, schema v9; see `docs/on-disk-contract.md`). Walks Markdown,
+  chunks at headings (oversized sections split at paragraph boundaries), and
+  embeds each passage into the shared `vector_index` under
+  `subject_kind = "doc"`, keeping the citable text in the new `doc_chunk`
+  table. Re-ingest is idempotent (chunk id = `<relpath>#<ordinal>`) and
+  embedding is best-effort — a down embedding endpoint stores text without a
+  vector. A new `doc_search` store path (embed query → rank → join text)
+  serves the CLI, the UI Docs tab, and a new MCP `doc_search` tool.
+- **`localmind mcp serve` — a live stdio MCP server.** A hand-rolled,
+  synchronous, newline-delimited JSON-RPC 2.0 server over stdin/stdout (no
+  new async runtime) exposing `memory_search`, `memory_context_export`, the
+  four code-graph tools, skill list/fetch, and `doc_search` — each wired to
+  the existing store/graph APIs. Alongside it, **`localmind graph reindex
+  <path>`** walks a repo tree (VCS, build, and vendored directories skipped;
+  candidates restricted to a source/doc extension allowlist so a stray binary
+  cannot abort the pass) and drives the resumable reindexer to completion —
+  whole-repo code-graph ingest from the CLI.
 
 ## v2.3.0 - 2026-07-07
 
