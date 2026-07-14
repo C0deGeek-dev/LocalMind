@@ -32,6 +32,8 @@ human to review them, and stores accepted knowledge as readable project files.
 | **Use it when** | Your agent keeps rediscovering the same fixes, decisions, and project conventions |
 | **It remembers** | Only lessons you explicitly accept or edit |
 | **It stores** | Readable Markdown memory plus a local SQLite audit/search index |
+| **You review it in** | The CLI, or a localhost web app (`localmind ui`) |
+| **Agents query it via** | A stdio MCP server (`localmind mcp serve`): memory, docs, code graph, skills |
 | **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
 | **Cloud required** | No |
 
@@ -198,6 +200,55 @@ only ever holds ciphertext. Incoming memory lands in the **review queue**, never
 straight into active memory; an unknown signer is rejected, and a conflicting
 edit is surfaced for you to reconcile rather than silently overwritten.
 
+## Review in the browser
+
+`localmind ui` serves the same store as a self-contained localhost web app —
+one binary, no build step, no external assets:
+
+```sh
+localmind ui --project . --open
+```
+
+Tabs: a dashboard, the review queue (bulk actions; `j`/`k` to move, `a`/`r`/`d`
+to decide, `e` to edit, `x` to select), the memory browser with provenance and
+audited delete, semantic search over ingested docs, an interactive code-graph
+view, and the audit log. Every endpoint is a thin wrapper over the same store
+methods the CLI calls, so the review gate cannot be bypassed. The server binds
+`127.0.0.1` only (default port 8091); `--token <secret>` additionally requires
+`?token=` on every request if the port is ever exposed beyond the machine.
+
+## Serve tools over MCP
+
+`localmind mcp serve` speaks the Model Context Protocol over stdio — a
+synchronous, newline-delimited JSON-RPC 2.0 loop, no async runtime — so an
+MCP-capable agent can query LocalMind directly:
+
+```sh
+localmind mcp serve --project .
+```
+
+Nine read/query tools: `memory_search`, `memory_context_export`, `doc_search`,
+the four `memory_symbol_*` code-graph tools, and skill list/fetch. All are
+read-only over the store; nothing writes memory through MCP.
+
+## Index code and documentation
+
+Two ingest commands feed the query tools above:
+
+```sh
+localmind graph reindex . --project .
+localmind ingest docs ./docs --project .
+```
+
+`graph reindex` walks a repository tree (VCS, build, and vendored directories
+are skipped; only source and Markdown extensions are candidates, so a stray
+binary cannot abort the pass) and drives the resumable code-graph reindexer to
+completion. `ingest docs` chunks Markdown at headings, embeds each passage
+into the semantic doc index, and is idempotent: re-ingesting an edited or
+shrunk file replaces its passages and prunes the stale tail. Embedding is
+best-effort — without a reachable embedding endpoint the text is stored
+un-vectored and still browsable.
+
 ## Evidence so far
 
 In the controlled `localbench-uplift-v1` evaluation, injecting accepted lessons
@@ -222,8 +273,8 @@ from the CLI alone:
 | Import → closeout → review → promote → search (FTS5) → audit → context export | ✅ | The core loop |
 | Signed memory bundle export/import, `eval`, `status`, skill drafts | ✅ | |
 | Batch `insights` (distill/research) | ✅ (needs `[inference]`) | Model-backed; skipped with a notice when no endpoint |
-| Hybrid keyword+vector search, rerank | host-mounted | The LocalPilot host runs the rerank stage on its memory-injection retrieval (D-LM-0026); the CLI search is keyword (FTS5) only |
-| Code graph (ingest/query/impact/primer), MCP graph tools | host-mounted | No CLI subcommand drives these |
+| Hybrid keyword+vector search, rerank | host-mounted | The LocalPilot host runs the rerank stage on its memory-injection retrieval (D-LM-0026); CLI **memory** search stays keyword (FTS5). The semantic surface the CLI does own is the doc index: `ingest docs` embeds documentation, and the `doc_search` MCP tool or the UI Docs tab retrieves it |
+| Code graph ingest + query, MCP graph tools | ✅ | `graph reindex` builds the graph over a repository tree; `mcp serve` and the UI Graph tab query it. Change-impact and the cold-start primer remain host-mounted |
 | Freshness pass, usage stats, provenance, source revalidation, memory delete | host-mounted | Exposed by the LocalPilot `learning`/`memory` commands |
 
 The `[retrieval] rerank` config keys take effect through a host that runs the

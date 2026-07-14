@@ -237,9 +237,10 @@ databases newer than it understands. Tables:
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |
 | `memory_relationships(memory_id, relation_kind, target)` | typed relations | kinds: `category`, `session`, `file`, `entity`, `contradicts` |
 | `vector_index(subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)` | rebuildable semantic index | f32 little-endian BLOBs; exact cosine in Rust |
+| `doc_chunk(chunk_id, path, ordinal, heading, body, updated_at)` | semantic documentation index (schema v9) | one row per heading-scoped passage of ingested documentation; `chunk_id` is `<relative-path>#<ordinal>`, so re-ingest upserts in place and prunes the stale tail when a file shrinks or empties; each passage's vector lives in the shared `vector_index` under `subject_kind = 'doc'` — this table holds the citable text |
 | `distilled_records(id, kind, title, body, source_memory_ids_json, status, created_at, updated_at)` | distillation/research candidates | derived, review-routed; not source of truth |
 | `skill_records(skill_id, draft_json, status, source_memory_ids_json, created_at, updated_at)` | active/retired skill lifecycle | activation and retirement are audited |
-| `graph_nodes`, `graph_edges`, `graph_meta` | code-structure graph | payload format versioned separately via `graph_meta.format_version` (`GRAPH_FORMAT_VERSION`, currently 1) |
+| `graph_nodes`, `graph_edges`, `graph_meta` | code-structure graph | payload format versioned separately via `graph_meta.format_version` (`GRAPH_FORMAT_VERSION`, currently 1); populated by a host or by `localmind graph reindex`, whose tree walk skips VCS/build/vendored directories and admits only a source/doc extension allowlist, so a stray binary cannot abort the pass |
 
 Concurrency contract: every production component opens the database in
 **WAL** journal mode with a 5-second busy timeout and `synchronous=NORMAL`,
@@ -259,6 +260,15 @@ Markdown memory or graph state and may be rebuilt — except the `hit_count` /
 zero-usage on a rebuild. Inference audit rows record
 feature, endpoint kind, model id, and token counts when available; raw prompt
 or response content is never written to `audit_events`.
+
+Documentation ingest — `localmind ingest docs`, or the `ingest_doc_text` /
+`delete_doc_file` store entry points for a host that walks (and redacts) its
+own tree — chunks Markdown at headings, splitting an oversized section at
+paragraph boundaries, and writes each passage to `doc_chunk` keyed by the
+stable `<relative-path>#<ordinal>` chunk id. The vector write is best-effort
+and never gates the text write: with no reachable embedding endpoint the
+passage is stored without a vector, and `ingest_doc_text` takes an `embed`
+flag so a host can promise no ingest-time embedding cost at all.
 
 ## Portable memory bundle
 

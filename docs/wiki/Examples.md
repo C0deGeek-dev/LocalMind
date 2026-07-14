@@ -46,5 +46,34 @@ localmind context export "deterministic fixtures" --target open-ai-codex --proje
 Renders accepted memory (plus disabled skill suggestions) as concise agent
 context for the chosen target.
 
+## Ingest documentation, then search it in the web UI
+
+```powershell
+localmind ingest docs .\docs --project .
+localmind ui --project . --open
+```
+
+Expect: an ingest summary (`Ingested N chunks (M embedded) from F files`), then
+a browser tab at `http://127.0.0.1:8091` whose **Docs** tab searches the
+ingested passages semantically, with a per-repo dropdown to narrow the file
+list.
+
+## Register the MCP server in a client
+
+```json
+{
+  "mcpServers": {
+    "localmind": {
+      "command": "localmind",
+      "args": ["mcp", "serve", "--project", "."]
+    }
+  }
+}
+```
+
+Expect: the client lists nine `localmind` tools — memory search, context
+export, doc search, the four code-graph tools, skill list/fetch — served over
+stdio; no socket is opened.
+
 See the on-disk contract for the exact file shapes:
 [on-disk-contract.md](https://github.com/C0deGeek-dev/LocalMind/blob/main/docs/on-disk-contract.md).

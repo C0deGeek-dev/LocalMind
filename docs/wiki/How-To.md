@@ -53,6 +53,71 @@ Targets: `generic`, `claude-code`, `open-ai-codex`, `localpilot`. Generated
 `SKILL.md` drafts land disabled under `.localmind/skill-drafts/`; LocalMind never
 installs or activates skills automatically.
 
+## Review and browse in the web UI
+
+```powershell
+localmind ui --project . --open
+```
+
+Serves a localhost web app over the same store (default
+`http://127.0.0.1:8091`; `--port` changes it): dashboard, review queue (`j`/`k`
+to move, `a`/`r`/`d` to decide, `e` to edit, `x` to select for bulk actions),
+memory browser with provenance and audited delete, semantic doc search, an
+interactive code-graph view, and the audit log. Every endpoint calls the same
+store methods as the CLI, so the review gate cannot be bypassed. The server
+binds `127.0.0.1` only; add `--token <secret>` to also require `?token=` on
+each request if the port is forwarded beyond the machine. Run from any
+subdirectory — the store resolves by walking up to the nearest
+`.localmind.toml`.
+
+## Serve LocalMind tools to an MCP client
+
+```powershell
+localmind mcp serve --project .
+```
+
+A synchronous stdio MCP server (newline-delimited JSON-RPC 2.0, no async
+runtime). Register it in an MCP-capable client, e.g. a `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "localmind": {
+      "command": "localmind",
+      "args": ["mcp", "serve", "--project", "."]
+    }
+  }
+}
+```
+
+Nine read/query tools: `memory_search`, `memory_context_export`, `doc_search`,
+the four `memory_symbol_*` code-graph tools, and skill list/fetch.
+
+## Build the code graph over a repository
+
+```powershell
+localmind graph reindex . --project .
+```
+
+Walks the tree (VCS, build, and vendored directories are skipped; only source
+and Markdown extensions are candidates, so a stray binary cannot abort the
+pass) and drives the resumable reindexer to completion, printing progress per
+batch. Query the result through the MCP graph tools or the UI Graph tab.
+
+## Ingest documentation for semantic search
+
+```powershell
+localmind ingest docs .\docs --project .
+```
+
+Chunks Markdown at headings (an oversized section splits at paragraph
+boundaries) and embeds each passage into the semantic doc index. Re-ingest is
+idempotent — an edited file re-embeds in place and a shrunk file's stale
+passages are pruned. Embedding is best-effort: without a configured
+`[inference]` embedding endpoint the text is stored un-vectored and a notice
+is printed. Search the result with the `doc_search` MCP tool or the UI Docs
+tab.
+
 ## Check memory quality
 
 ```powershell

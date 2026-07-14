@@ -6,8 +6,10 @@ before editing; don't restate the same area in two places.
 | Area | Owning doc |
 |---|---|
 | Project overview, install/quickstart, ecosystem links | top-level `README.md` |
+| Web UI (`ui`), MCP server (`mcp serve`), `graph reindex`, `ingest docs` — CLI surface | top-level `README.md` |
+| Web UI / MCP / code- and doc-indexing recipes | [`wiki/How-To.md`](wiki/How-To.md) |
 | Product vision / direction (not shipped-behaviour reference) | top-level `vision.md` |
-| Storage / on-disk contract (canonical) | [`on-disk-contract.md`](on-disk-contract.md) |
+| Storage / on-disk contract (canonical, incl. `doc_chunk` and the graph tables) | [`on-disk-contract.md`](on-disk-contract.md) |
 | Architecture decisions / ADRs | [`decisions.md`](decisions.md) |
 | Research notes feeding design | [`research-distillation.md`](research-distillation.md) |
 | Cross-session planning handoff | [`planning-handoff.md`](planning-handoff.md) |

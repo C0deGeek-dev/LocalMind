@@ -50,9 +50,15 @@ Import → closeout (deterministic summary + candidate lessons) → review → p
 to durable memory → search. Nothing is written to durable memory until you
 accept and promote it.
 
+The same store also powers three more surfaces: `localmind ui` (a localhost
+web app for review, memory, docs, graph, and audit), `localmind graph reindex`
+(a code graph over a repository tree), and `localmind ingest docs` (semantic
+search over documentation). Each has a recipe in [[How-To]].
+
 ## Next steps
 
-- [[How-To]] — import, review, promote, export context, skills.
+- [[How-To]] — import, review, promote, export context, skills, web UI, MCP,
+  code/doc indexing.
 - [[Examples]] — a full opt-in → memory walkthrough.
 - [[Reference]] — the on-disk contract and the rest of the in-repo docs.
 - [[Troubleshooting]] — common problems and fixes.

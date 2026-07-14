@@ -36,6 +36,7 @@ exact formats and versioning are in the on-disk contract:
 
 ## Is anything sent to the cloud?
 
-No. The MVP is local-first and opt-in: no cloud dependency, no autonomous memory
-write, no hidden transcript capture. Model-backed extraction can be added later
-behind the same extractor trait without making cloud calls the default.
+No. LocalMind is local-first and opt-in: no cloud dependency, no autonomous
+memory write, no hidden transcript capture. Model-backed extraction,
+embeddings, and insights run only against an `[inference]` endpoint you
+configure — typically a local server — and are skipped when none is set.
