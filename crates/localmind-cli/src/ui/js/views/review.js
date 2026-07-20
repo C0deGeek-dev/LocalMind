@@ -1,7 +1,11 @@
 // Review view
-import { api, esc, toast } from '../app.js';
+import { api, esc, refreshPill, toast } from '../app.js';
 
 let rvItems = [], rvSel = null, rvChecks = new Set();
+
+function currentReviewer() {
+  return document.querySelector('#reviewer')?.value.trim() || 'ui';
+}
 
 async function renderReview() {
   view.innerHTML = `<div style="display:flex;flex-direction:column;height:100%">
@@ -107,7 +111,7 @@ function selReview(id) {
 
 async function actReview(id, action, extra) {
   try {
-    await api('POST', '/api/review/' + encodeURIComponent(id) + '/' + action, Object.assign({ reviewer: reviewer() }, extra || {}));
+    await api('POST', '/api/review/' + encodeURIComponent(id) + '/' + action, Object.assign({ reviewer: currentReviewer() }, extra || {}));
     const labels = { accept: 'Accepted + promoted', accept_only: 'Accepted (not promoted)', reject: 'Rejected', defer: 'Deferred', edit: 'Edit saved', promote: 'Promoted' };
     toast(labels[action] || action);
     rvChecks.delete(id);
@@ -123,7 +127,7 @@ async function bulkReview(action) {
   if (!rvChecks.size) return toast('Nothing selected', true);
   if (!confirm(`${action} ${rvChecks.size} item(s)?`)) return;
   try {
-    const r = await api('POST', '/api/review/bulk', { action, ids: [...rvChecks], reviewer: reviewer() });
+    const r = await api('POST', '/api/review/bulk', { action, ids: [...rvChecks], reviewer: currentReviewer() });
     toast(`${action}: ${r.done} done${r.errors.length ? ', ' + r.errors.length + ' failed' : ''}`, r.errors.length > 0);
     rvChecks.clear();
     rvSel = null;
@@ -135,4 +139,25 @@ async function bulkReview(action) {
   }
 }
 
-export { renderReview, rvItems, rvSel, rvChecks };
+function handleReviewKeydown(e) {
+  if ((location.hash.slice(1) || 'review') !== 'review') return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+
+  const f = document.querySelector('#catF')?.value || '';
+  const shown = rvItems.filter(i => !f || i.category === f);
+  const idx = shown.findIndex(i => i.id === rvSel);
+
+  if (e.key === 'j' || e.key === 'k') {
+    e.preventDefault();
+    const n = e.key === 'j' ? idx + 1 : idx - 1;
+    if (shown[n]) selReview(shown[n].id);
+  } else if (rvSel) {
+    if (e.key === 'a') actReview(rvSel, 'accept');
+    else if (e.key === 'r') actReview(rvSel, 'reject');
+    else if (e.key === 'd') actReview(rvSel, 'defer');
+    else if (e.key === 'e') { const t = document.querySelector('#rvBody'); if (t) t.focus(); }
+    else if (e.key === 'x') { rvChecks.has(rvSel) ? rvChecks.delete(rvSel) : rvChecks.add(rvSel); drawReview(); }
+  }
+}
+
+export { handleReviewKeydown, renderReview };

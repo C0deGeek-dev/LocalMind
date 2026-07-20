@@ -5,6 +5,11 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Fixed `localmind ui` review actions failing with `reviewer is not a function`.
+  Individual and bulk accept/reject/defer/edit actions now read the reviewer
+  input explicitly, refresh the queue statistics after success, and keep review
+  keyboard shortcuts within the review module instead of relying on undefined
+  cross-module state.
 - **The Docs tab now explains itself instead of sitting silently empty**
   (LocalHub#18). An empty doc index shows the exact ingest command; a semantic
   search without a configured embedding endpoint says so (browsing works

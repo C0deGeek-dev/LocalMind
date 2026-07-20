@@ -919,7 +919,11 @@ mod tests {
     fn static_assets_are_embedded() {
         assert!(super::CSS_LOCALMIND.contains("--cyan"));
         assert!(super::JS_APP.contains("route()"));
+        assert!(super::JS_APP.contains("handleReviewKeydown(e)"));
         assert!(super::JS_GRAPH.contains("forceGraph"));
+        assert!(super::JS_REVIEW.contains("function currentReviewer()"));
+        assert!(super::JS_REVIEW.contains("reviewer: currentReviewer()"));
+        assert!(!super::JS_REVIEW.contains("reviewer: reviewer()"));
         for name in [
             "JS_DASHBOARD",
             "JS_REVIEW",

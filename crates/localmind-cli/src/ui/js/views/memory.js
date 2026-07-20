@@ -1,5 +1,5 @@
 // Memory view
-import { api, esc, toast } from '../app.js';
+import { api, esc, refreshPill, toast } from '../app.js';
 
 let memAll = [];
 async function renderMemory() {
