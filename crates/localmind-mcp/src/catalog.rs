@@ -43,9 +43,12 @@ pub fn catalog() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: TOOL_MEMORY_SEARCH,
-            description: "Search accepted LocalMind memory by keyword. Returns matching memory ids, scores, paths, and snippets.",
+            description: "Search accepted LocalMind memory by keyword. Returns matching memory ids, scores, paths, and match-centred snippets.",
             input_schema: object_schema(
-                json!({ "query": { "type": "string", "description": "Search query." } }),
+                json!({
+                    "query": { "type": "string", "description": "Search query." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Max results (default 8)." }
+                }),
                 &["query"],
             ),
         },

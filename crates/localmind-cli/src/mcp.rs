@@ -24,6 +24,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// A tool call either fails the protocol (bad arguments) or fails at execution
 /// (a store or graph error). Protocol failures become JSON-RPC errors;
 /// execution failures become tool results flagged `isError`.
+#[derive(Debug)]
 enum ToolFailure {
     Protocol(String),
     Execution(String),
@@ -163,13 +164,16 @@ fn call_tool(project: &Path, params: &Value) -> Result<String, ToolFailure> {
 
 fn memory_search(project: &Path, args: &Value) -> Result<String, ToolFailure> {
     let query = str_arg(args, "query")?;
+    // Model-facing surface: bounded by default so a broad query cannot flood
+    // the caller's context with the whole matching tail.
+    let limit = usize::try_from(u32_arg(args, "limit", 8)).unwrap_or(8);
     let persistence = MemoryPersistence::open_project(project).map_err(exec)?;
     let results = persistence.search(&query).map_err(exec)?;
     if results.is_empty() {
         return Ok("No accepted memory matched this query.".to_string());
     }
     let mut out = String::new();
-    for result in results {
+    for result in results.iter().take(limit) {
         out.push_str(&format!(
             "{}\tscore={}\t{}\n{}\n\n",
             result.memory_id.as_str(),
@@ -253,4 +257,96 @@ fn write_message(out: &mut impl Write, message: &Value) -> Result<()> {
     out.write_all(b"\n")?;
     out.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use localmind_core::{
+        CandidateLesson, Confidence, LessonCategory, LessonId, ReviewAction, ReviewDecision,
+        SessionId, SuggestedAction,
+    };
+    use localmind_store::ReviewQueue;
+
+    /// Promote `count` accepted memories that all share a searchable term.
+    fn seeded_project(count: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .expect("config");
+        let queue = ReviewQueue::open_project(dir.path()).expect("queue");
+        let session = SessionId::new("fixture-session");
+        // Each summary shares one searchable term (`wombat`) but is otherwise
+        // topically distinct, so the queue's near-duplicate merge keeps all of
+        // them as separate candidates.
+        let topics = [
+            "cache the cargo registry between builds",
+            "index sqlite columns used in joins",
+            "bound tokio channel capacity explicitly",
+            "keep prompt templates under version control",
+            "shard slow suites across runners",
+            "treat clippy warnings as blocking errors",
+            "verify offline links before publishing docs",
+            "redraw fixed bands only on terminal resize",
+            "pin serde schema versions in fixtures",
+            "attach tracing spans to background jobs",
+            "normalize verbatim paths before spawning",
+            "budget review queues with per-family caps",
+        ];
+        let candidates: Vec<CandidateLesson> = topics
+            .iter()
+            .take(count)
+            .enumerate()
+            .map(|(index, topic)| {
+                CandidateLesson::new(
+                    LessonId::new(format!("fixture-{index:04}")),
+                    format!("Wombat rule {index}: {topic}."),
+                    LessonCategory::Process,
+                    Confidence::new(0.8).expect("confidence"),
+                    SuggestedAction::PromoteToMemory,
+                )
+            })
+            .collect();
+        queue
+            .enqueue_candidates(&session, &candidates)
+            .expect("enqueue");
+        let persistence = MemoryPersistence::open_project(dir.path()).expect("store");
+        for item in queue.list().expect("list") {
+            queue
+                .decide(ReviewDecision {
+                    item_id: item.id.clone(),
+                    action: ReviewAction::Accept,
+                    reviewer: "test".to_string(),
+                    decided_at: None,
+                    note: None,
+                    replacement_summary: None,
+                    evidence: Vec::new(),
+                })
+                .expect("accept");
+            persistence.promote_review_item(&item.id).expect("promote");
+        }
+        dir
+    }
+
+    #[test]
+    fn memory_search_bounds_results_to_the_default_limit() {
+        let dir = seeded_project(12);
+        let out = memory_search(dir.path(), &json!({ "query": "wombat" })).expect("search");
+        assert_eq!(out.matches("\tscore=").count(), 8, "default limit is 8");
+    }
+
+    #[test]
+    fn memory_search_limit_argument_overrides_the_default() {
+        let dir = seeded_project(5);
+        let out =
+            memory_search(dir.path(), &json!({ "query": "wombat", "limit": 2 })).expect("search");
+        assert_eq!(out.matches("\tscore=").count(), 2);
+        // Each result line leads with the memory id, so a promising snippet can
+        // be expanded through the id-based inspect surfaces.
+        assert!(out.lines().next().is_some_and(|line| !line.is_empty()));
+    }
 }

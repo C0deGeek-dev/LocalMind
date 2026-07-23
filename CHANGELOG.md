@@ -5,6 +5,20 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Memory search now returns match-centred snippets and disciplined queries**
+  (LocalHub#27). A search hit's snippet is an FTS5 `snippet()` window centred
+  on the matched terms instead of the first 160 characters of the body, so a
+  match deep inside a large memory is represented by the matching passage,
+  not its boilerplate head. Query terms are normalized (punctuation-trimmed
+  edges), stopwords are dropped (an all-stopword query matches nothing
+  instead of everything), short terms match exactly rather than as prefixes,
+  and a query with three or more significant terms requires at least two of
+  them to appear in a body before it is eligible. The MCP `memory_search`
+  tool gains an optional `limit` argument (default 8) so a broad query cannot
+  flood the caller's context; each result still leads with the memory id for
+  id-based inspection. Project-over-global precedence now dedups global
+  results by full body (previously by snippet), and the rerank contract is
+  unchanged.
 - Fixed `localmind ui` review actions failing with `reviewer is not a function`.
   Individual and bulk accept/reject/defer/edit actions now read the reviewer
   input explicitly, refresh the queue statistics after success, and keep review

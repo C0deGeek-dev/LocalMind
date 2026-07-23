@@ -4,6 +4,46 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0028 — Accepted-memory keyword search is disciplined: match-centred snippets, stopword-stripped queries, and a term-coverage gate
+
+- **Date**: 2026-07-23
+- **Status**: accepted
+
+Accepted-memory FTS matched against the entire body but represented every hit
+by its first 160 characters, and turned every whitespace-separated query word
+into an OR-ed prefix phrase. In the field (LocalHub#27) that combination made
+retrieval dishonest at both ends: a genuine match deep inside a large memory
+was shown as unrelated boilerplate (navigation chrome, page headers), and one
+incidental common token — or a bare stopword — made large unrelated memories
+eligible. Every downstream consumer (the MCP tool, context export, the host's
+always-on injection and cross-source pack) inherited both defects.
+
+Decision — four parts:
+
+1. **Snippets are match-centred.** A search hit's snippet is an FTS5
+   `snippet()` window over the body (32 tokens), so the text shown for a hit
+   always contains matched terms, wherever they sit in the body. The snippet
+   is a *window*, not a body proxy: merge-time dedup (project-over-global
+   precedence) compares full bodies instead.
+2. **Queries are normalized.** Terms are trimmed of non-alphanumeric edges,
+   stopwords are dropped from a deliberately small, technical-text-safe list,
+   and an all-stopword query returns nothing rather than everything.
+3. **Prefixes must stay selective.** Terms below four characters match
+   exactly; longer terms keep prefix recall. A short common fragment must not
+   fan out across unrelated vocabulary.
+4. **Multi-term queries need coverage.** With three or more significant
+   terms, a body matching fewer than two of them is an incidental hit and is
+   dropped. Two-term queries deliberately keep single-term recall — the
+   partial hit already ranks below full matches, and model-facing surfaces
+   are bounded (the MCP `memory_search` tool now takes a `limit`, default 8).
+
+Unchanged, deliberately: project-over-global precedence, the bounded keyword
+candidate floor, and the optional-rerank contract (rerank may reorder eligible
+keyword candidates but never introduces new ones and never fails the
+no-embedding path). A numeric bm25 score floor was considered and rejected —
+bm25 magnitudes are corpus-dependent, so a fixed cut-off would be arbitrary
+(the coverage gate is the relevance floor).
+
 ## D-LM-0027 — Cross-device sync is encrypted, folder-carried, and review-gated; it reuses the signed-bundle machinery rather than forking it
 
 - **Date**: 2026-07-12

@@ -1060,43 +1060,57 @@ impl MemoryPersistence {
     ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
         // Merge project + global results with **project precedence**: project
         // matches lead, then global matches that are not already present (deduped
-        // by memory id and by body), so a project lesson always overrides a
-        // global one on conflict while a global lesson still surfaces when no
-        // project lesson applies. Provenance survives in each result's `path`
-        // (a global path lives under the user-home store).
-        let mut results = Self::search_in(&self.connection, query, language)?;
+        // by memory id and by full body — the snippet is a match-centred window,
+        // so two distinct memories can share one, and a body copy must dedup
+        // regardless of where its window landed), so a project lesson always
+        // overrides a global one on conflict while a global lesson still
+        // surfaces when no project lesson applies. Provenance survives in each
+        // result's `path` (a global path lives under the user-home store).
+        let mut rows = Self::search_in(&self.connection, query, language)?;
         if let Some(global) = &self.global {
-            let project_ids: std::collections::HashSet<String> = results
+            let project_ids: std::collections::HashSet<String> = rows
                 .iter()
-                .map(|r| r.memory_id.as_str().to_string())
+                .map(|row| row.result.memory_id.as_str().to_string())
                 .collect();
             let project_bodies: std::collections::HashSet<String> =
-                results.iter().map(|r| r.snippet.clone()).collect();
-            for result in Self::search_in(&global.connection, query, language)? {
-                if !project_ids.contains(result.memory_id.as_str())
-                    && !project_bodies.contains(&result.snippet)
+                rows.iter().map(|row| row.body.clone()).collect();
+            for row in Self::search_in(&global.connection, query, language)? {
+                if !project_ids.contains(row.result.memory_id.as_str())
+                    && !project_bodies.contains(&row.body)
                 {
-                    results.push(result);
+                    rows.push(row);
                 }
             }
         }
-        Ok(results)
+        Ok(rows.into_iter().map(|row| row.result).collect())
     }
 
     /// Run the FTS5 memory search against one connection (project or global).
     /// When `language` is `Some`, off-language memories are excluded in the query
     /// (`NULL`-tagged memories always pass).
+    ///
+    /// Each hit's snippet is a **match-centred passage** (FTS5 `snippet()` over
+    /// the body column), so the text shown for a hit contains the matched terms
+    /// even when they sit thousands of characters into the memory — the head of
+    /// a large body is often boilerplate, not the lesson. Multi-term queries
+    /// with three or more significant terms additionally require at least two of
+    /// them to appear in the body, so one incidental token cannot make a large
+    /// unrelated memory eligible; two-term queries keep single-term recall (the
+    /// weaker hit still ranks below full matches).
     fn search_in(
         connection: &Connection,
         query: &str,
         language: Option<&str>,
-    ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
-        let Some(match_expression) = fts_match_expression(query) else {
+    ) -> Result<Vec<RankedMemoryRow>, MemoryPersistenceError> {
+        let terms = significant_terms(query);
+        let Some(match_expression) = fts_match_expression(&terms) else {
             return Ok(Vec::new());
         };
         // A single statement string keeps the prepared shape stable; the language
         // clause is appended only when filtering so the unfiltered path is byte
-        // for byte what it was before.
+        // for byte what it was before. The snippet column asks FTS5 for a
+        // match-centred window over the body (column 1); 32 tokens lands near
+        // the old fixed window's length while always containing a match.
         let language_clause = if language.is_some() {
             " AND (m.language = ?2 OR m.language IS NULL)"
         } else {
@@ -1106,7 +1120,8 @@ impl MemoryPersistence {
             r#"
                 SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
                        m.epistemic_status, m.contradicted, m.category, m.hit_count,
-                       m.origin_device, bm25(memory_fts) AS rank
+                       m.origin_device, bm25(memory_fts) AS rank,
+                       snippet(memory_fts, 1, '', '', {SNIPPET_ELLIPSIS}, {SNIPPET_TOKENS}) AS passage
                 FROM memory_fts
                 JOIN memory_index m ON m.memory_id = memory_fts.memory_id
                 WHERE memory_fts MATCH ?1 AND m.status = 'active'{language_clause}
@@ -1129,6 +1144,7 @@ impl MemoryPersistence {
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, f64>(10)?,
+                row.get::<_, String>(11)?,
             ))
         };
         let rows = if let Some(language) = language {
@@ -1152,23 +1168,32 @@ impl MemoryPersistence {
                 hit_count,
                 origin_device,
                 rank,
+                passage,
             ) = row.map_err(MemoryPersistenceError::Sqlite)?;
+            // Term-coverage gate: with three or more significant terms, a body
+            // matching only one of them is an incidental hit, not an answer.
+            if terms.len() >= MIN_TERMS_FOR_COVERAGE && matched_terms(&body, &terms) < 2 {
+                continue;
+            }
             // bm25 returns a more-negative value for better matches; expose a
             // positive bigger-is-better integer to keep the result contract.
             #[allow(clippy::cast_possible_truncation)] // bounded: bm25 magnitudes are small
             let score = (-rank * 100.0).round() as i64;
-            results.push(MemorySearchResult {
-                memory_id: MemoryEntryId::new(memory_id),
-                path: PathBuf::from(path),
-                score: score.max(1),
-                snippet: body.chars().take(160).collect(),
-                category,
-                created_at,
-                stale_candidate,
-                epistemic_status: EpistemicStatus::from_token(&epistemic),
-                contradicted,
-                hit_count,
-                origin_device,
+            results.push(RankedMemoryRow {
+                result: MemorySearchResult {
+                    memory_id: MemoryEntryId::new(memory_id),
+                    path: PathBuf::from(path),
+                    score: score.max(1),
+                    snippet: passage,
+                    category,
+                    created_at,
+                    stale_candidate,
+                    epistemic_status: EpistemicStatus::from_token(&epistemic),
+                    contradicted,
+                    hit_count,
+                    origin_device,
+                },
+                body,
             });
         }
         Ok(results)
@@ -2083,20 +2108,86 @@ impl VerdictSource for ModelVerdictSource<'_> {
     }
 }
 
-/// Turns free-text user input into an FTS5 MATCH expression: each
-/// whitespace-separated term becomes a quoted prefix phrase (`"term"*`),
-/// OR-ed together. Quoting neutralizes FTS5 query syntax (`OR`, `-`, `NEAR`,
-/// parentheses) in user input; embedded double quotes are doubled per FTS5
-/// string rules. Returns `None` for an empty query.
-fn fts_match_expression(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
+/// FTS5 `snippet()` window size in tokens — lands near the length of the old
+/// fixed 160-character head window while always containing a matched term.
+const SNIPPET_TOKENS: usize = 32;
+/// Ellipsis FTS5 inserts where the snippet window cut the body (SQL literal).
+const SNIPPET_ELLIPSIS: &str = "'…'";
+/// Query terms at or above this count engage the term-coverage gate: at least
+/// two of them must appear in a body for the hit to survive. Two-term queries
+/// deliberately keep single-term recall — the partial hit ranks below full
+/// matches and a caller-side limit truncates the tail.
+const MIN_TERMS_FOR_COVERAGE: usize = 3;
+/// Terms shorter than this are matched exactly, never as prefixes — a short
+/// common fragment (`for*`, `git*`) would otherwise fan out across unrelated
+/// vocabulary and make junk memories eligible.
+const MIN_PREFIX_CHARS: usize = 4;
+
+/// Query words carrying no retrieval signal: matching one of these makes
+/// almost every English-prose memory eligible, so they are dropped before the
+/// MATCH expression is built. Deliberately small and technical-text-safe.
+const QUERY_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "by", "can", "could", "did", "do", "does",
+    "for", "from", "how", "i", "in", "into", "is", "it", "its", "not", "of", "on", "or", "our",
+    "should", "that", "the", "these", "this", "those", "to", "was", "we", "were", "what", "when",
+    "where", "which", "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// One `search_in` hit with its full body retained for merge-time dedup and
+/// the term-coverage gate; the body never leaves this module.
+struct RankedMemoryRow {
+    result: MemorySearchResult,
+    body: String,
+}
+
+/// Normalize free-text query input into significant search terms: split on
+/// whitespace, trim non-alphanumeric edges (so `-search` or `(search` read as
+/// `search` while interior hyphens like `operator-safe` survive), and drop
+/// stopwords. Returns an empty list for a query with no signal — the caller
+/// returns no results rather than matching everything.
+fn significant_terms(query: &str) -> Vec<String> {
+    query
         .split_whitespace()
-        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|term| !term.is_empty())
+        .filter(|term| !QUERY_STOPWORDS.contains(&term.to_ascii_lowercase().as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// How many of the query's significant terms appear in the body
+/// (case-insensitive substring — a close, deterministic approximation of the
+/// FTS tokenizer's view, shared with the prefix semantics).
+fn matched_terms(body: &str, terms: &[String]) -> usize {
+    let body_lower = body.to_ascii_lowercase();
+    terms
+        .iter()
+        .filter(|term| body_lower.contains(&term.to_ascii_lowercase()))
+        .count()
+}
+
+/// Turns significant query terms into an FTS5 MATCH expression: each term
+/// becomes a quoted phrase, prefix-extended (`"term"*`) only when the term is
+/// long enough that the prefix stays selective, all OR-ed together. Quoting
+/// neutralizes FTS5 query syntax (`OR`, `-`, `NEAR`, parentheses) in user
+/// input; embedded double quotes are doubled per FTS5 string rules. Returns
+/// `None` when no significant terms remain (empty or all-stopword query).
+fn fts_match_expression(terms: &[String]) -> Option<String> {
+    let clauses: Vec<String> = terms
+        .iter()
+        .map(|term| {
+            let quoted = term.replace('"', "\"\"");
+            if term.chars().count() >= MIN_PREFIX_CHARS {
+                format!("\"{quoted}\"*")
+            } else {
+                format!("\"{quoted}\"")
+            }
+        })
         .collect();
-    if terms.is_empty() {
+    if clauses.is_empty() {
         return None;
     }
-    Some(terms.join(" OR "))
+    Some(clauses.join(" OR "))
 }
 
 /// Whether a memory body recommends *against* something — a prohibition. Used to

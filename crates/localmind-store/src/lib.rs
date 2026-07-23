@@ -826,6 +826,102 @@ mod tests {
     }
 
     #[test]
+    fn search_snippet_is_centred_on_the_match_not_the_body_head(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        // A memory whose head is boilerplate and whose useful lesson sits far
+        // past the old fixed head window.
+        let filler = "navigation menu home pricing contact about. ".repeat(20);
+        let lesson = format!("{filler}Always pin the quokka registry mirror before publishing.");
+        let item = accepted_fixture_item(temp_dir.path(), &lesson)?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        persistence.promote_review_item(&item)?;
+
+        let results = persistence.search("quokka registry mirror")?;
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].snippet.contains("quokka"),
+            "snippet {:?} does not contain the matched term",
+            results[0].snippet
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stopword_only_queries_match_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let item = accepted_fixture_item(
+            temp_dir.path(),
+            "The tests should be run before the release is cut.",
+        )?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        persistence.promote_review_item(&item)?;
+
+        // Every term is a stopword: no signal, no results — previously this
+        // matched every English-prose memory in the store.
+        assert!(persistence.search("the and of to")?.is_empty());
+        // A significant term still reaches the memory even when the query also
+        // carries stopwords.
+        assert_eq!(persistence.search("the release")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn short_terms_match_exactly_instead_of_fanning_out_as_prefixes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let hub = accepted_fixture_item(
+            temp_dir.path(),
+            "Publish the wiki through the github mirror job.",
+        )?;
+        let exact = accepted_fixture_item(temp_dir.path(), "Run git fetch before rebasing.")?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        persistence.promote_review_item(&hub)?;
+        let exact_entry = persistence.promote_review_item(&exact)?;
+
+        // "git" is below the prefix threshold: it matches the token `git`, not
+        // every word that merely starts with it (`github`).
+        let results = persistence.search("git")?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].memory_id, exact_entry.id);
+        // Longer terms keep prefix recall: `publish` finds `Publish...`, and
+        // `rebas` finds `rebasing`.
+        assert_eq!(persistence.search("rebas")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn one_incidental_term_no_longer_makes_a_memory_eligible(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let unrelated = accepted_fixture_item(
+            temp_dir.path(),
+            "Tailwind utility classes keep component search stylesheets small.",
+        )?;
+        let relevant = accepted_fixture_item(
+            temp_dir.path(),
+            "Memory search retrieval ranks accepted lessons by relevance.",
+        )?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+        let unrelated_entry = persistence.promote_review_item(&unrelated)?;
+        let relevant_entry = persistence.promote_review_item(&relevant)?;
+
+        // Three significant terms: a body containing only one of them
+        // ("search" in the Tailwind memory) is an incidental hit and is
+        // dropped; the memory matching several terms survives.
+        let results = persistence.search("memory search retrieval")?;
+
+        assert!(results
+            .iter()
+            .any(|result| result.memory_id == relevant_entry.id));
+        assert!(results
+            .iter()
+            .all(|result| result.memory_id != unrelated_entry.id));
+        Ok(())
+    }
+
+    #[test]
     fn search_lang_excludes_off_language_lessons_but_keeps_general(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
