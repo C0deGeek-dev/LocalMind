@@ -196,6 +196,20 @@ fn api_review_get(project: &Path, id: &str) -> Result<Value> {
     }
 }
 
+/// Acting reviewer for a decision payload. The UI always sends an explicit,
+/// user-entered identity; `ui` is only a defensive fallback for direct API
+/// callers, and whitespace-only names collapse to it rather than being
+/// written into the audit log verbatim.
+fn reviewer_from(payload: &Value) -> String {
+    payload
+        .get("reviewer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("ui")
+        .to_string()
+}
+
 /// One review action: accept (accept + promote to memory), reject, defer, edit,
 /// or promote. Accept and promote both write durable memory through the same
 /// `promote_review_item` path the CLI uses.
@@ -205,11 +219,7 @@ fn api_review_action(project: &Path, id: &str, action: &str, body: &str) -> Resu
     } else {
         serde_json::from_str(body)?
     };
-    let reviewer = payload
-        .get("reviewer")
-        .and_then(Value::as_str)
-        .unwrap_or("ui")
-        .to_string();
+    let reviewer = reviewer_from(&payload);
     let note = payload
         .get("note")
         .and_then(Value::as_str)
@@ -298,10 +308,7 @@ fn api_bulk(project: &Path, body: &str) -> Result<Value> {
         .get("ids")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("bulk requires an `ids` array"))?;
-    let reviewer = payload
-        .get("reviewer")
-        .and_then(Value::as_str)
-        .unwrap_or("ui");
+    let reviewer = reviewer_from(&payload);
 
     let mut done = 0usize;
     let mut errors: Vec<Value> = Vec::new();
@@ -1067,6 +1074,32 @@ mod tests {
         assert!(super::INDEX_HTML.contains("/js/app.js"));
         // No external CDN references — all assets are served locally.
         assert!(!super::INDEX_HTML.contains("cdn."));
+    }
+
+    #[test]
+    fn reviewer_identity_is_never_hardcoded() {
+        // The reviewer lands in the append-only audit log as the actor, so the
+        // UI must never ship with a name pre-filled (LocalHub#35)...
+        assert!(!super::INDEX_HTML.to_ascii_lowercase().contains("david"));
+        assert!(!super::INDEX_HTML.contains(r#"id="reviewer" value="#));
+        // ...and the identity is persisted per browser, asked for on first
+        // run, and required before any decision fires.
+        assert!(super::JS_APP.contains("localStorage"));
+        assert!(super::JS_APP.contains("localmind.reviewer"));
+        assert!(super::JS_APP.contains("function askReviewer"));
+        assert!(super::JS_REVIEW.contains("reviewerName()"));
+        assert!(super::JS_REVIEW.contains("requireReviewer()"));
+        // The UI-side anonymous fallback is gone for good.
+        assert!(!super::JS_REVIEW.contains("|| 'ui'"));
+    }
+
+    #[test]
+    fn reviewer_from_trims_and_falls_back() {
+        assert_eq!(super::reviewer_from(&json!({ "reviewer": " ada " })), "ada");
+        assert_eq!(super::reviewer_from(&json!({ "reviewer": "   " })), "ui");
+        assert_eq!(super::reviewer_from(&json!({ "reviewer": "" })), "ui");
+        assert_eq!(super::reviewer_from(&json!({})), "ui");
+        assert_eq!(super::reviewer_from(&serde_json::Value::Null), "ui");
     }
 
     #[test]

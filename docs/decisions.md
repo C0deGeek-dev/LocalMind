@@ -4,6 +4,39 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0030 — Reviewer identity is asked for, persisted per browser, and required before any decision; it is never pre-filled
+
+- **Date**: 2026-07-24
+- **Status**: accepted
+
+The review UI shipped with a hardcoded `reviewer` default (a real maintainer's
+name) and never persisted what a reviewer typed, so every page load silently
+restored the default and the append-only audit log accumulated decisions
+attributed to someone who did not make them (LocalHub#35). An audit log that
+cannot answer "who accepted this" on a multi-maintainer project is worse than
+no log — it answers wrongly, with confidence, and cannot be corrected without
+rewriting a record that is contractually append-only.
+
+Decision:
+
+1. **No pre-filled identity, ever.** The reviewer field ships empty; an
+   embedded-asset test asserts the UI carries no hardcoded name.
+2. **Identity is per browser origin, not per project** — stored in
+   `localStorage` under `localmind.reviewer`. The human is the same across
+   projects; the projects differ, the reviewer does not.
+3. **First run blocks decisions, not browsing.** With no stored identity, a
+   non-dismissable modal asks who is reviewing; accept / reject / defer /
+   edit / promote and the bulk actions are disabled and refuse to fire, while
+   Memory, Docs, Graph and Audit stay browsable. Editing the header field
+   updates the stored identity; clearing it re-opens the modal.
+4. **Whitespace never becomes an actor.** The UI trims and rejects
+   empty/whitespace-only names; the server trims too and collapses blank
+   input to the defensive `ui` fallback, which exists only for direct API
+   callers — the UI never relies on it.
+5. **Existing misattributed rows stay.** The audit log is append-only;
+   retroactively relabelling history would be a second falsehood on top of
+   the first. The record is corrected going forward, not rewritten backward.
+
 ## D-LM-0029 — A review candidate carries its source evidence separately from its lesson; excerpts need a reviewer's edit before promotion
 
 - **Date**: 2026-07-23

@@ -1,5 +1,5 @@
 // Review view
-import { api, esc, refreshPill, toast } from '../app.js';
+import { api, askReviewer, esc, refreshPill, reviewerName, toast } from '../app.js';
 
 let rvItems = [], rvSel = null, rvChecks = new Set(), rvState = 'Pending';
 
@@ -8,8 +8,21 @@ let rvItems = [], rvSel = null, rvChecks = new Set(), rvState = 'Pending';
 // only awaiting items get a promote control.
 const RV_STATES = ['Pending', 'Accepted', 'Edited', 'Deferred', 'Rejected', 'Merged'];
 
+// The stored identity, or '' when none is set. Decision actions must not fire
+// without one — the name lands in the append-only audit log as the actor, so
+// there is deliberately no anonymous fallback here (the server keeps `ui`
+// only as a defensive default for direct API callers).
 function currentReviewer() {
-  return document.querySelector('#reviewer')?.value.trim() || 'ui';
+  return reviewerName();
+}
+
+// Gate for every decision path (buttons, bulk, keyboard): with no identity,
+// re-open the blocking modal instead of acting.
+function requireReviewer() {
+  if (currentReviewer()) return true;
+  askReviewer();
+  toast('Set your reviewer name first — decisions are recorded under it', true);
+  return false;
 }
 
 function promotable(it) {
@@ -22,9 +35,9 @@ async function renderReview() {
       <select id="stateF">${RV_STATES.map(s => `<option ${s === rvState ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <input type="checkbox" id="selAll">
       <span class="pill"><span id="selN">0</span> selected</span>
-      <button class="primary" id="bAcc">Accept selected</button>
-      <button class="danger" id="bRej">Reject selected</button>
-      <button id="bProm" style="display:none">Promote selected</button>
+      <button class="primary" id="bAcc" ${currentReviewer() ? '' : 'disabled'}>Accept selected</button>
+      <button class="danger" id="bRej" ${currentReviewer() ? '' : 'disabled'}>Reject selected</button>
+      <button id="bProm" style="display:none" ${currentReviewer() ? '' : 'disabled'}>Promote selected</button>
       <select id="catF"><option value="">all categories</option></select>
       <span class="grow"></span>
       <span class="hint">
@@ -122,16 +135,17 @@ function selReview(id) {
   if (!it) return;
   const pending = it.state === 'Pending';
   const stateLine = pending ? '' : `<span class="chip">${esc(it.state)}${it.promoted ? ' · promoted' : ''}</span>`;
+  const dis = currentReviewer() ? '' : 'disabled';
   const actions = pending
-    ? `<button class="primary" id="aAcc" title="Mark good AND write to durable memory">Accept &amp; promote</button>
-      <button id="aAccOnly" title="Mark accepted but do not write to memory yet">Accept only</button>
-      <button id="aEdit" title="Save your edits to the text">Save edit</button>
-      <button id="aDef" title="Keep pending for later">Defer</button>
-      <button class="danger" id="aRej" title="Discard — never becomes memory">Reject</button>
+    ? `<button class="primary" id="aAcc" ${dis} title="Mark good AND write to durable memory">Accept &amp; promote</button>
+      <button id="aAccOnly" ${dis} title="Mark accepted but do not write to memory yet">Accept only</button>
+      <button id="aEdit" ${dis} title="Save your edits to the text">Save edit</button>
+      <button id="aDef" ${dis} title="Keep pending for later">Defer</button>
+      <button class="danger" id="aRej" ${dis} title="Discard — never becomes memory">Reject</button>
       <span class="hint">Accept &amp; promote = the normal action.</span>`
     : promotable(it)
-      ? `<button class="primary" id="aProm" title="Write this accepted item to durable memory">Promote to memory</button>
-        <button id="aEdit" title="Save your edits to the text">Save edit</button>
+      ? `<button class="primary" id="aProm" ${dis} title="Write this accepted item to durable memory">Promote to memory</button>
+        <button id="aEdit" ${dis} title="Save your edits to the text">Save edit</button>
         <span class="hint">Accepted earlier with "Accept only" — promote when ready.</span>`
       : it.promoted
         ? '<span class="hint">Already promoted to durable memory.</span>'
@@ -163,6 +177,7 @@ function selReview(id) {
 }
 
 async function actReview(id, action, extra) {
+  if (!requireReviewer()) return;
   try {
     await api('POST', '/api/review/' + encodeURIComponent(id) + '/' + action, Object.assign({ reviewer: currentReviewer() }, extra || {}));
     const labels = { accept: 'Accepted + promoted', accept_only: 'Accepted (not promoted)', reject: 'Rejected', defer: 'Deferred', edit: 'Edit saved', promote: 'Promoted' };
@@ -177,6 +192,7 @@ async function actReview(id, action, extra) {
 }
 
 async function bulkReview(action) {
+  if (!requireReviewer()) return;
   if (!rvChecks.size) return toast('Nothing selected', true);
   if (!confirm(`${action} ${rvChecks.size} item(s)?`)) return;
   try {

@@ -49,6 +49,55 @@ export async function refreshPill() {
 
 document.querySelector('#helpBtn').onclick = () => document.querySelector('#help').classList.add('on');
 
+// ── Reviewer identity ──
+// Stored per browser origin, not per project — the human is the same across
+// projects. The name is written into review items and the append-only audit
+// log as the acting `actor`, so nothing may default it to a person.
+const REVIEWER_KEY = 'localmind.reviewer';
+
+export function normalizeReviewer(name) {
+  return (name || '').trim().slice(0, 64);
+}
+
+export function reviewerName() {
+  let stored = '';
+  try { stored = localStorage.getItem(REVIEWER_KEY) || ''; } catch { /* storage unavailable */ }
+  return normalizeReviewer(stored);
+}
+
+function storeReviewer(name) {
+  try { localStorage.setItem(REVIEWER_KEY, name); } catch { /* storage unavailable */ }
+}
+
+// Opens the blocking identity modal. It has no close control and Escape does
+// not dismiss it: decision actions stay disabled until a name is saved.
+export function askReviewer() {
+  const modal = document.querySelector('#ident');
+  modal.classList.add('on');
+  const field = document.querySelector('#identName');
+  field.value = reviewerName();
+  field.focus();
+}
+
+document.querySelector('#identForm').onsubmit = e => {
+  e.preventDefault();
+  const name = normalizeReviewer(document.querySelector('#identName').value);
+  if (!name) return toast('Enter a name — decisions are recorded under it', true);
+  storeReviewer(name);
+  document.querySelector('#reviewer').value = name;
+  document.querySelector('#ident').classList.remove('on');
+  route(); // re-render so decision controls pick up the identity
+};
+
+// Editing the header field updates the stored identity; clearing it re-opens
+// the modal instead of silently falling back to an anonymous actor.
+document.querySelector('#reviewer').onchange = e => {
+  const name = normalizeReviewer(e.target.value);
+  if (!name) return askReviewer();
+  storeReviewer(name);
+  e.target.value = name;
+};
+
 // ── Routing ──
 const routes = {
   dashboard: renderDashboard,
@@ -76,4 +125,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Boot ──
+const bootName = reviewerName();
+if (bootName) document.querySelector('#reviewer').value = bootName;
+else askReviewer();
 route();

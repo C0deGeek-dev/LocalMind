@@ -532,8 +532,8 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
   color: var(--muted);
 }
 
-/* ── Help overlay ── */
-#help {
+/* ── Overlays (help, reviewer identity) ── */
+.overlay {
   position: fixed;
   inset: 0;
   background: rgba(2, 3, 8, 0.75);
@@ -543,9 +543,9 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
   z-index: 100;
 }
 
-#help.on { display: flex; }
+.overlay.on { display: flex; }
 
-#help .box {
+.overlay .box {
   margin: auto;
   background: linear-gradient(160deg, rgba(14, 18, 32, 0.98), rgba(8, 10, 20, 0.98));
   border: 1px solid var(--line-bright);
@@ -557,7 +557,7 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
   overflow: auto;
 }
 
-#help h2 {
+.overlay h2 {
   margin: 0 0 8px;
   font-size: 20px;
   font-family: var(--font-display);
@@ -565,7 +565,7 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
   letter-spacing: 0.06em;
 }
 
-#help h3 {
+.overlay h3 {
   margin: 20px 0 6px;
   font-size: 12px;
   text-transform: uppercase;
@@ -573,9 +573,17 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
   color: var(--cyan);
 }
 
-#help p { margin: 3px 0; color: var(--muted); }
-#help b { color: var(--fg); }
-#help .x { float: right; }
+.overlay p { margin: 3px 0; color: var(--muted); }
+.overlay b { color: var(--fg); }
+.overlay .x { float: right; }
+
+#identForm {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+#identForm input { flex: 1; }
 
 /* ── Graph canvas ── */
 #graphHost { flex: 1; min-height: 0; position: relative; }

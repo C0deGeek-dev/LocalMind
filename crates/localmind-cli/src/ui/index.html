@@ -19,15 +19,28 @@
     <a href="#audit">Audit</a>
   </nav>
   <span class="grow"></span>
-  <label class="rev">reviewer <input type="text" id="reviewer" value="david" size="9"></label>
+  <label class="rev">reviewer <input type="text" id="reviewer" size="18" maxlength="64" placeholder="who is reviewing?"></label>
   <span class="pill" id="pill">…</span>
   <button class="sm" id="helpBtn" title="What does everything mean?">ⓘ Help</button>
 </header>
 
 <div id="view"></div>
 
+<!-- Reviewer identity overlay: shown until an identity is stored. Not
+     dismissable — decisions are attributed to this name in the append-only
+     audit log, so no action may fire without an explicit answer. -->
+<div id="ident" class="overlay"><div class="box">
+  <h2>Who is reviewing?</h2>
+  <p>Every accept, reject, defer, edit and promote is recorded with your name in the
+  <b>append-only</b> audit log. Browsing needs no identity; deciding does.</p>
+  <form id="identForm">
+    <input type="text" id="identName" maxlength="64" placeholder="your name" autocomplete="off">
+    <button class="primary" type="submit">Save</button>
+  </form>
+</div></div>
+
 <!-- Help overlay -->
-<div id="help"><div class="box">
+<div id="help" class="overlay"><div class="box">
   <button class="x sm" onclick="document.getElementById('help').classList.remove('on')">close</button>
   <h2>What is what</h2>
   <p>LocalMind holds three layers of local knowledge, all reviewed by you. Nothing becomes memory silently.</p>
