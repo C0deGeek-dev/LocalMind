@@ -113,13 +113,22 @@ async function docSearch() {
   document.querySelector('#docRes').innerHTML = '<div class="empty">Searching…</div>';
   try {
     const d = await api('GET', '/api/docs?' + new URLSearchParams({ q: query, limit: '12' }));
-    if (!d.embeddings_configured) {
-      document.querySelector('#docN').textContent = 'semantic search unavailable';
-      document.querySelector('#docRes').innerHTML = `<div class="empty">Semantic search needs an embedding endpoint, and none is configured —
+    // Each capability state explains itself — an empty answer must say which
+    // prerequisite is missing, not read as "no matches".
+    const states = {
+      no_doc_chunks: 'The doc index is empty — nothing has been ingested yet.<br><br>Run <code>localmind ingest docs &lt;path&gt;</code> to build it.',
+      embeddings_not_configured: `Semantic search needs an embedding endpoint, and none is configured —
         an empty result here says nothing about your docs.<br><br>Set <code>[inference] embedding_base_url</code> +
         <code>embedding_model</code> in <code>.localmind.toml</code>, start the embed server
         (<code>localbox embed-serve</code>), re-run <code>localmind ingest docs</code>, then search again.
-        Browsing files on the left works without embeddings.</div>`;
+        Browsing files on the left works without embeddings.`,
+      endpoint_unavailable: 'The embedding endpoint is configured but unreachable.<br><br>Start it (e.g. <code>localbox embed-serve</code>) and retry.',
+      no_doc_vectors: 'Documentation passages exist but none carries an embedding.<br><br>Re-run <code>localmind ingest docs</code> with the embedding endpoint reachable.',
+      index_mismatch: 'The doc index was embedded under a different model or dimensions than the active embedding model.<br><br>Re-run <code>localmind ingest docs</code> to re-embed it.',
+    };
+    if (d.status && d.status !== 'searched') {
+      document.querySelector('#docN').textContent = 'semantic search unavailable';
+      document.querySelector('#docRes').innerHTML = `<div class="empty">${states[d.status] || 'Semantic search cannot run.'}</div>`;
       return;
     }
     document.querySelector('#docN').textContent = d.results.length + ' passages';

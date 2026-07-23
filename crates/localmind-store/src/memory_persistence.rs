@@ -97,6 +97,65 @@ pub struct DocSearchResult {
     pub score: f32,
 }
 
+/// Why an ad-hoc query embedding did or did not come back — the diagnosed
+/// variant of the best-effort `embed_query` contract. A degraded state is a
+/// value, never an error, so semantic features keep degrading gracefully
+/// while their callers can explain the degradation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmbedQueryOutcome {
+    /// No embedding endpoint/model is configured (or the embeddings feature is
+    /// disabled) — semantic search cannot run until `[inference]`
+    /// `embedding_base_url` + `embedding_model` are set.
+    NotConfigured,
+    /// An endpoint is configured but the embed call failed or returned nothing.
+    EndpointUnavailable { error: String },
+    /// The query embedded successfully.
+    Embedded(Vec<f32>),
+}
+
+/// The capability state behind a semantic doc-search response, so an empty
+/// result is diagnosable instead of ambiguous.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocSearchStatus {
+    /// The doc index has no passages at all — nothing has been ingested.
+    NoDocChunks,
+    /// Passages exist but embeddings are not configured, so semantic search
+    /// cannot run.
+    EmbeddingsNotConfigured,
+    /// Passages exist and an endpoint is configured, but the embed call failed.
+    EmbeddingEndpointUnavailable { error: String },
+    /// Passages exist but none of them carries a stored vector — ingest ran
+    /// without (working) embeddings.
+    NoDocVectors,
+    /// Doc vectors exist but none is readable against the active query model:
+    /// the index was embedded under a different model or dimension count and
+    /// needs a re-embed (re-run ingest with the active embedding model).
+    IndexMismatch {
+        indexed_models: Vec<String>,
+        query_dimensions: usize,
+    },
+    /// A valid semantic search ran; `results` holds every hit at or above the
+    /// relevance floor (possibly none — a genuine no-match).
+    Searched,
+}
+
+/// A semantic doc search plus the capability state it ran under.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocSearchReport {
+    pub status: DocSearchStatus,
+    pub results: Vec<DocSearchResult>,
+}
+
+/// One kind-filtered ranked vector scan: the readable scored rows (sorted,
+/// untruncated), how many candidate rows the index holds for the kind, and
+/// the distinct models those rows were embedded under (for mismatch
+/// reporting). Internal to the diagnosed search paths.
+struct VectorKindScan {
+    scored: Vec<VectorSearchResult>,
+    candidates: i64,
+    models: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryRecord {
     pub memory_id: MemoryEntryId,
@@ -633,15 +692,39 @@ impl MemoryPersistence {
     /// (semantic dedup). Returns `Ok(None)` when embeddings are not configured
     /// **or** the endpoint is unreachable, so a semantic feature degrades to the
     /// lexical contract rather than failing the caller (best-effort, mirroring
-    /// memory embedding at promotion).
+    /// memory embedding at promotion). Callers that need to *say why* a
+    /// semantic feature is degraded use
+    /// [`embed_query_diagnosed`](Self::embed_query_diagnosed) instead.
     pub fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>, MemoryPersistenceError> {
+        match self.embed_query_diagnosed(text)? {
+            EmbedQueryOutcome::Embedded(vector) => Ok(Some(vector)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Like [`embed_query`](Self::embed_query), but distinguishing *why* no
+    /// vector came back: embeddings not configured (no endpoint/model or the
+    /// embeddings feature disabled) versus a configured endpoint that failed.
+    /// Still best-effort — a failure is a value, never an error, so callers
+    /// keep degrading gracefully while being able to explain the degradation.
+    pub fn embed_query_diagnosed(
+        &self,
+        text: &str,
+    ) -> Result<EmbedQueryOutcome, MemoryPersistenceError> {
         let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
         let Some(endpoint) = capability.embeddings() else {
-            return Ok(None);
+            return Ok(EmbedQueryOutcome::NotConfigured);
         };
         match endpoint.embed(std::slice::from_ref(&text.to_string())) {
-            Ok(vectors) => Ok(vectors.into_iter().next()),
-            Err(_) => Ok(None),
+            Ok(vectors) => match vectors.into_iter().next().filter(|v| !v.is_empty()) {
+                Some(vector) => Ok(EmbedQueryOutcome::Embedded(vector)),
+                None => Ok(EmbedQueryOutcome::EndpointUnavailable {
+                    error: "embedding endpoint returned no vector".to_string(),
+                }),
+            },
+            Err(error) => Ok(EmbedQueryOutcome::EndpointUnavailable {
+                error: error.to_string(),
+            }),
         }
     }
 
@@ -853,26 +936,73 @@ impl MemoryPersistence {
     }
 
     /// Semantic search over ingested documentation chunks. Embeds the query,
-    /// ranks it against every stored vector, keeps the `'doc'` hits, and joins
-    /// their passage text. Returns an empty result when embeddings are not
-    /// configured or the endpoint is unreachable (semantic doc search needs a
-    /// query vector) — callers keep working, just without doc hits.
+    /// ranks it against the stored `'doc'` vectors, and joins their passage
+    /// text. Returns an empty result when embeddings are not configured or the
+    /// endpoint is unreachable (semantic doc search needs a query vector) —
+    /// callers keep working, just without doc hits. Callers that need to tell
+    /// the user *why* a search came back empty use
+    /// [`doc_search_diagnosed`](Self::doc_search_diagnosed).
     pub fn doc_search(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<DocSearchResult>, MemoryPersistenceError> {
-        let Some(query_vector) = self.embed_query(query)? else {
-            return Ok(Vec::new());
+        Ok(self.doc_search_diagnosed(query, limit)?.results)
+    }
+
+    /// [`doc_search`](Self::doc_search) with the capability state made
+    /// explicit, so an empty result is distinguishable across: no ingested
+    /// docs, embeddings not configured, endpoint unreachable, doc passages
+    /// present but unvectored, an index embedded under a different
+    /// model/dimensions than the active query model, and a valid search that
+    /// simply matched nothing above the relevance floor. Diagnostics never
+    /// escalate a degraded capability into an error — the report is a value.
+    pub fn doc_search_diagnosed(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<DocSearchReport, MemoryPersistenceError> {
+        let empty = |status: DocSearchStatus| DocSearchReport {
+            status,
+            results: Vec::new(),
         };
-        // Over-fetch before the 'doc' filter: vector_search ranks memory and doc
-        // subjects together, so ask for enough to still fill `limit` doc hits.
-        let ranked = self.vector_search(&query_vector, limit.saturating_mul(4).max(limit))?;
-        let mut results = Vec::new();
-        for hit in ranked {
-            if hit.subject_kind != "doc" {
-                continue;
+        if self.doc_chunk_count()? == 0 {
+            return Ok(empty(DocSearchStatus::NoDocChunks));
+        }
+        let query_vector = match self.embed_query_diagnosed(query)? {
+            EmbedQueryOutcome::NotConfigured => {
+                return Ok(empty(DocSearchStatus::EmbeddingsNotConfigured));
             }
+            EmbedQueryOutcome::EndpointUnavailable { error } => {
+                return Ok(empty(DocSearchStatus::EmbeddingEndpointUnavailable {
+                    error,
+                }));
+            }
+            EmbedQueryOutcome::Embedded(vector) => vector,
+        };
+        // Filter to 'doc' vectors *inside* the ranked scan — a shared top-k over
+        // memory + doc subjects would let high-ranking memory vectors consume
+        // the window and hide relevant doc hits.
+        let scan = self.vector_scan_kind(&query_vector, Some("doc"))?;
+        if scan.candidates == 0 {
+            return Ok(empty(DocSearchStatus::NoDocVectors));
+        }
+        if scan.scored.is_empty() {
+            // Every stored doc vector was skipped as unreadable against this
+            // query vector: the index was embedded under a different model or
+            // dimension count than the active embedding model produces.
+            return Ok(empty(DocSearchStatus::IndexMismatch {
+                indexed_models: scan.models,
+                query_dimensions: query_vector.len(),
+            }));
+        }
+        let min_cosine = self.config.config.retrieval.doc_search_min_cosine;
+        let mut results = Vec::new();
+        for hit in scan
+            .scored
+            .into_iter()
+            .filter(|hit| hit.score >= min_cosine)
+        {
             let row = self
                 .connection
                 .query_row(
@@ -897,7 +1027,23 @@ impl MemoryPersistence {
                 break;
             }
         }
-        Ok(results)
+        Ok(DocSearchReport {
+            status: DocSearchStatus::Searched,
+            results,
+        })
+    }
+
+    /// How many ingested documentation chunks carry a stored vector — the
+    /// "vectored" half of the docs status/doctor count (project store; doc
+    /// chunks are per-project).
+    pub fn doc_vector_count(&self) -> Result<i64, MemoryPersistenceError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM vector_index WHERE subject_kind = 'doc'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(MemoryPersistenceError::Sqlite)
     }
 
     /// Number of ingested documentation chunks (text rows), independent of how
@@ -973,13 +1119,13 @@ impl MemoryPersistence {
         // present are appended, so on the (practically impossible) cross-store id
         // collision the project row wins. Ranking and truncation then run over the
         // combined set.
-        let mut scored = Self::vector_search_in(&self.connection, query_vector)?;
+        let mut scored = Self::vector_search_in(&self.connection, query_vector, None)?;
         if let Some(global) = &self.global {
             let seen: std::collections::HashSet<(String, String)> = scored
                 .iter()
                 .map(|result| (result.subject_kind.clone(), result.subject_id.clone()))
                 .collect();
-            for result in Self::vector_search_in(&global.connection, query_vector)? {
+            for result in Self::vector_search_in(&global.connection, query_vector, None)? {
                 if !seen.contains(&(result.subject_kind.clone(), result.subject_id.clone())) {
                     scored.push(result);
                 }
@@ -996,30 +1142,128 @@ impl MemoryPersistence {
         Ok(scored)
     }
 
+    /// Ranked cosine scan restricted to one `subject_kind` **inside** the scan
+    /// (never a shared top-k filtered afterwards), with the diagnostics the
+    /// capability-state reporting needs: how many candidate rows the index
+    /// holds for the kind and which models they were embedded under. Sorted
+    /// best-first, untruncated — callers apply their own floor and limit.
+    fn vector_scan_kind(
+        &self,
+        query_vector: &[f32],
+        kind: Option<&str>,
+    ) -> Result<VectorKindScan, MemoryPersistenceError> {
+        let mut scored = Self::vector_search_in(&self.connection, query_vector, kind)?;
+        let mut candidates = Self::vector_row_count(&self.connection, kind)?;
+        let mut models = Self::vector_models(&self.connection, kind)?;
+        if let Some(global) = &self.global {
+            let seen: std::collections::HashSet<(String, String)> = scored
+                .iter()
+                .map(|result| (result.subject_kind.clone(), result.subject_id.clone()))
+                .collect();
+            for result in Self::vector_search_in(&global.connection, query_vector, kind)? {
+                if !seen.contains(&(result.subject_kind.clone(), result.subject_id.clone())) {
+                    scored.push(result);
+                }
+            }
+            candidates += Self::vector_row_count(&global.connection, kind)?;
+            for model in Self::vector_models(&global.connection, kind)? {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
+        Ok(VectorKindScan {
+            scored,
+            candidates,
+            models,
+        })
+    }
+
+    /// How many vector rows one connection holds, optionally per kind.
+    fn vector_row_count(
+        connection: &Connection,
+        kind: Option<&str>,
+    ) -> Result<i64, MemoryPersistenceError> {
+        match kind {
+            Some(kind) => connection.query_row(
+                "SELECT COUNT(*) FROM vector_index WHERE subject_kind = ?1",
+                params![kind],
+                |row| row.get(0),
+            ),
+            None => connection.query_row("SELECT COUNT(*) FROM vector_index", [], |row| row.get(0)),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// The distinct embedding models the stored vectors were written under,
+    /// optionally per kind — for the index-mismatch diagnosis.
+    fn vector_models(
+        connection: &Connection,
+        kind: Option<&str>,
+    ) -> Result<Vec<String>, MemoryPersistenceError> {
+        let mut statement = match kind {
+            Some(_) => connection.prepare(
+                "SELECT DISTINCT model FROM vector_index WHERE subject_kind = ?1 ORDER BY model",
+            ),
+            None => connection.prepare("SELECT DISTINCT model FROM vector_index ORDER BY model"),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = match kind {
+            Some(kind) => statement.query_map(params![kind], map_row),
+            None => statement.query_map([], map_row),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut models = Vec::new();
+        for row in rows {
+            models.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(models)
+    }
+
     /// Score every stored vector on one connection (project or global) by cosine
     /// against `query_vector`, skipping rows whose recorded dimensions or blob
-    /// length do not match the query. Returns the unranked, untruncated scores;
+    /// length do not match the query. When `kind` is `Some`, only that
+    /// `subject_kind` competes — the filter runs inside the scan, before any
+    /// ranking or truncation. Returns the unranked, untruncated scores;
     /// [`vector_search`](Self::vector_search) merges project + global results and
     /// applies the ranking and limit.
     fn vector_search_in(
         connection: &Connection,
         query_vector: &[f32],
+        kind: Option<&str>,
     ) -> Result<Vec<VectorSearchResult>, MemoryPersistenceError> {
+        let kind_clause = if kind.is_some() {
+            " WHERE subject_kind = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT subject_kind, subject_id, dimensions, vector_blob FROM vector_index{kind_clause} ORDER BY subject_kind, subject_id",
+        );
         let mut statement = connection
-            .prepare(
-                "SELECT subject_kind, subject_id, dimensions, vector_blob FROM vector_index ORDER BY subject_kind, subject_id",
-            )
+            .prepare(&sql)
             .map_err(MemoryPersistenceError::Sqlite)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                ))
-            })
-            .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        };
+        let rows = match kind {
+            Some(kind) => statement.query_map(params![kind], map_row),
+            None => statement.query_map([], map_row),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
         let mut scored = Vec::new();
         for row in rows {
             let (subject_kind, subject_id, dimensions, blob) =

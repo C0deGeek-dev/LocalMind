@@ -5,6 +5,19 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Semantic doc search now explains an empty answer** (LocalHub#28). An empty
+  `doc_search` result distinguishes: nothing ingested, embeddings not
+  configured, embedding endpoint unreachable, passages present but unvectored,
+  an index embedded under a different model/dimensions than the active model
+  (with a re-embed recommendation), and a genuine no-match — each with its own
+  message on the MCP tool and a `status` field on the UI `/api/docs` response.
+  Doc vectors are now ranked kind-filtered inside the vector scan, so
+  high-ranking memory vectors can no longer crowd doc hits out of the window,
+  and a configurable relevance floor (`[retrieval] doc_search_min_cosine`,
+  default 0.25) stops an unrelated nearest neighbour from being presented as
+  relevant merely to fill the limit. `localmind status` and the UI stats now
+  report doc chunk and doc vector counts. Embeddings stay best-effort: no
+  diagnostic turns a degraded capability into a failure.
 - **Memory search now returns match-centred snippets and disciplined queries**
   (LocalHub#27). A search hit's snippet is an FTS5 `snippet()` window centred
   on the matched terms instead of the first 160 characters of the body, so a

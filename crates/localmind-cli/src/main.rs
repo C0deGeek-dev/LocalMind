@@ -619,15 +619,29 @@ fn main() -> Result<()> {
                 }
             }
             match MemoryPersistence::open_project(&project) {
-                Ok(store) => match store.list_memory() {
-                    Ok(memories) => {
-                        println!("store:   open, {} accepted memory item(s)", memories.len());
+                Ok(store) => {
+                    match store.list_memory() {
+                        Ok(memories) => {
+                            println!("store:   open, {} accepted memory item(s)", memories.len());
+                        }
+                        Err(error) => {
+                            ready = false;
+                            println!("store:   open but memory list failed — {error}");
+                        }
                     }
-                    Err(error) => {
-                        ready = false;
-                        println!("store:   open but memory list failed — {error}");
+                    // Doc-index readiness: chunk and vector counts diverging is
+                    // the "ingested without embeddings" state a bare doc_search
+                    // miss cannot explain.
+                    match (store.doc_chunk_count(), store.doc_vector_count()) {
+                        (Ok(chunks), Ok(vectors)) => {
+                            println!("docs:    {chunks} chunk(s), {vectors} with embeddings");
+                        }
+                        (Err(error), _) | (_, Err(error)) => {
+                            ready = false;
+                            println!("docs:    count failed — {error}");
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     ready = false;
                     println!("store:   not open — {error}");

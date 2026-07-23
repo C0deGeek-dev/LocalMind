@@ -15,7 +15,9 @@ use localmind_mcp::{
     TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_SEARCH, TOOL_SKILL_FETCH, TOOL_SKILL_LIST,
     TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE, TOOL_SYMBOL_NEIGHBORHOOD,
 };
-use localmind_store::{ContextExportTarget, ContextExporter, GraphStore, MemoryPersistence};
+use localmind_store::{
+    ContextExportTarget, ContextExporter, DocSearchStatus, GraphStore, MemoryPersistence,
+};
 use serde_json::{json, Value};
 
 /// MCP protocol revision this server speaks.
@@ -202,14 +204,57 @@ fn doc_search(project: &Path, args: &Value) -> Result<String, ToolFailure> {
     let query = str_arg(args, "query")?;
     let limit = usize::try_from(u32_arg(args, "limit", 5)).unwrap_or(5);
     let persistence = MemoryPersistence::open_project(project).map_err(exec)?;
-    let results = persistence.doc_search(&query, limit).map_err(exec)?;
-    if results.is_empty() {
-        return Ok(
-            "No documentation matched this query (or embeddings are not configured).".to_string(),
-        );
+    let report = persistence
+        .doc_search_diagnosed(&query, limit)
+        .map_err(exec)?;
+    // Each capability state gets its own message, so an empty answer tells the
+    // user which prerequisite is missing instead of one ambiguous "no match".
+    match report.status {
+        DocSearchStatus::NoDocChunks => {
+            return Ok(
+                "No documentation has been ingested yet (the doc index is empty). Run \
+                 `localmind ingest docs <path>` to build it."
+                    .to_string(),
+            );
+        }
+        DocSearchStatus::EmbeddingsNotConfigured => {
+            return Ok(
+                "Semantic doc search needs embeddings: configure [inference] \
+                 embedding_base_url + embedding_model in .localmind.toml."
+                    .to_string(),
+            );
+        }
+        DocSearchStatus::EmbeddingEndpointUnavailable { error } => {
+            return Ok(format!(
+                "The embedding endpoint is configured but unreachable ({error}). Start it \
+                 (e.g. `localbox embed-serve`) and retry."
+            ));
+        }
+        DocSearchStatus::NoDocVectors => {
+            return Ok(
+                "Documentation passages exist but none carries an embedding. Re-run \
+                 `localmind ingest docs <path>` with the embedding endpoint reachable."
+                    .to_string(),
+            );
+        }
+        DocSearchStatus::IndexMismatch {
+            indexed_models,
+            query_dimensions,
+        } => {
+            return Ok(format!(
+                "The doc index was embedded under a different model/dimensions than the \
+                 active embedding model produces (indexed: {}; query dimensions: \
+                 {query_dimensions}). Re-run `localmind ingest docs <path>` to re-embed.",
+                indexed_models.join(", ")
+            ));
+        }
+        DocSearchStatus::Searched => {}
+    }
+    if report.results.is_empty() {
+        return Ok("No documentation matched this query.".to_string());
     }
     let mut out = String::new();
-    for result in results {
+    for result in report.results {
         let heading = result.heading.unwrap_or_default();
         out.push_str(&format!(
             "{}  #{}  {}  (score {:.3})\n{}\n\n",

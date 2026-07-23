@@ -71,8 +71,9 @@ pub use language::{
 };
 pub use markdown::{MarkdownMemoryFormat, MarkdownParseError};
 pub use memory_persistence::{
-    AuditRecord, DocSearchResult, MemoryPersistence, MemoryPersistenceError, MemoryProvenance,
-    MemoryRecord, MemorySearchResult, VectorSearchResult,
+    AuditRecord, DocSearchReport, DocSearchResult, DocSearchStatus, EmbedQueryOutcome,
+    MemoryPersistence, MemoryPersistenceError, MemoryProvenance, MemoryRecord, MemorySearchResult,
+    VectorSearchResult,
 };
 pub use okf::{OkfFormat, OkfParseError, OKF_VERSION};
 pub use okf_export::{OkfExportError, OkfExportReport, OkfExporter};

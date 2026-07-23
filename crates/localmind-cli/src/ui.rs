@@ -16,7 +16,7 @@ use localmind_core::{
     GraphEndpoint, MemoryEntryId, NodeKind, ReviewAction, ReviewDecision, ReviewItemId,
 };
 use localmind_mcp::{handle, GraphToolRequest};
-use localmind_store::{GraphStore, MemoryPersistence, ReviewQueue};
+use localmind_store::{DocSearchStatus, GraphStore, MemoryPersistence, ReviewQueue};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -426,12 +426,22 @@ fn api_docs(project: &Path, query: &str) -> Result<Value> {
         .unwrap_or(10)
         .clamp(1, 50);
     let persistence = MemoryPersistence::open_project(project)?;
-    // Surfaced so the UI can tell "no matches" apart from "search cannot run":
-    // doc_search deliberately returns empty when no embedding endpoint is
-    // configured, which looks identical to a genuine miss.
+    // Surfaced so the UI can tell "no matches" apart from "search cannot run",
+    // and *why* it cannot: empty doc index, embeddings unconfigured, endpoint
+    // down, unvectored passages, or a model/dimension mismatch all read
+    // differently.
     let embeddings_configured = persistence.embeddings_configured()?;
-    let results: Vec<Value> = persistence
-        .doc_search(&q, limit)?
+    let report = persistence.doc_search_diagnosed(&q, limit)?;
+    let status = match &report.status {
+        DocSearchStatus::NoDocChunks => "no_doc_chunks".to_string(),
+        DocSearchStatus::EmbeddingsNotConfigured => "embeddings_not_configured".to_string(),
+        DocSearchStatus::EmbeddingEndpointUnavailable { .. } => "endpoint_unavailable".to_string(),
+        DocSearchStatus::NoDocVectors => "no_doc_vectors".to_string(),
+        DocSearchStatus::IndexMismatch { .. } => "index_mismatch".to_string(),
+        DocSearchStatus::Searched => "searched".to_string(),
+    };
+    let results: Vec<Value> = report
+        .results
         .into_iter()
         .map(|r| {
             json!({
@@ -443,7 +453,11 @@ fn api_docs(project: &Path, query: &str) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({ "results": results, "embeddings_configured": embeddings_configured }))
+    Ok(json!({
+        "results": results,
+        "embeddings_configured": embeddings_configured,
+        "status": status,
+    }))
 }
 
 /// Every ingested documentation file with its chunk count (browse sidebar).
@@ -734,6 +748,7 @@ fn api_stats(project: &Path) -> Result<Value> {
         "pending": pending,
         "accepted": memory.len(),
         "doc_chunks": persistence.doc_chunk_count()?,
+        "doc_vectors": persistence.doc_vector_count()?,
         "pending_by_category": pending_by_category,
         "accepted_by_scope": accepted_by_scope,
         "accepted_by_category": accepted_by_category,

@@ -91,6 +91,11 @@ pub struct RetrievalConfig {
     /// How many top blended hits the rerank stage may reorder.
     #[serde(default = "default_rerank_window")]
     pub rerank_window: usize,
+    /// Minimum cosine similarity a semantic doc-search hit must reach to be
+    /// returned. Keeps an unrelated nearest neighbour from being presented as
+    /// relevant merely to fill the requested limit. `0.0` disables the floor.
+    #[serde(default = "default_doc_search_min_cosine")]
+    pub doc_search_min_cosine: f32,
 }
 
 impl Default for RetrievalConfig {
@@ -98,8 +103,16 @@ impl Default for RetrievalConfig {
         Self {
             rerank: false,
             rerank_window: default_rerank_window(),
+            doc_search_min_cosine: default_doc_search_min_cosine(),
         }
     }
+}
+
+fn default_doc_search_min_cosine() -> f32 {
+    // Conservative: unrelated passages typically score well below this on the
+    // supported embedding models, while genuinely related passages score well
+    // above it — the floor trims noise without hiding borderline matches.
+    0.25
 }
 
 /// Cross-device sync settings (`[sync]`). All optional; a project with no

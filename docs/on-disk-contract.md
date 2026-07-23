@@ -55,6 +55,7 @@ semantic_dedup = false       # opt in to embedding-cosine dedup of accepted memo
 [retrieval]
 rerank = false               # opt in to the embedding rerank stage; off = deterministic blend only
 rerank_window = 20           # how many top blended hits rerank may reorder
+doc_search_min_cosine = 0.25 # semantic doc-search relevance floor; 0.0 disables
 
 [sync]
 project_key = "github.com/org/repo"  # optional; a stable, path-independent project identity
@@ -86,6 +87,15 @@ deterministic paths remain active.
 `[inference]` embedding endpoint is also configured. Without both, the
 deterministic blend order is the whole contract — ranking stays reproducible and
 offline, byte-identical to the no-rerank path.
+
+`[retrieval].doc_search_min_cosine` floors semantic doc search: a stored doc
+vector below this cosine against the query is not returned merely to fill the
+requested limit (an unrelated nearest neighbour is not a relevant answer).
+`0.0` disables the floor. Doc search also reports its capability state — empty
+index, embeddings unconfigured, endpoint unreachable, unvectored passages, or
+a model/dimension-mismatched index needing a re-embed — instead of one
+ambiguous empty result, and doc vectors are ranked kind-filtered so memory
+vectors never crowd doc hits out of the window.
 
 **Embedding accepted memory.** When an `[inference]` embedding endpoint **and**
 `embedding_model` are configured (and `features.embeddings` is on — the default),
