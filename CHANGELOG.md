@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **`Accept only` no longer strands review items in an invisible limbo**
+  (LocalHub#31). The review UI gains a state filter (Pending, Accepted,
+  Edited, Deferred, Rejected, Merged); accepted/edited items show whether
+  they are *awaiting promotion* or already *promoted*, carry a
+  `Promote to memory` action backed by the existing promote endpoint, and a
+  bulk `Promote selected` action (idempotent per item, per-item errors
+  surfaced). Status, the pill, and the dashboard now report `accepted review
+  items awaiting promotion` separately from `accepted memory` instead of one
+  conflated `accepted` label. `Accept only` stays non-promoting, and no
+  retained accepted item is silently promoted — they are simply visible and
+  actionable again. Keyboard accept/reject/defer shortcuts stay scoped to
+  the Pending view.
 - **`insights research` is now topic-scoped accepted-memory distillation**
   (LocalHub#29). The batch pass selects only memories relevant to the topic
   (via the disciplined accepted-memory search) instead of concatenating the

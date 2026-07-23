@@ -16,6 +16,7 @@ async function renderDashboard() {
     const store = `<div class="storebar">Store: <code>${esc(s.store_path || '?')}</code>${empty ? ' · <b>this store is empty</b> (nothing ingested or reviewed here yet)' : ''}</div>`;
     view.innerHTML = `<div class="pad">${store}<div class="cards">
       <div class="card"><div class="n">${s.pending}</div><div class="l">pending review</div></div>
+      <div class="card"><div class="n">${s.accepted_awaiting_promotion || 0}</div><div class="l">accepted, awaiting promotion</div></div>
       <div class="card"><div class="n">${s.accepted}</div><div class="l">accepted memory</div></div>
       <div class="card"><div class="n">${s.doc_chunks}</div><div class="l">doc chunks</div></div></div>
       ${bars('Pending by category', s.pending_by_category)}${bars('Accepted by scope', s.accepted_by_scope)}${bars('Accepted by category', s.accepted_by_category)}</div>`;

@@ -124,6 +124,32 @@ fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response
     }
 }
 
+/// The ids of every promoted (accepted-memory) entry. A promoted memory keeps
+/// its review candidate's id, so membership here is what separates "accepted
+/// review item awaiting promotion" from "accepted and promoted" — two states
+/// one `accepted` label used to conflate.
+fn promoted_ids(persistence: &MemoryPersistence) -> Result<HashSet<String>> {
+    Ok(persistence
+        .list_memory()?
+        .into_iter()
+        .map(|memory| memory.memory_id.to_string())
+        .collect())
+}
+
+/// Review items accepted or edited but not yet written to durable memory.
+fn awaiting_promotion(queue: &ReviewQueue, promoted: &HashSet<String>) -> Result<usize> {
+    Ok(queue
+        .list()?
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item.state,
+                localmind_core::ReviewState::Accepted | localmind_core::ReviewState::Edited
+            ) && !promoted.contains(item.candidate.id.as_str())
+        })
+        .count())
+}
+
 fn api_status(project: &Path) -> Result<Value> {
     let queue = ReviewQueue::open_project(project)?;
     let pending = queue
@@ -132,17 +158,22 @@ fn api_status(project: &Path) -> Result<Value> {
         .filter(|item| format!("{:?}", item.state) == "Pending")
         .count();
     let persistence = MemoryPersistence::open_project(project)?;
-    let accepted = persistence.list_memory()?.len();
+    let promoted = promoted_ids(&persistence)?;
+    // "accepted" means promoted durable memory; accepted review items still
+    // waiting for promotion are counted separately, never folded in.
     Ok(json!({
         "project": project.display().to_string(),
         "pending": pending,
-        "accepted": accepted,
+        "accepted": promoted.len(),
+        "accepted_awaiting_promotion": awaiting_promotion(&queue, &promoted)?,
     }))
 }
 
 fn api_review_list(project: &Path, query: &str) -> Result<Value> {
     let want_state = query_param(query, "state");
     let queue = ReviewQueue::open_project(project)?;
+    let persistence = MemoryPersistence::open_project(project)?;
+    let promoted = promoted_ids(&persistence)?;
     let items: Vec<Value> = queue
         .list()?
         .into_iter()
@@ -150,15 +181,17 @@ fn api_review_list(project: &Path, query: &str) -> Result<Value> {
             Some(state) => format!("{:?}", item.state).eq_ignore_ascii_case(state),
             None => true,
         })
-        .map(|item| review_item_json(&item))
+        .map(|item| review_item_json(&item, &promoted))
         .collect();
     Ok(json!({ "items": items }))
 }
 
 fn api_review_get(project: &Path, id: &str) -> Result<Value> {
     let queue = ReviewQueue::open_project(project)?;
+    let persistence = MemoryPersistence::open_project(project)?;
+    let promoted = promoted_ids(&persistence)?;
     match queue.get(&ReviewItemId::new(id))? {
-        Some(item) => Ok(review_item_json(&item)),
+        Some(item) => Ok(review_item_json(&item, &promoted)),
         None => Err(anyhow!("review item not found: {id}")),
     }
 }
@@ -743,10 +776,24 @@ fn api_stats(project: &Path) -> Result<Value> {
             .entry(record.category.clone())
             .or_default() += 1;
     }
+    let promoted: HashSet<String> = memory
+        .iter()
+        .map(|record| record.memory_id.to_string())
+        .collect();
+    let awaiting = queue_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state,
+                localmind_core::ReviewState::Accepted | localmind_core::ReviewState::Edited
+            ) && !promoted.contains(item.candidate.id.as_str())
+        })
+        .count();
     Ok(json!({
         "store_path": project.display().to_string(),
         "pending": pending,
         "accepted": memory.len(),
+        "accepted_awaiting_promotion": awaiting,
         "doc_chunks": persistence.doc_chunk_count()?,
         "doc_vectors": persistence.doc_vector_count()?,
         "pending_by_category": pending_by_category,
@@ -802,7 +849,7 @@ fn decide(
     Ok(format!("{:?}", item.state))
 }
 
-fn review_item_json(item: &localmind_store::ReviewQueueItem) -> Value {
+fn review_item_json(item: &localmind_store::ReviewQueueItem, promoted: &HashSet<String>) -> Value {
     json!({
         "id": item.id.to_string(),
         "state": format!("{:?}", item.state),
@@ -813,6 +860,9 @@ fn review_item_json(item: &localmind_store::ReviewQueueItem) -> Value {
         "rationale": item.candidate.rationale.clone(),
         "replacement": item.replacement_summary.clone(),
         "note": item.note.clone(),
+        // Whether this item's candidate already exists as durable memory —
+        // what separates "accepted, awaiting promotion" from "promoted".
+        "promoted": promoted.contains(item.candidate.id.as_str()),
     })
 }
 
@@ -898,7 +948,91 @@ fn open_browser(url: &str) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::{percent_decode, query_param};
+    use localmind_core::{
+        CandidateLesson, Confidence, LessonCategory, LessonId, SessionId, SuggestedAction,
+    };
+    use localmind_store::ReviewQueue;
+    use serde_json::json;
+
+    /// A project with one pending review candidate.
+    fn project_with_pending() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .expect("config");
+        let queue = ReviewQueue::open_project(dir.path()).expect("queue");
+        let candidate = CandidateLesson::new(
+            LessonId::new("candidate-0001"),
+            "Prefer promoting accepted items deliberately.",
+            LessonCategory::Process,
+            Confidence::new(0.8).expect("confidence"),
+            SuggestedAction::PromoteToMemory,
+        );
+        queue
+            .enqueue_candidates(&SessionId::new("ui-fixture"), &[candidate])
+            .expect("enqueue");
+        let id = queue.list().expect("list")[0].id.to_string();
+        (dir, id)
+    }
+
+    #[test]
+    fn accept_only_stays_visible_and_promotes_later() {
+        let (dir, id) = project_with_pending();
+        let project = dir.path();
+        let reviewer = json!({ "reviewer": "test" }).to_string();
+
+        // Accept only: the item leaves Pending without writing memory...
+        super::api_review_action(project, &id, "accept_only", &reviewer).expect("accept_only");
+        let pending = super::api_review_list(project, "state=Pending").expect("pending list");
+        assert_eq!(pending["items"].as_array().expect("items").len(), 0);
+        // ...but is not lost: the Accepted filter shows it, awaiting promotion.
+        let accepted = super::api_review_list(project, "state=Accepted").expect("accepted list");
+        let items = accepted["items"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["promoted"], false);
+        let status = super::api_status(project).expect("status");
+        assert_eq!(status["accepted"], 0, "no durable memory written yet");
+        assert_eq!(status["accepted_awaiting_promotion"], 1);
+
+        // Promote through the same endpoint the UI button calls.
+        super::api_review_action(project, &id, "promote", &reviewer).expect("promote");
+
+        // Exactly one memory row, the item reads as promoted, the split counts
+        // flip, and the audit trail records exactly one promotion.
+        let persistence = localmind_store::MemoryPersistence::open_project(project).expect("store");
+        let memory = persistence.list_memory().expect("memory");
+        assert_eq!(memory.len(), 1);
+        let accepted = super::api_review_list(project, "state=Accepted").expect("accepted list");
+        assert_eq!(accepted["items"][0]["promoted"], true);
+        let status = super::api_status(project).expect("status");
+        assert_eq!(status["accepted"], 1);
+        assert_eq!(status["accepted_awaiting_promotion"], 0);
+        let promotions = persistence
+            .audit_records()
+            .expect("audit")
+            .into_iter()
+            .filter(|record| record.kind == "MemoryPromoted")
+            .count();
+        assert_eq!(promotions, 1);
+    }
+
+    #[test]
+    fn stats_split_awaiting_promotion_from_accepted_memory() {
+        let (dir, id) = project_with_pending();
+        let project = dir.path();
+        let reviewer = json!({ "reviewer": "test" }).to_string();
+        super::api_review_action(project, &id, "accept_only", &reviewer).expect("accept_only");
+
+        let stats = super::api_stats(project).expect("stats");
+
+        assert_eq!(stats["accepted"], 0);
+        assert_eq!(stats["accepted_awaiting_promotion"], 1);
+    }
 
     #[test]
     fn query_param_extracts_and_decodes() {

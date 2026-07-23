@@ -38,7 +38,10 @@ export function toast(msg, err) {
 export async function refreshPill() {
   try {
     const s = await api('GET', '/api/stats');
-    document.querySelector('#pill').innerHTML = `<b>${s.pending}</b> pending · <b>${s.accepted}</b> memory · <b>${s.doc_chunks}</b> doc chunks`;
+    const awaiting = s.accepted_awaiting_promotion
+      ? ` · <b>${s.accepted_awaiting_promotion}</b> awaiting promotion`
+      : '';
+    document.querySelector('#pill').innerHTML = `<b>${s.pending}</b> pending${awaiting} · <b>${s.accepted}</b> memory · <b>${s.doc_chunks}</b> doc chunks`;
   } catch (e) {
     document.querySelector('#pill').textContent = e.message;
   }
