@@ -4,6 +4,40 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0029 — A review candidate carries its source evidence separately from its lesson; excerpts need a reviewer's edit before promotion
+
+- **Date**: 2026-07-23
+- **Status**: accepted
+
+Hosts that generate candidates from gathered sources (e.g. web research) need
+the reviewer to see the complete source, but fusing the source into the
+candidate's summary meant promotion wrote the whole dump into searchable
+accepted memory — in the field, entire web pages (navigation chrome included)
+became "lessons" with the trust and searchability bonuses of curated
+knowledge (LocalHub#24). Being provenance-backed and being memory-ready are
+different properties.
+
+Decision — three parts:
+
+1. **`CandidateLesson` gains `evidence_text`** (optional, additive): the full
+   carried source, rendered by review surfaces under the summary so the
+   review experience keeps the complete evidence, while promotion writes
+   only the summary (or the reviewer's replacement) into the memory body.
+   Evidence and provenance survive in the review item and audit records —
+   never in searchable memory text.
+2. **`requires_edit_before_promotion`** (optional, additive) marks a summary
+   that is a provenance-backed excerpt rather than a standalone reusable
+   lesson. Promotion of such an item is refused with a typed, actionable
+   error until a reviewer supplies a replacement (`Save edit`); the item
+   stays fully visible and editable, and nothing is deleted. Legacy
+   fused-body items carry neither field and promote exactly as before.
+3. **`Quality` gains `EvidenceDump`**: text dominated by a carried fenced
+   evidence block, or long sentence-free web boilerplate (navigation chrome,
+   menus), is not a distilled lesson. The one shared classifier labels it at
+   write time and — through the existing retroactive freshness pass — flags
+   *existing* accepted memories with that shape for manual review
+   (flag-only; D-LM-0016's never-auto-delete holds).
+
 ## D-LM-0028 — Accepted-memory keyword search is disciplined: match-centred snippets, stopword-stripped queries, and a term-coverage gate
 
 - **Date**: 2026-07-23

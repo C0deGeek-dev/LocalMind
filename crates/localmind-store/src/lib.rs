@@ -762,6 +762,64 @@ mod tests {
     }
 
     #[test]
+    fn an_excerpt_candidate_cannot_promote_until_edited() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp_dir = tempfile::tempdir()?;
+        fs::write(
+            temp_dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )?;
+        let queue = ReviewQueue::open_project(temp_dir.path())?;
+        let candidate = localmind_core::CandidateLesson::new(
+            localmind_core::LessonId::new("excerpt-0001"),
+            "Excerpt from web: framework guide.",
+            localmind_core::LessonCategory::ToolingNote,
+            localmind_core::Confidence::new(0.3)?,
+            localmind_core::SuggestedAction::PromoteToMemory,
+        )
+        .with_evidence_text("raw fetched page text, kept for the reviewer only")
+        .requiring_edit_before_promotion();
+        queue.enqueue_candidates(&SessionId::new("research-batch"), &[candidate])?;
+        let item_id = queue.list()?[0].id.clone();
+        queue.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::Accept,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })?;
+        let persistence = MemoryPersistence::open_project(temp_dir.path())?;
+
+        // Verbatim promotion of a source excerpt is refused with a clear error…
+        let refused = persistence.promote_review_item(&item_id);
+        assert!(
+            matches!(
+                refused,
+                Err(crate::memory_persistence::MemoryPersistenceError::ReviewItemNeedsEdit { .. })
+            ),
+            "an unedited excerpt must not become memory: {refused:?}"
+        );
+
+        // …while a reviewer-distilled replacement promotes, and only the
+        // replacement text lands in the searchable body.
+        queue.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::Edit,
+            reviewer: "test".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: Some("Pin framework versions before upgrading.".to_string()),
+            evidence: Vec::new(),
+        })?;
+        let entry = persistence.promote_review_item(&item_id)?;
+        assert_eq!(entry.body, "Pin framework versions before upgrading.");
+        assert!(!entry.body.contains("raw fetched page text"));
+        Ok(())
+    }
+
+    #[test]
     fn edited_review_item_promotes_replacement_text() -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let item_id = accepted_fixture_item(temp_dir.path(), "Prefer editable memory.")?;

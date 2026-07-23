@@ -136,12 +136,21 @@ function selReview(id) {
       : it.promoted
         ? '<span class="hint">Already promoted to durable memory.</span>'
         : '';
+  const editNeeded = it.requires_edit && !it.replacement
+    ? '<div class="meta">⚠ Source excerpt — edit it into a standalone lesson (Save edit) before promoting.</div>'
+    : '';
+  const evidence = it.evidence_text
+    ? `<details><summary>Full source evidence (review-only — never promoted into memory)</summary>
+        <pre style="white-space:pre-wrap;max-height:16em;overflow:auto">${esc(it.evidence_text)}</pre></details>`
+    : '';
   document.querySelector('#rvDetail').innerHTML = `<div class="meta">
     <span class="chip">${esc(it.category)}</span>${stateLine}
     confidence ${(+it.confidence).toFixed(2)} · ${esc(it.id)} · session ${esc(it.session)}
   </div>
     ${it.rationale ? `<div class="meta">⚠ ${esc(it.rationale)}</div>` : ''}
+    ${editNeeded}
     <textarea class="edit" id="rvBody">${esc(it.replacement || it.summary)}</textarea>
+    ${evidence}
     <div class="actions">${actions}</div>`;
 
   const on = (sel, fn) => { const el = document.querySelector(sel); if (el) el.onclick = fn; };

@@ -863,6 +863,11 @@ fn review_item_json(item: &localmind_store::ReviewQueueItem, promoted: &HashSet<
         // Whether this item's candidate already exists as durable memory —
         // what separates "accepted, awaiting promotion" from "promoted".
         "promoted": promoted.contains(item.candidate.id.as_str()),
+        // Carried source evidence (shown under the summary, never promoted
+        // into the memory body) and whether the summary must be edited into a
+        // standalone lesson before promotion.
+        "evidence_text": item.candidate.evidence_text.clone(),
+        "requires_edit": item.candidate.requires_edit_before_promotion,
     })
 }
 

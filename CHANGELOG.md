@@ -5,6 +5,17 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Review candidates carry source evidence separately from the lesson**
+  (LocalHub#24, D-LM-0029). `CandidateLesson` gains optional `evidence_text`
+  (full carried source, shown by the review UI under the summary in a
+  collapsible block, never written into the promoted memory body) and
+  `requires_edit_before_promotion` (a provenance-backed excerpt must be
+  edited into a standalone lesson before promotion — refused with a clear
+  error until then; nothing is deleted). Legacy candidates are unaffected.
+  The quality classifier gains an `evidence-dump` verdict for bodies
+  dominated by carried fenced evidence or sentence-free web boilerplate;
+  through the existing retroactive freshness pass this also flags existing
+  raw-dump accepted memories for manual review (flag-only, never deleted).
 - **`Accept only` no longer strands review items in an invisible limbo**
   (LocalHub#31). The review UI gains a state filter (Pending, Accepted,
   Edited, Deferred, Rejected, Merged); accepted/edited items show whether

@@ -289,7 +289,18 @@ impl MemoryPersistence {
                 state: format!("{:?}", item.state),
             });
         }
+        // A provenance-backed excerpt is evidence, not a reusable lesson: it
+        // stays reviewable but never becomes durable memory verbatim — the
+        // reviewer distils it first (their replacement text is what promotes).
+        if item.candidate.requires_edit_before_promotion && item.replacement_summary.is_none() {
+            return Err(MemoryPersistenceError::ReviewItemNeedsEdit {
+                item_id: item_id.clone(),
+            });
+        }
 
+        // Only the reviewer-approved lesson text is written to memory; any
+        // separately-carried `evidence_text` stays with the review item and
+        // audit records, never in the searchable body.
         let body = item
             .replacement_summary
             .clone()
@@ -2550,6 +2561,11 @@ pub enum MemoryPersistenceError {
         item_id: ReviewItemId,
         state: String,
     },
+    #[error(
+        "review item {item_id} is a source excerpt, not a standalone lesson — edit it into a \
+         reusable statement (Save edit) before promoting"
+    )]
+    ReviewItemNeedsEdit { item_id: ReviewItemId },
     #[error(transparent)]
     Schema(#[from] crate::schema::SchemaError),
     #[error("invalid vector index data: {detail}")]

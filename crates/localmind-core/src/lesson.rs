@@ -20,6 +20,21 @@ pub struct CandidateLesson {
     /// [`LessonCategory::ToolUse`]. `None` for every other category.
     #[serde(default)]
     pub tool_use: Option<ToolUseLesson>,
+    /// Full carried source evidence (e.g. a research finding's bounded page
+    /// text), held **separately** from the one-line summary: review surfaces
+    /// render it under the summary so the reviewer sees the complete source,
+    /// while promotion writes only the summary (or the reviewer's
+    /// replacement) into durable memory — the evidence never becomes
+    /// searchable memory text by riding inside the body. `None` for
+    /// candidates whose summary is the whole content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_text: Option<String>,
+    /// The summary is a provenance-backed excerpt rather than a standalone
+    /// reusable lesson: promotion is refused until a reviewer edits it into
+    /// one (the review item stays fully visible and editable; nothing is
+    /// deleted).
+    #[serde(default)]
+    pub requires_edit_before_promotion: bool,
 }
 
 impl CandidateLesson {
@@ -45,7 +60,25 @@ impl CandidateLesson {
             validation_status: ValidationStatus::Valid,
             review_annotation: None,
             tool_use: None,
+            evidence_text: None,
+            requires_edit_before_promotion: false,
         }
+    }
+
+    /// Attach full carried source evidence, kept separate from the summary so
+    /// review shows it while promotion writes only the summary.
+    #[must_use]
+    pub fn with_evidence_text(mut self, evidence_text: impl Into<String>) -> Self {
+        self.evidence_text = Some(evidence_text.into());
+        self
+    }
+
+    /// Mark the summary as a provenance-backed excerpt that must be edited
+    /// into a standalone lesson before promotion.
+    #[must_use]
+    pub fn requiring_edit_before_promotion(mut self) -> Self {
+        self.requires_edit_before_promotion = true;
+        self
     }
 
     #[must_use]

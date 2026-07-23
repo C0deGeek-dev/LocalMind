@@ -35,6 +35,11 @@ pub enum Quality {
     /// A build-tool / shell / working-directory / OS-env mechanic, not a
     /// code/algorithm lesson. Routed to review, never auto-accepted.
     ToolingNoise,
+    /// A raw source dump — text dominated by a carried fenced evidence block,
+    /// or web boilerplate (navigation chrome, menus) with no sentence
+    /// structure — rather than a distilled lesson. Routed to review / flagged
+    /// retroactively, never auto-accepted, never deleted.
+    EvidenceDump,
 }
 
 impl Quality {
@@ -51,6 +56,7 @@ impl Quality {
             Quality::General => "general",
             Quality::OverFit => "over-fit",
             Quality::ToolingNoise => "tooling-noise",
+            Quality::EvidenceDump => "evidence-dump",
         }
     }
 
@@ -64,6 +70,9 @@ impl Quality {
             ),
             Quality::ToolingNoise => Some(
                 "low quality (tooling-noise): a build/shell/working-directory mechanic, not a code lesson — routed to review, not auto-accepted",
+            ),
+            Quality::EvidenceDump => Some(
+                "low quality (raw-source dump): mostly carried evidence or web boilerplate, not a distilled lesson — routed to review, not auto-accepted",
             ),
         }
     }
@@ -106,7 +115,54 @@ pub fn classify_quality(category: &LessonCategory, summary: &str, body: &str) ->
         return Quality::OverFit;
     }
 
+    // (4) Raw-source dump. The text is mostly a carried fenced evidence block
+    // (a research page dump riding under a one-line claim), or long web
+    // boilerplate with no sentence structure (navigation chrome, menus,
+    // banners). Neither is a distilled lesson; both are flagged for a human,
+    // never deleted. The fence rule needs real bulk so a normal lesson with a
+    // short code example is untouched; the chrome rule skips anything with
+    // code spans so terse code-heavy notes are untouched.
+    if is_evidence_dominated(&text) || looks_like_web_chrome(&text) {
+        return Quality::EvidenceDump;
+    }
+
     Quality::General
+}
+
+/// Whether fenced blocks make up the bulk (≥60%) of a genuinely long text —
+/// the shape of a claim towing a raw source dump.
+fn is_evidence_dominated(text: &str) -> bool {
+    let total = text.chars().count();
+    if total < 1_500 {
+        return false;
+    }
+    let mut fenced = 0usize;
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            inside = !inside;
+            continue;
+        }
+        if inside {
+            fenced += line.chars().count() + 1;
+        }
+    }
+    fenced * 10 >= total * 6
+}
+
+/// Whether a long, code-free text has almost no sentence structure — dozens of
+/// words with fewer than one sentence mark per twenty reads as navigation
+/// chrome / menu / banner boilerplate, not prose someone distilled.
+fn looks_like_web_chrome(text: &str) -> bool {
+    if has_backtick_code(text) {
+        return false;
+    }
+    let word_count = text.split_whitespace().count();
+    if word_count < 30 {
+        return false;
+    }
+    let sentence_marks = text.matches(['.', '!', '?']).count();
+    sentence_marks * 20 < word_count
 }
 
 /// The lowercased whole-word set of `text` (alphanumeric runs). Used for
@@ -447,5 +503,46 @@ mod tests {
         assert!(Quality::General.review_note().is_none());
         assert!(Quality::OverFit.review_note().is_some());
         assert!(Quality::ToolingNoise.review_note().is_some());
+        assert!(Quality::EvidenceDump.review_note().is_some());
+    }
+
+    #[test]
+    fn a_fence_dominated_body_is_an_evidence_dump() {
+        let dump = format!(
+            "Excerpt from web: framework guide.\n\n```text\n{}\n```",
+            "raw page paragraph text repeated over and over. ".repeat(60)
+        );
+        assert_eq!(
+            classify_quality(&LessonCategory::Process, "", &dump),
+            Quality::EvidenceDump
+        );
+        // A normal lesson with a short code example is untouched.
+        let lesson =
+            "Prefer bounded channels for backpressure.\n\n```rust\nconst CAPACITY: usize = 8;\n```";
+        assert_eq!(
+            classify_quality(&LessonCategory::CodePattern, "", lesson),
+            Quality::General
+        );
+    }
+
+    #[test]
+    fn sentence_free_boilerplate_is_an_evidence_dump() {
+        let chrome = "Home Pricing Docs Blog Careers Contact Sign in Get started \
+                      Products Solutions Enterprise Resources Community Support Legal \
+                      Privacy Terms Changelog Status Partners About Team Press Brand \
+                      Download Install Guides Tutorials Examples Reference API SDK CLI";
+        assert_eq!(
+            classify_quality(&LessonCategory::Process, "", chrome),
+            Quality::EvidenceDump
+        );
+        // A short, punctuated lesson never trips the chrome rule.
+        assert_eq!(
+            classify_quality(
+                &LessonCategory::Process,
+                "",
+                "Always run the integration suite before a release."
+            ),
+            Quality::General
+        );
     }
 }
