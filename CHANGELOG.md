@@ -5,6 +5,17 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **`insights research` is now topic-scoped accepted-memory distillation**
+  (LocalHub#29). The batch pass selects only memories relevant to the topic
+  (via the disciplined accepted-memory search) instead of concatenating the
+  whole store into one prompt, fits them into a token budget truncated at
+  memory boundaries with provenance ids preserved, and prefers each memory's
+  concise lesson text over any attached raw evidence block. An empty
+  relevant selection makes no model call. Small stores skip scoping (a
+  handful of memories needs no selection). The command is documented as
+  accepted-memory distillation — local-only, distinct from the host's web
+  research workflow; the batch contract is unchanged (inert without
+  configured inference, strict validated output, review-routed insights).
 - **Semantic doc search now explains an empty answer** (LocalHub#28). An empty
   `doc_search` result distinguishes: nothing ingested, embeddings not
   configured, embedding endpoint unreachable, passages present but unvectored,

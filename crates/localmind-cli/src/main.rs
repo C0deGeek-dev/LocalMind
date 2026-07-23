@@ -482,8 +482,12 @@ enum InsightCommand {
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
-    /// Research one topic against accepted memories (model-backed; requires
-    /// a configured `[inference]` endpoint).
+    /// Topic-scoped accepted-memory distillation: gaps, contradictions, and
+    /// recurring patterns in what this store already knows about the topic.
+    /// Only memories relevant to the topic enter the prompt, under a token
+    /// budget. Local-only — this never searches the web (that is the host's
+    /// research workflow); model-backed, requires a configured `[inference]`
+    /// endpoint, and every generated insight stays review-routed.
     Research {
         topic: String,
         #[arg(long, default_value = ".")]
