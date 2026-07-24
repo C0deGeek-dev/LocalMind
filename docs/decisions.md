@@ -4,6 +4,35 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0031 — The Skills review tab is a distinct surface that reads discovery proposals and delegates every mutation to LocalPilot
+
+- **Date**: 2026-07-24
+- **Status**: accepted
+
+Skill-discovery review (LocalHub#41) is a **separate** surface from the memory
+review queue — skill recommendations are not memory candidates and must not enter
+that queue. A dedicated **Skills** tab reads the review proposals a companion tool
+(LocalPilot) writes to `<project>/.localpilot/skill-proposals.toml` from its
+read-only discovery lane, groups them by repository, and shows the query, source,
+resolved commit, catalog root, ranked skills, primary recommendation,
+confidence/rationale, validation state, intended scope, and last-seen.
+
+LocalMind never registers a source or installs a skill itself. Every mutation
+delegates to LocalPilot's `skills` CLI (issue #40), inheriting its confirmation,
+trust, provenance, and atomicity invariants unchanged. `defer`/`reject` are local
+state transitions written back to the same file; `add-source`/`install-one`/
+`install-all` shell out to `localpilot skills …`. Installing from an unregistered
+source registers-then-installs as one operation and **rolls the fresh registration
+back** if the install fails, so nothing partial remains. A repository whose fetched
+commit differs from the one recorded at discovery is flagged as drift so the
+reviewer re-reviews before trusting the result. The reviewer may retarget an
+action's project/global scope before acting.
+
+The read/state-update lives in `localmind-store::SkillProposalStore` (tolerant of
+unknown fields so a newer producer never breaks the reader); the delegation lives
+in the `localmind-cli` Skills backend behind an injectable command-runner seam so
+the flow is testable without the real binary or any network.
+
 ## D-LM-0030 — Reviewer identity is asked for, persisted per browser, and required before any decision; it is never pre-filled
 
 - **Date**: 2026-07-24

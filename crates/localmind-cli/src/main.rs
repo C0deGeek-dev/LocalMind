@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 mod graph;
 mod ingest;
 mod mcp;
+mod skill_actions;
 mod store_root;
 mod sync;
 mod ui;

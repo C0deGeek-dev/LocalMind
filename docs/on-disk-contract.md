@@ -538,6 +538,20 @@ OKF v0.1 is a starting point, not a finished standard: the adapter depends only 
 `type` + the reserved set, emits `okf_version` so drift is detectable, and treats
 later versions as out of scope.
 
+## Skill-discovery proposals: `.localpilot/skill-proposals.toml` (read-only, cross-tool)
+
+Not a LocalMind-owned file. A companion tool (LocalPilot) writes skill-discovery
+review proposals here from its read-only discovery lane (LocalHub#41). The Skills
+review tab **reads** this file (`localmind-store::SkillProposalStore`) and writes
+back only a proposal's `state` on a reviewer `defer`/`reject`/`acted` transition;
+it never registers a source or installs a skill. Shape: a TOML `[[proposal]]`
+array, each with `repo_url`, `commit`, `catalog_root`, `available_skills`,
+`recommended_skill`, `confidence`, `reason`, `query`, `scope`
+(`project`/`global`), `state` (`pending`/`deferred`/`rejected`/`acted`),
+`provenance`, `first_seen`, `last_seen`. Unknown fields are tolerated so a newer
+producer never breaks the reader. This surface is distinct from the memory review
+queue — skill recommendations are not memory candidates. See D-LM-0031.
+
 ## Versioning
 
 - Database schema: `PRAGMA user_version` stepper (above).

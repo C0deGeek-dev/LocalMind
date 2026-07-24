@@ -32,6 +32,7 @@ mod review_queue;
 mod schema;
 mod signing;
 mod skill_drafts;
+mod skill_proposals;
 mod sync_bundle;
 mod sync_engine;
 
@@ -98,6 +99,7 @@ pub use signing::{
     TrustClass, VerificationOutcome, SIGNATURE_SCHEMA_VERSION,
 };
 pub use skill_drafts::{ActiveSkillRecord, SkillDraftError, SkillDraftRecord, SkillDraftStore};
+pub use skill_proposals::{ProposalState, SkillProposal, SkillProposalError, SkillProposalStore};
 pub use sync_bundle::{
     EncryptedBundle, OpKind, SealedCopy, SignedSyncBundle, SyncBundle, SyncBundleError, SyncCursor,
     SyncOp, ENCRYPTED_BUNDLE_FORMAT_VERSION, SYNC_BUNDLE_FORMAT_VERSION,

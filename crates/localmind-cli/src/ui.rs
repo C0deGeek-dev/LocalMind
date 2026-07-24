@@ -16,9 +16,13 @@ use localmind_core::{
     GraphEndpoint, MemoryEntryId, NodeKind, ReviewAction, ReviewDecision, ReviewItemId,
 };
 use localmind_mcp::{handle, GraphToolRequest};
-use localmind_store::{DocSearchStatus, GraphStore, MemoryPersistence, ReviewQueue};
+use localmind_store::{
+    DocSearchStatus, GraphStore, MemoryPersistence, ReviewQueue, SkillProposal, SkillProposalStore,
+};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
+
+use crate::skill_actions::{run_action, LocalpilotCli, SkillAction};
 
 /// Static assets embedded at build time — the UI is now split into HTML, CSS and JS modules.
 const INDEX_HTML: &str = include_str!("ui/index.html");
@@ -30,6 +34,7 @@ const JS_REVIEW: &str = include_str!("ui/js/views/review.js");
 const JS_MEMORY: &str = include_str!("ui/js/views/memory.js");
 const JS_DOCS: &str = include_str!("ui/js/views/docs.js");
 const JS_AUDIT: &str = include_str!("ui/js/views/audit.js");
+const JS_SKILLS: &str = include_str!("ui/js/views/skills.js");
 
 pub fn serve(project: PathBuf, port: u16, open: bool, token: Option<String>) -> Result<()> {
     let addr = format!("127.0.0.1:{port}");
@@ -94,6 +99,9 @@ fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response
         (Method::Get, ["js", "views", "audit.js"]) => {
             return static_response(JS_AUDIT, "application/javascript; charset=utf-8")
         }
+        (Method::Get, ["js", "views", "skills.js"]) => {
+            return static_response(JS_SKILLS, "application/javascript; charset=utf-8")
+        }
         (Method::Get, ["api", "status"]) => api_status(project),
         (Method::Get, ["api", "review"]) => api_review_list(project, query),
         (Method::Get, ["api", "review", id]) => api_review_get(project, id),
@@ -115,6 +123,8 @@ fn route(project: &Path, token: Option<&str>, request: &mut Request) -> Response
         (Method::Get, ["api", "graph", "global"]) => api_graph_global(project, query),
         (Method::Get, ["api", "audit"]) => api_audit(project, query),
         (Method::Get, ["api", "stats"]) => api_stats(project),
+        (Method::Get, ["api", "skills"]) => api_skills_list(project),
+        (Method::Post, ["api", "skills", "action"]) => api_skills_action(project, &body),
         _ => Err(anyhow!("not found: {method:?} {path}")),
     };
 
@@ -194,6 +204,91 @@ fn api_review_get(project: &Path, id: &str) -> Result<Value> {
         Some(item) => Ok(review_item_json(&item, &promoted)),
         None => Err(anyhow!("review item not found: {id}")),
     }
+}
+
+/// List skill-discovery proposals for the Skills review tab, grouped by repository
+/// (LocalHub#41). Read-only: it reads the proposals LocalPilot's discovery lane
+/// wrote under `.localpilot/` and never registers a source or installs a skill. A
+/// distinct surface from the memory review queue — skill recommendations are not
+/// memory candidates.
+fn api_skills_list(project: &Path) -> Result<Value> {
+    let store = SkillProposalStore::open(project);
+    let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for proposal in &store.list()? {
+        groups
+            .entry(proposal.repo_url.clone())
+            .or_default()
+            .push(skill_proposal_json(proposal));
+    }
+    let groups: Vec<Value> = groups
+        .into_iter()
+        .map(|(repo_url, proposals)| json!({ "repo_url": repo_url, "proposals": proposals }))
+        .collect();
+    Ok(json!({
+        "source_file": store.path().display().to_string(),
+        "groups": groups,
+    }))
+}
+
+/// Render one proposal for the review UI.
+fn skill_proposal_json(p: &SkillProposal) -> Value {
+    json!({
+        "repo_url": p.repo_url,
+        "commit": p.commit,
+        "catalog_root": p.catalog_root,
+        "available_skills": p.available_skills,
+        "recommended_skill": p.recommended_skill,
+        "confidence": p.confidence,
+        "reason": p.reason,
+        "query": p.query,
+        "scope": p.scope,
+        "state": p.state.label(),
+        "provenance": p.provenance,
+        "last_seen": p.last_seen,
+    })
+}
+
+/// Act on a skill proposal from the Skills review tab. The body is
+/// `{repo_url, recommended_skill?, scope, action}`. Every mutation delegates to
+/// LocalPilot's `skills` CLI (issue #40) with its confirmation/atomicity/provenance
+/// invariants; `defer`/`reject` are local state transitions. An install from an
+/// unregistered source is atomic — a failed install rolls back the fresh
+/// registration — and a repository that moved since discovery is flagged as drift.
+fn api_skills_action(project: &Path, body: &str) -> Result<Value> {
+    let payload: Value = serde_json::from_str(body)?;
+    let repo_url = payload
+        .get("repo_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing repo_url"))?;
+    let scope = payload
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("project");
+    let recommended = payload.get("recommended_skill").and_then(Value::as_str);
+    let action_name = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing action"))?;
+    let action =
+        SkillAction::parse(action_name).ok_or_else(|| anyhow!("unknown action: {action_name}"))?;
+
+    let store = SkillProposalStore::open(project);
+    let proposal = store
+        .list()?
+        .into_iter()
+        .find(|p| {
+            p.repo_url == repo_url
+                && p.recommended_skill.as_deref() == recommended
+                && p.scope == scope
+        })
+        .ok_or_else(|| anyhow!("no matching proposal for {repo_url} ({scope})"))?;
+
+    let report = run_action(&LocalpilotCli, &store, action, &proposal)?;
+    Ok(json!({
+        "ok": report.ok,
+        "drift": report.drift,
+        "messages": report.messages,
+    }))
 }
 
 /// Acting reviewer for a decision payload. The UI always sends an explicit,
@@ -1117,6 +1212,7 @@ mod tests {
             "JS_MEMORY",
             "JS_DOCS",
             "JS_AUDIT",
+            "JS_SKILLS",
         ] {
             let s = match name {
                 "JS_DASHBOARD" => super::JS_DASHBOARD,
@@ -1124,6 +1220,7 @@ mod tests {
                 "JS_MEMORY" => super::JS_MEMORY,
                 "JS_DOCS" => super::JS_DOCS,
                 "JS_AUDIT" => super::JS_AUDIT,
+                "JS_SKILLS" => super::JS_SKILLS,
                 _ => "",
             };
             assert!(!s.is_empty(), "{name} should be non-empty");

@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Skills review tab for skill-discovery proposals** (LocalHub#41, D-LM-0031). A
+  new **Skills** tab reads the review proposals LocalPilot's discovery lane writes
+  to `<project>/.localpilot/skill-proposals.toml`, grouped by repository, and lets a
+  reviewer add the source, install the recommended skill, install all, defer, or
+  reject. Every mutation delegates to LocalPilot's `skills` CLI (never registers or
+  installs in-process); install-from-unregistered is atomic (a failed install rolls
+  back the fresh registration) and a moved repository is flagged as drift. Distinct
+  from the memory review queue — skill recommendations are not memory candidates.
 - **Review candidates carry source evidence separately from the lesson**
   (LocalHub#24, D-LM-0029). `CandidateLesson` gains optional `evidence_text`
   (full carried source, shown by the review UI under the summary in a

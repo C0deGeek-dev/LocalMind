@@ -5,6 +5,7 @@ import { renderMemory } from './views/memory.js';
 import { renderDocs } from './views/docs.js';
 import { renderGraph } from './graph.js';
 import { renderAudit } from './views/audit.js';
+import { renderSkills } from './views/skills.js';
 
 // ── Token / API helpers ──
 const token = new URLSearchParams(location.search).get('token');
@@ -104,6 +105,7 @@ const routes = {
   review: renderReview,
   memory: renderMemory,
   docs: renderDocs,
+  skills: renderSkills,
   graph: renderGraph,
   audit: renderAudit
 };
