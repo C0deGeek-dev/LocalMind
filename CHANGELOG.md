@@ -13,6 +13,16 @@ Notable changes, newest first. Contract-relevant entries reference
   installs in-process); install-from-unregistered is atomic (a failed install rolls
   back the fresh registration) and a moved repository is flagged as drift. Distinct
   from the memory review queue — skill recommendations are not memory candidates.
+- **The audit log no longer attributes decisions to the wrong person**
+  (LocalHub#35, D-LM-0030). The review UI shipped with a hardcoded `reviewer`
+  default and never persisted what a reviewer typed, so every page load restored
+  that name into the append-only audit log. The field now ships empty (an
+  embedded-asset test asserts no hardcoded name), identity is stored per browser
+  origin in `localStorage` (`localmind.reviewer`), and a first run opens a
+  non-dismissable modal: accept/reject/defer/edit/promote and the bulk actions
+  are disabled until an identity is given, while Memory, Docs, Graph and Audit
+  stay browsable. Whitespace is trimmed and rejected as an actor. Existing audit
+  rows are never rewritten.
 - **Review candidates carry source evidence separately from the lesson**
   (LocalHub#24, D-LM-0029). `CandidateLesson` gains optional `evidence_text`
   (full carried source, shown by the review UI under the summary in a
