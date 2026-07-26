@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.4.0 - 2026-07-26
+
+Coordinated LocalX release.
+
 - **Skills review tab for skill-discovery proposals** (LocalHub#41, D-LM-0031). A
   new **Skills** tab reads the review proposals LocalPilot's discovery lane writes
   to `<project>/.localpilot/skill-proposals.toml`, grouped by repository, and lets a
