@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Releases now ship prebuilt binaries.** A tagged release previously carried
+  release notes and nothing else, so the only way to get this tool was to build
+  it from source with a Rust toolchain. Each release now attaches an archive per
+  platform — Linux x86-64 (glibc and a static musl build that runs anywhere),
+  Linux arm64, macOS Apple Silicon, and Windows x86-64 — with a SHA-256 beside
+  each archive and a `manifest.json` indexing the release.
+
+  Publishing happens once, only when every platform built. A partial release is
+  worse than a failed one: a download cannot tell the difference. The checksums
+  prove an archive was not corrupted in transit; they do not prove who produced
+  it, which needs signing.
+
 ## v2.4.0 - 2026-07-26
 
 Coordinated LocalX release.
