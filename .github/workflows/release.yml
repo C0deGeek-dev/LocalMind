@@ -38,7 +38,7 @@ jobs:
             ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            ext: zip
+            ext: tar.gz
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -75,7 +75,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/localmind | Out-Null
           Copy-Item target/${{ matrix.target }}/release/localmind.exe dist/localmind/
           Copy-Item LICENSE, README.md, CHANGELOG.md dist/localmind/
-          Compress-Archive -Path dist/localmind/* -DestinationPath localmind-${{ matrix.target }}.zip
+          tar -C dist -czf localmind-${{ matrix.target }}.tar.gz localmind
       # Digest computed where the bytes are produced, so it covers exactly what
       # was archived. It proves a download was not corrupted or truncated; it
       # does not prove origin — only signing does that, and this repo does not
@@ -131,11 +131,10 @@ jobs:
           {
             printf '{\n  "manifest_version": 1,\n  "tool": "localmind",\n  "version": "%s",\n  "artifacts": [\n' "$version"
             first=1
-            for archive in localmind-*.tar.gz localmind-*.zip; do
+            for archive in localmind-*.tar.gz; do
               [ -e "$archive" ] || continue
               target="${archive#localmind-}"
               target="${target%.tar.gz}"
-              target="${target%.zip}"
               digest=$(cut -d' ' -f1 < "$archive.sha256")
               size=$(wc -c < "$archive" | tr -d ' ')
               [ $first -eq 1 ] || printf ',\n'
@@ -160,6 +159,5 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             staged/localmind-*.tar.gz
-            staged/localmind-*.zip
             staged/SHA256SUMS
             staged/manifest.json
