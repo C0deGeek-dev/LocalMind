@@ -5,6 +5,19 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **One-line install for the whole stack.** `localmind` is now installed alongside
+  the rest of LocalX by a single command, with each archive checked against its
+  published SHA-256 before it is unpacked:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+  ```
+
+  The train cuts every tool to one version and they are only tested together, so
+  they are installed together; `localpilot update --all` re-runs it. Nothing in
+  this repository changed to support it — the release archives and `manifest.json`
+  already published were the whole contract.
+
 ## v2.5.0 - 2026-07-27
 
 Coordinated LocalX release.
