@@ -9,12 +9,146 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # Build one archive per target. `fail-fast: false` is deliberate: when a
+  # release build breaks we want to see *every* target that broke in one run,
+  # not just the first. Nothing is published from here — see `publish`.
+  archives:
+    name: archive (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          # One static binary that runs on any Linux regardless of glibc vintage
+          # — Alpine, containers, and older distributions all use this one.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: tar.gz
+            apt: musl-tools
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+            apt: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.82"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: cross toolchain
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      # The `cc`-built dependencies need the cross compiler too, not just the
+      # Rust linker, or the C bits build for the host and the link fails late
+      # and confusingly.
+      - name: cross linker
+        if: matrix.linker != ''
+        run: |
+          triple_env=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          echo "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+          echo "CC_${{ matrix.target }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p localmind-cli
+      # Stage the binary alongside the license files so every archive ships them.
+      - name: stage (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/localmind
+          cp target/${{ matrix.target }}/release/localmind dist/localmind/
+          cp LICENSE README.md CHANGELOG.md dist/localmind/
+          tar -C dist -czf localmind-${{ matrix.target }}.tar.gz localmind
+      - name: stage (windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force dist/localmind | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/localmind.exe dist/localmind/
+          Copy-Item LICENSE, README.md, CHANGELOG.md dist/localmind/
+          Compress-Archive -Path dist/localmind/* -DestinationPath localmind-${{ matrix.target }}.zip
+      # Digest computed where the bytes are produced, so it covers exactly what
+      # was archived. It proves a download was not corrupted or truncated; it
+      # does not prove origin — only signing does that, and this repo does not
+      # sign. Say so wherever it is surfaced.
+      - name: checksum
+        shell: bash
+        run: sha256sum localmind-${{ matrix.target }}.${{ matrix.ext }} > localmind-${{ matrix.target }}.${{ matrix.ext }}.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: localmind-${{ matrix.target }}
+          path: |
+            localmind-${{ matrix.target }}.${{ matrix.ext }}
+            localmind-${{ matrix.target }}.${{ matrix.ext }}.sha256
+
+  # Publish once, and only when **every** target built. `needs` is the
+  # completeness gate: a partial release is worse than a failed one, because a
+  # downloader cannot tell the difference.
+  publish:
     name: publish release
+    needs: archives
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Pull the tagged version's section out of CHANGELOG.md for the notes.
+      - uses: actions/download-artifact@v7
+        with:
+          path: staged
+          merge-multiple: true
+      - name: verify every target is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc"
+          missing=""
+          for target in $expected; do
+            if ! ls staged/localmind-"$target".* >/dev/null 2>&1; then
+              missing="$missing $target"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "refusing to publish a partial release; missing:$missing" >&2
+            exit 1
+          fi
+      # A machine-readable index of the release: what exists, for which target,
+      # and the digest to check it against. An updater reads this instead of
+      # guessing archive names from a naming convention.
+      - name: build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staged
+          version="${GITHUB_REF_NAME#v}"
+          {
+            printf '{\n  "manifest_version": 1,\n  "tool": "localmind",\n  "version": "%s",\n  "artifacts": [\n' "$version"
+            first=1
+            for archive in localmind-*.tar.gz localmind-*.zip; do
+              [ -e "$archive" ] || continue
+              target="${archive#localmind-}"
+              target="${target%.tar.gz}"
+              target="${target%.zip}"
+              digest=$(cut -d' ' -f1 < "$archive.sha256")
+              size=$(wc -c < "$archive" | tr -d ' ')
+              [ $first -eq 1 ] || printf ',\n'
+              first=0
+              printf '    { "target": "%s", "file": "%s", "size": %s, "sha256": "%s" }' \
+                "$target" "$archive" "$size" "$digest"
+            done
+            printf '\n  ]\n}\n'
+          } > manifest.json
+          cat manifest.json
+      - name: aggregate checksums
+        shell: bash
+        run: cd staged && cat localmind-*.sha256 > SHA256SUMS && cat SHA256SUMS
       - name: extract release notes
         shell: bash
         run: |
@@ -24,3 +158,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
+          files: |
+            staged/localmind-*.tar.gz
+            staged/localmind-*.zip
+            staged/SHA256SUMS
+            staged/manifest.json
