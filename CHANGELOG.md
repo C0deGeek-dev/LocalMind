@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.5.0 - 2026-07-27
+
+Coordinated LocalX release.
+
 - **Releases now ship prebuilt binaries.** A tagged release previously carried
   release notes and nothing else, so the only way to get this tool was to build
   it from source with a Rust toolchain. Each release now attaches an archive per
