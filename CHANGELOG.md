@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.6.0 - 2026-07-27
+
+Coordinated LocalX release.
+
 - **One-line install for the whole stack.** `localmind` is now installed alongside
   the rest of LocalX by a single command, with each archive checked against its
   published SHA-256 before it is unpacked:
