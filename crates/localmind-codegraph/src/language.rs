@@ -167,6 +167,47 @@ const TYPESCRIPT_TAGS: &[&str] = &[
 ];
 
 impl Language {
+    /// The highlight-query sources that name this language's syntax categories —
+    /// keywords, strings, comments, types, functions — as `@capture` names.
+    ///
+    /// Alongside [`Language::tags_sources`] and the grammar itself: the grammars
+    /// are already compiled in, and their highlight queries ship with them, so a
+    /// consumer that wants to colour a snippet needs no further dependency. The
+    /// grammar crates spell the constant two ways, which is the reason this
+    /// exists rather than each caller matching on the language itself.
+    ///
+    /// Empty means the language has no shipped highlight query; a caller should
+    /// render the snippet unhighlighted rather than treat it as an error.
+    #[must_use]
+    pub fn highlights_sources(self) -> &'static [&'static str] {
+        match self {
+            Language::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+            Language::Python => &[tree_sitter_python::HIGHLIGHTS_QUERY],
+            Language::Go => &[tree_sitter_go::HIGHLIGHTS_QUERY],
+            Language::JavaScript => &[tree_sitter_javascript::HIGHLIGHT_QUERY],
+            Language::TypeScript | Language::Tsx => TYPESCRIPT_HIGHLIGHTS,
+            Language::CSharp => &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
+            Language::Java => &[tree_sitter_java::HIGHLIGHTS_QUERY],
+            Language::C => &[tree_sitter_c::HIGHLIGHT_QUERY],
+            Language::Cpp => &[tree_sitter_cpp::HIGHLIGHT_QUERY],
+            Language::Ruby => &[tree_sitter_ruby::HIGHLIGHTS_QUERY],
+            Language::Php => &[tree_sitter_php::HIGHLIGHTS_QUERY],
+            Language::Lua => &[tree_sitter_lua::HIGHLIGHTS_QUERY],
+            Language::OCaml => &[tree_sitter_ocaml::HIGHLIGHTS_QUERY],
+            Language::Elixir => &[tree_sitter_elixir::HIGHLIGHTS_QUERY],
+            Language::PowerShell => &[tree_sitter_powershell::HIGHLIGHTS_QUERY],
+        }
+    }
+}
+
+/// TypeScript/TSX inherit the JavaScript highlight patterns, exactly as their tag
+/// queries do, and add their own for the type syntax JavaScript has none of.
+const TYPESCRIPT_HIGHLIGHTS: &[&str] = &[
+    tree_sitter_javascript::HIGHLIGHT_QUERY,
+    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+];
+
+impl Language {
     /// An original query naming this language's import targets (the module path
     /// as written), captured as `@path`. `None` where imports are not yet
     /// extracted (Rust uses its own `use`-declaration path in the walker;
@@ -200,6 +241,28 @@ pub const POWERSHELL_TAGS_QUERY: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::Language;
+
+    /// Every language must offer a highlight query that actually compiles against
+    /// its own grammar. A query that fails to compile is indistinguishable at the
+    /// call site from a language with no query at all, and the caller would
+    /// silently render an unhighlighted snippet forever.
+    #[test]
+    fn every_language_has_a_highlight_query_that_compiles() {
+        for language in Language::ALL {
+            let sources = language.highlights_sources();
+            assert!(
+                !sources.is_empty(),
+                "{language:?} has no highlight query source"
+            );
+            let combined = sources.join(
+                "
+",
+            );
+            let grammar = language.grammar();
+            tree_sitter::Query::new(&grammar, &combined)
+                .unwrap_or_else(|error| panic!("{language:?} highlight query: {error}"));
+        }
+    }
 
     #[test]
     fn detects_languages_by_extension() {
