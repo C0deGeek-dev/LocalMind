@@ -189,7 +189,7 @@ impl Language {
             Language::CSharp => &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
             Language::Java => &[tree_sitter_java::HIGHLIGHTS_QUERY],
             Language::C => &[tree_sitter_c::HIGHLIGHT_QUERY],
-            Language::Cpp => &[tree_sitter_cpp::HIGHLIGHT_QUERY],
+            Language::Cpp => CPP_HIGHLIGHTS,
             Language::Ruby => &[tree_sitter_ruby::HIGHLIGHTS_QUERY],
             Language::Php => &[tree_sitter_php::HIGHLIGHTS_QUERY],
             Language::Lua => &[tree_sitter_lua::HIGHLIGHTS_QUERY],
@@ -205,6 +205,16 @@ impl Language {
 const TYPESCRIPT_HIGHLIGHTS: &[&str] = &[
     tree_sitter_javascript::HIGHLIGHT_QUERY,
     tree_sitter_typescript::HIGHLIGHTS_QUERY,
+];
+
+/// C++ layers over C the same way. Its own query carries only what C does not —
+/// it has no rule for a comment or a number, because C already does — so the two
+/// have to be combined or a C++ snippet loses everything the languages share.
+/// The inheritance is a convention of the tooling that assembles these queries,
+/// not something the shipped constant resolves.
+const CPP_HIGHLIGHTS: &[&str] = &[
+    tree_sitter_c::HIGHLIGHT_QUERY,
+    tree_sitter_cpp::HIGHLIGHT_QUERY,
 ];
 
 impl Language {
