@@ -5,6 +5,16 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.7.0 - 2026-08-02
+
+Coordinated LocalX release.
+
+- **Code snippets can reuse LocalMind's compiled grammars for syntax highlighting.**
+  `localmind-codegraph` now exposes each supported language's bundled highlight
+  query and a cached `highlight` API that returns ordered, non-overlapping byte
+  ranges with their grammar capture names. Invalid or unsupported input falls
+  back to an empty span set so callers can render the original text unchanged.
+
 ## v2.6.0 - 2026-07-27
 
 Coordinated LocalX release.
