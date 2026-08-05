@@ -5,6 +5,13 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **The review screen can show the whole queue at once.** The state filter gains
+  an **All states** view that lists items in every state, each row labelled with
+  its own state (accepted/edited rows keep their promotion chip). `Pending` stays
+  the default. The All view is read-only for bulk actions — it exposes no
+  selection surface — while per-item actions remain available. Frontend only; no
+  backend or schema change (LocalHub#54, D-LM-0032).
+
 ## v2.7.0 - 2026-08-02
 
 Coordinated LocalX release.

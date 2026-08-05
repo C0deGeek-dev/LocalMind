@@ -1142,6 +1142,87 @@ mod tests {
     }
 
     #[test]
+    fn omitted_state_lists_every_state_while_pending_filter_excludes_them() {
+        // The All view maps onto an omitted `state` query, which the backend
+        // already answers with every state. Prove it over a genuinely mixed
+        // queue: one accepted item and one rejected item, neither Pending.
+        let dir = tempfile::tempdir().expect("temp project");
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .expect("config");
+        let queue = ReviewQueue::open_project(dir.path()).expect("queue");
+        let mk = |id: &str, body: &str| {
+            CandidateLesson::new(
+                LessonId::new(id),
+                body,
+                LessonCategory::Process,
+                Confidence::new(0.8).expect("confidence"),
+                SuggestedAction::PromoteToMemory,
+            )
+        };
+        queue
+            .enqueue_candidates(
+                &SessionId::new("ui-fixture"),
+                &[
+                    mk("candidate-0001", "Accept this one only."),
+                    mk("candidate-0002", "Reject this one."),
+                ],
+            )
+            .expect("enqueue");
+        let ids: Vec<String> = queue
+            .list()
+            .expect("list")
+            .iter()
+            .map(|c| c.id.to_string())
+            .collect();
+        let project = dir.path();
+        let reviewer = json!({ "reviewer": "test" }).to_string();
+        super::api_review_action(project, &ids[0], "accept_only", &reviewer).expect("accept_only");
+        super::api_review_action(project, &ids[1], "reject", &reviewer).expect("reject");
+
+        // Omitted state returns every state — the contract the All view needs.
+        let all = super::api_review_list(project, "").expect("all list");
+        let states: std::collections::BTreeSet<&str> = all["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["state"].as_str().expect("state"))
+            .collect();
+        assert_eq!(
+            states,
+            ["Accepted", "Rejected"].into_iter().collect(),
+            "the unfiltered listing must span both states"
+        );
+
+        // The Pending filter still excludes both.
+        let pending = super::api_review_list(project, "state=Pending").expect("pending list");
+        assert_eq!(pending["items"].as_array().expect("items").len(), 0);
+    }
+
+    #[test]
+    fn review_all_view_is_reachable_and_read_only_for_bulk() {
+        // The All option exists and maps onto the omitted-state contract.
+        assert!(super::JS_REVIEW.contains("All states"));
+        // The request omits `?state=` for the All view rather than always
+        // appending it (the bare URL is new; only `?state=` and `/id/` existed).
+        assert!(super::JS_REVIEW.contains("rvState ?"));
+        assert!(super::JS_REVIEW.contains("'/api/review'"));
+        // The All view drives its read-only behaviour from one predicate.
+        assert!(super::JS_REVIEW.contains("allView"));
+        // The toolbar selection surface (select-all, count pill, x-select hint)
+        // is hidden in the All view.
+        assert!(super::JS_REVIEW.contains("['#selAll', '#rvSelPill', '#rvSelHint']"));
+        // Row checkboxes are not rendered in the All view.
+        assert!(super::JS_REVIEW.contains("const check = allView ? ''"));
+        // The `x` select shortcut is inert in the All view.
+        assert!(super::JS_REVIEW.contains("e.key === 'x' && rvState !== ''"));
+        // Each mixed-view row is labelled with its own state.
+        assert!(super::JS_REVIEW.contains("const stateChip = allView ?"));
+    }
+
+    #[test]
     fn query_param_extracts_and_decodes() {
         assert_eq!(
             query_param("state=Pending&token=a%20b", "state").as_deref(),

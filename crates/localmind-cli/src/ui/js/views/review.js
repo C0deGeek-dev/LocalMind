@@ -32,9 +32,9 @@ function promotable(it) {
 async function renderReview() {
   view.innerHTML = `<div style="display:flex;flex-direction:column;height:100%">
     <div class="toolbar">
-      <select id="stateF">${RV_STATES.map(s => `<option ${s === rvState ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select id="stateF"><option value="" ${rvState === '' ? 'selected' : ''}>All states</option>${RV_STATES.map(s => `<option ${s === rvState ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <input type="checkbox" id="selAll">
-      <span class="pill"><span id="selN">0</span> selected</span>
+      <span class="pill" id="rvSelPill"><span id="selN">0</span> selected</span>
       <button class="primary" id="bAcc" ${currentReviewer() ? '' : 'disabled'}>Accept selected</button>
       <button class="danger" id="bRej" ${currentReviewer() ? '' : 'disabled'}>Reject selected</button>
       <button id="bProm" style="display:none" ${currentReviewer() ? '' : 'disabled'}>Promote selected</button>
@@ -45,8 +45,7 @@ async function renderReview() {
         <span class="kbd">a</span> accept ·
         <span class="kbd">r</span> reject ·
         <span class="kbd">e</span> edit ·
-        <span class="kbd">d</span> defer ·
-        <span class="kbd">x</span> select
+        <span class="kbd">d</span> defer<span id="rvSelHint"> · <span class="kbd">x</span> select</span>
       </span>
       <button id="rvRefresh">Refresh</button>
     </div>
@@ -80,7 +79,10 @@ async function renderReview() {
 }
 
 async function loadReview() {
-  const d = await api('GET', '/api/review?state=' + encodeURIComponent(rvState));
+  // The All view (empty rvState) omits the state parameter entirely, which the
+  // backend answers with every state; a named state filters as before.
+  const url = rvState ? '/api/review?state=' + encodeURIComponent(rvState) : '/api/review';
+  const d = await api('GET', url);
   rvItems = d.items;
   const cats = [...new Set(rvItems.map(i => i.category))].sort();
   const cf = document.querySelector('#catF');
@@ -89,6 +91,14 @@ async function loadReview() {
   // Bulk actions follow the view: accept/reject act on pending items, promote
   // on accepted/edited ones still awaiting promotion.
   const pending = rvState === 'Pending';
+  // The All view has no bulk-selection surface: a bulk decide over a mixed
+  // selection is not a safe state transition, so hide select-all, the count
+  // pill and the x-select hint there (the row checkboxes are dropped in
+  // drawReview and the x shortcut is inert).
+  const allView = rvState === '';
+  for (const s of ['#selAll', '#rvSelPill', '#rvSelHint']) {
+    document.querySelector(s).style.display = allView ? 'none' : '';
+  }
   document.querySelector('#bAcc').style.display = pending ? '' : 'none';
   document.querySelector('#bRej').style.display = pending ? '' : 'none';
   document.querySelector('#bProm').style.display =
@@ -104,24 +114,34 @@ function drawReview() {
   if (!shown.length) {
     list.innerHTML = rvState === 'Pending'
       ? '<div class="empty">Queue empty. 🎉</div>'
-      : `<div class="empty">No ${esc(rvState.toLowerCase())} items.</div>`;
+      : rvState === ''
+        ? '<div class="empty">No review items.</div>'
+        : `<div class="empty">No ${esc(rvState.toLowerCase())} items.</div>`;
     return;
   }
 
+  const allView = rvState === '';
   shown.forEach(it => {
     const row = document.createElement('div');
     row.className = 'row' + (rvSel === it.id ? ' sel' : '');
+    // In the mixed All view each row carries its own state; named-state views
+    // already know their state from the filter.
+    const stateChip = allView ? `<span class="chip">${esc(it.state)}</span>` : '';
     const badge = (it.state === 'Accepted' || it.state === 'Edited')
       ? (it.promoted ? '<span class="chip">promoted</span>' : '<span class="chip">awaiting promotion</span>')
       : '';
-    row.innerHTML = `<input type="checkbox" ${rvChecks.has(it.id) ? 'checked' : ''}><div class="txt">
-      <span class="sum"><span class="chip">${esc(it.category)}</span>${badge}${esc(it.summary)}</span>
+    const check = allView ? '' : `<input type="checkbox" ${rvChecks.has(it.id) ? 'checked' : ''}>`;
+    row.innerHTML = `${check}<div class="txt">
+      <span class="sum">${stateChip}<span class="chip">${esc(it.category)}</span>${badge}${esc(it.summary)}</span>
       <span class="id">${esc(it.id)}</span></div>`;
-    row.querySelector('input').addEventListener('click', e => {
-      e.stopPropagation();
-      e.target.checked ? rvChecks.add(it.id) : rvChecks.delete(it.id);
-      document.querySelector('#selN').textContent = rvChecks.size;
-    });
+    const cb = row.querySelector('input');
+    if (cb) {
+      cb.addEventListener('click', e => {
+        e.stopPropagation();
+        e.target.checked ? rvChecks.add(it.id) : rvChecks.delete(it.id);
+        document.querySelector('#selN').textContent = rvChecks.size;
+      });
+    }
     row.addEventListener('click', () => selReview(it.id));
     list.appendChild(row);
   });
@@ -228,7 +248,7 @@ function handleReviewKeydown(e) {
     else if (e.key === 'r' && it?.state === 'Pending') actReview(rvSel, 'reject');
     else if (e.key === 'd' && it?.state === 'Pending') actReview(rvSel, 'defer');
     else if (e.key === 'e') { const t = document.querySelector('#rvBody'); if (t) t.focus(); }
-    else if (e.key === 'x') { rvChecks.has(rvSel) ? rvChecks.delete(rvSel) : rvChecks.add(rvSel); drawReview(); }
+    else if (e.key === 'x' && rvState !== '') { rvChecks.has(rvSel) ? rvChecks.delete(rvSel) : rvChecks.add(rvSel); drawReview(); }
   }
 }
 

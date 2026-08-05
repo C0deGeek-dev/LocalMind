@@ -4,6 +4,33 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0032 — The review screen offers an All view that maps to the unfiltered listing and carries no bulk-selection surface
+
+- **Date**: 2026-08-05
+- **Status**: accepted
+
+The review state filter (LocalHub#31) lists only the six concrete states, so a
+reviewer who does not remember which decision they made cannot answer "what is in
+this queue?" in one view — even though `api_review_list` already returns every
+state when the `state` query parameter is omitted (LocalHub#54). The fix is
+frontend-only: the state selector gains an **All states** entry with an explicit
+empty value, and the review request omits `?state=` entirely for that view. There
+is no backend, schema, or API change.
+
+`Pending` remains the default landing view. In the All view each row is prefixed
+with a chip carrying its own state, and accepted/edited rows keep their existing
+`promoted` / `awaiting promotion` chip, because a mixed list is otherwise
+unreadable. Per-item actions stay state-gated (accept/reject/defer only on
+`Pending`, promote only on accepted/edited awaiting promotion), so they remain
+correct in a mixed list.
+
+The All view has **no bulk-selection surface** — no select-all, no count pill, no
+bulk action buttons, no per-row checkbox, and the `x` select shortcut is inert
+there. `ReviewQueue::decide` is an unguarded update, so a bulk decide over a mixed
+selection would flip, for example, a rejected item back to accepted; a whole-queue
+view is not a safe place to offer that. The bulk affordances remain exactly as
+before in the named-state views.
+
 ## D-LM-0031 — The Skills review tab is a distinct surface that reads discovery proposals and delegates every mutation to LocalPilot
 
 - **Date**: 2026-07-24
