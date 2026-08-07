@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v2.8.0 - 2026-08-07
+
+Coordinated LocalX release.
+
 - **The review screen can show the whole queue at once.** The state filter gains
   an **All states** view that lists items in every state, each row labelled with
   its own state (accepted/edited rows keep their promotion chip). `Pending` stays
