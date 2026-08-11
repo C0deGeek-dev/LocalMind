@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v3.0.0 - 2026-08-11
+
+Coordinated LocalX release.
+
 ## v2.8.1 - 2026-08-07
 
 Coordinated LocalX release.
