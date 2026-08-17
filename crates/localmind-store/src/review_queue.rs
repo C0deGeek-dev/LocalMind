@@ -1,7 +1,7 @@
 use crate::{ProjectConfig, StoreConfigError};
 use localmind_core::{
-    CandidateLesson, MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, ReviewState,
-    SessionId,
+    CandidateDestination, CandidateLesson, Confidence, LessonId, MemoryEntryId, ReviewAction,
+    ReviewDecision, ReviewItemId, ReviewState, SessionId,
 };
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use std::fs;
@@ -163,6 +163,70 @@ impl ReviewQueue {
         }
 
         Ok(inserted)
+    }
+
+    /// Submit an agent-proposed lesson into the review queue. Unlike transcript
+    /// closeout — which extracts candidates from a session — this is a direct
+    /// proposal (`memory_propose` / `localmind propose`) so an agent can record
+    /// a distilled lesson it learned. It is **never** accepted automatically
+    /// (D-LM-0016): it enters the queue as a pending candidate, is deduplicated
+    /// against existing pending candidates the same way an extraction is, and
+    /// carries the write-time quality classification (D-LM-0024) as a review
+    /// note. The candidate records its `source` (the calling agent).
+    ///
+    /// # Errors
+    /// [`ReviewQueueError::EmptyProposal`] when the title is blank, or a
+    /// serialize/sqlite error on enqueue.
+    pub fn propose(
+        &self,
+        source: &str,
+        proposal: &ProposedLesson,
+    ) -> Result<ProposeOutcome, ReviewQueueError> {
+        let title = proposal.title.trim();
+        if title.is_empty() {
+            return Err(ReviewQueueError::EmptyProposal);
+        }
+        let body = proposal.body.as_deref().unwrap_or("").trim();
+        let category = crate::markdown::parse_category(&proposal.category);
+        let confidence = Confidence::clamped(proposal.confidence, 0.7);
+        let session_id = SessionId::new(format!("proposal-{source}"));
+        let candidate_id = LessonId::new(propose_candidate_id(source, title));
+
+        let mut candidate = CandidateLesson::new(
+            candidate_id.clone(),
+            title,
+            category.clone(),
+            confidence,
+            localmind_core::SuggestedAction::PromoteToMemory,
+        )
+        .with_source(source);
+        if !body.is_empty() {
+            candidate.rationale = Some(body.to_string());
+        }
+        candidate.suggested_destination = proposal.scope.destination();
+        candidate.related_files = proposal.related_files.clone();
+        candidate.related_entities = proposal.tags.clone();
+
+        // Write-time quality classification: a low-quality proposal is still
+        // queued (never dropped, never auto-accepted), with the reason attached
+        // for the reviewer.
+        let quality = crate::quality::classify_quality(&category, title, body);
+        let quality_note = quality.review_note().map(str::to_string);
+        if let Some(note) = &quality_note {
+            candidate.review_annotation = Some(localmind_core::ReviewAnnotation {
+                score: confidence,
+                duplicate_of: None,
+                conflict: false,
+                notes: note.clone(),
+            });
+        }
+
+        let inserted = self.enqueue_candidates(&session_id, std::slice::from_ref(&candidate))?;
+        Ok(ProposeOutcome {
+            candidate_id: candidate_id.as_str().to_string(),
+            accepted: inserted > 0,
+            quality_note,
+        })
     }
 
     /// Delete every pending review candidate, returning how many rows were
@@ -447,10 +511,77 @@ fn now_string() -> String {
     OffsetDateTime::now_utc().to_string()
 }
 
+/// Where a proposed lesson should live once accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProposeScope {
+    /// This project's memory (the default).
+    #[default]
+    Project,
+    /// The cross-project global store.
+    Global,
+}
+
+impl ProposeScope {
+    fn destination(self) -> CandidateDestination {
+        match self {
+            ProposeScope::Project => CandidateDestination::ProjectMemory,
+            ProposeScope::Global => CandidateDestination::GlobalMemory,
+        }
+    }
+}
+
+/// An agent-proposed lesson: the distilled, reusable claim in `title`, an
+/// optional `body` for the why/how, and light metadata. Turned into a review
+/// candidate by [`ReviewQueue::propose`]; never a direct memory write.
+#[derive(Clone, Debug, Default)]
+pub struct ProposedLesson {
+    /// The one-line reusable lesson (becomes the candidate summary). Required.
+    pub title: String,
+    /// The rationale or how-to-apply detail. Optional.
+    pub body: Option<String>,
+    /// A `LessonCategory` name (e.g. `CodePattern`, `DebuggingRecipe`);
+    /// unrecognized names become `Other(..)`.
+    pub category: String,
+    /// Project or global memory.
+    pub scope: ProposeScope,
+    /// Files this lesson relates to (retrieval cues).
+    pub related_files: Vec<String>,
+    /// Free tags / related entities (retrieval cues).
+    pub tags: Vec<String>,
+    /// Author confidence in `[0, 1]`; out-of-range is clamped, absent is 0.7.
+    pub confidence: f32,
+}
+
+/// What [`ReviewQueue::propose`] did with a proposal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposeOutcome {
+    /// The candidate's id in the review queue.
+    pub candidate_id: String,
+    /// `true` when a new pending candidate was enqueued; `false` when it merged
+    /// into an existing pending candidate (its `seen_count` was bumped instead).
+    pub accepted: bool,
+    /// The write-time quality note (D-LM-0024), when the proposal was flagged
+    /// low-quality — it is still queued, never dropped.
+    pub quality_note: Option<String>,
+}
+
+/// A stable candidate id for a proposal, so the same lesson proposed twice
+/// resolves to the same row (the dedup ladder then merges it).
+fn propose_candidate_id(source: &str, title: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("propose\n{source}\n{title}").as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("lesson-{hash:016x}")
+}
+
 #[derive(Debug, Error)]
 pub enum ReviewQueueError {
     #[error(transparent)]
     Config(#[from] StoreConfigError),
+    #[error("a proposed lesson needs a non-empty title")]
+    EmptyProposal,
     #[error(transparent)]
     Schema(#[from] crate::schema::SchemaError),
     #[error("failed to create LocalMind state directory {path:?}: {source}")]
@@ -629,6 +760,110 @@ mod tests {
             states,
             vec![ReviewState::Accepted],
             "the decided item survives"
+        );
+    }
+}
+
+#[cfg(test)]
+mod propose_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn open(root: &std::path::Path) -> ReviewQueue {
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        ReviewQueue::open_project(root).unwrap()
+    }
+
+    #[test]
+    fn a_proposed_lesson_enters_the_queue_pending_with_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+
+        let outcome = queue
+            .propose(
+                "claude-code",
+                &ProposedLesson {
+                    title: "Prefer ripgrep over grep for repo search".to_string(),
+                    body: Some("It respects .gitignore and is faster on large trees.".to_string()),
+                    category: "CodePattern".to_string(),
+                    scope: ProposeScope::Project,
+                    related_files: vec!["src/search.rs".to_string()],
+                    tags: vec!["search".to_string()],
+                    confidence: 0.9,
+                },
+            )
+            .unwrap();
+        assert!(outcome.accepted, "a fresh proposal is newly enqueued");
+
+        let items = queue.list().unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.state, ReviewState::Pending, "never auto-accepted");
+        assert_eq!(item.candidate.source.as_deref(), Some("claude-code"));
+        assert_eq!(
+            item.candidate.rationale.as_deref(),
+            Some("It respects .gitignore and is faster on large trees.")
+        );
+        assert_eq!(
+            item.candidate.suggested_destination,
+            CandidateDestination::ProjectMemory
+        );
+    }
+
+    #[test]
+    fn a_blank_title_is_refused_before_touching_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let err = queue
+            .propose(
+                "open-ai-codex",
+                &ProposedLesson {
+                    title: "   ".to_string(),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ReviewQueueError::EmptyProposal));
+        assert_eq!(queue.list().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn the_same_proposal_twice_merges_instead_of_duplicating() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let make = || ProposedLesson {
+            title: "Pin the toolchain to 1.82 for reproducible builds".to_string(),
+            category: "TestingStrategy".to_string(),
+            confidence: 0.7,
+            ..ProposedLesson::default()
+        };
+        assert!(queue.propose("claude-code", &make()).unwrap().accepted);
+        let second = queue.propose("claude-code", &make()).unwrap();
+        assert!(!second.accepted, "a restatement merges, not duplicates");
+        assert_eq!(queue.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_global_scope_targets_the_global_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        queue
+            .propose(
+                "claude-code",
+                &ProposedLesson {
+                    title: "Never commit secrets; assemble token-shaped fixtures at runtime"
+                        .to_string(),
+                    scope: ProposeScope::Global,
+                    category: "SecurityWarning".to_string(),
+                    confidence: 0.95,
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            queue.list().unwrap()[0].candidate.suggested_destination,
+            CandidateDestination::GlobalMemory
         );
     }
 }

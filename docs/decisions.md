@@ -4,6 +4,33 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0033 — Agents propose lessons directly into the review queue; the source is recorded and nothing auto-accepts
+
+An agent (Claude Code, Codex, or any host) can submit a distilled lesson it
+learned *without* a transcript closeout, through `ReviewQueue::propose`
+(surfaced as the `localmind propose` CLI and, host-side, a `memory_propose`
+tool). The proposal becomes a **pending** review candidate — never an accepted
+memory: the D-LM-0016 human-review gate is the only promotion path, and a
+proposal is deduplicated against existing pending candidates exactly like an
+extraction (a restatement bumps `seen_count`, it does not add a row). The
+write-time quality classification (D-LM-0024) is applied and, when it flags the
+lesson, attached as a review note; a low-quality proposal is still queued, never
+dropped.
+
+The candidate records the proposing agent in a new, optional
+`CandidateLesson.source` field (`#[serde(default)]`, so candidate JSON written
+before proposals existed still loads; no SQL migration — candidates are stored
+as JSON blobs). `source` is a provenance/retrieval cue for the reviewer, not a
+trust signal: a proposal from an agent is reviewed exactly as an extracted
+candidate is. The proposal's scope (`Project` / `Global`) maps to the candidate
+destination; `title` is the reusable one-line lesson (the summary), `body` the
+rationale.
+
+This is the keystone of the agent knowledge-loop
+(`LocalHub/plans/localmind/LocalMindAgentKnowledgeLoop`): it is the write path
+that lets cloud agents grow the local store, so local models inherit their
+knowledge — while the review gate keeps David the sole acceptor.
+
 ## D-LM-0032 — The review screen offers an All view that maps to the unfiltered listing and carries no bulk-selection surface
 
 - **Date**: 2026-08-05

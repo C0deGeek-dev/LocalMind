@@ -7,8 +7,8 @@ use localmind_core::{
 use localmind_store::{
     sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
     ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, OkfExporter,
-    OkfImporter, ReviewQueue, SignedBundle, SkillDraftStore, TranscriptImportFormat,
-    TranscriptImporter,
+    OkfImporter, ProposeScope, ProposedLesson, ReviewQueue, SignedBundle, SkillDraftStore,
+    TranscriptImportFormat, TranscriptImporter,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,38 @@ enum Command {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    /// Propose a distilled lesson directly into the review queue (never
+    /// auto-accepted). The way an agent records knowledge it learned without a
+    /// full transcript closeout.
+    Propose {
+        /// The one-line reusable lesson.
+        title: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// The rationale / how-to-apply detail.
+        #[arg(long)]
+        body: Option<String>,
+        /// A LessonCategory name (e.g. CodePattern, DebuggingRecipe,
+        /// SecurityWarning); unknown names are kept as Other.
+        #[arg(long, default_value = "Process")]
+        category: String,
+        /// Which store the accepted memory would live in.
+        #[arg(long, value_enum, default_value_t = ScopeArg::Project)]
+        scope: ScopeArg,
+        /// The proposing agent (recorded on the candidate).
+        #[arg(long, default_value = "cli")]
+        source: String,
+        /// A related file (repeatable) — a retrieval cue.
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// A free tag (repeatable) — a retrieval cue.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Author confidence in [0, 1].
+        #[arg(long, default_value_t = 0.7)]
+        confidence: f32,
     },
     /// Promote accepted review items into Markdown memory.
     Promote {
@@ -799,6 +831,43 @@ fn main() -> Result<()> {
                 );
             }
         },
+        Command::Propose {
+            title,
+            project,
+            body,
+            category,
+            scope,
+            source,
+            files,
+            tags,
+            confidence,
+        } => {
+            let queue = ReviewQueue::open_project(&project)?;
+            let proposal = ProposedLesson {
+                title,
+                body,
+                category,
+                scope: match scope {
+                    ScopeArg::Global => ProposeScope::Global,
+                    ScopeArg::Project | ScopeArg::Both => ProposeScope::Project,
+                },
+                related_files: files,
+                tags,
+                confidence,
+            };
+            let outcome = queue.propose(&source, &proposal)?;
+            if outcome.accepted {
+                println!("Queued for review: {}", outcome.candidate_id);
+            } else {
+                println!(
+                    "Merged into an existing pending candidate: {}",
+                    outcome.candidate_id
+                );
+            }
+            if let Some(note) = outcome.quality_note {
+                println!("note: {note}");
+            }
+        }
         Command::Promote { item_id, project } => {
             let persistence = MemoryPersistence::open_project(project)?;
             let entry = persistence.promote_review_item(&ReviewItemId::new(item_id))?;

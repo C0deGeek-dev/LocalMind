@@ -170,6 +170,15 @@ An operator applies it with `learning freshness`.
         candidates.json           # Vec<CandidateLesson> (written at closeout)
 ```
 
+A `CandidateLesson` carries an optional `source` field (`#[serde(default)]`,
+omitted when absent) naming the agent that **proposed** it directly via
+`localmind propose` / the `memory_propose` tool, as opposed to a candidate
+extracted from a transcript closeout (which has no `source`). It is a
+provenance/retrieval cue for review, never a trust signal, and never a promotion
+shortcut — a proposal is a pending review candidate like any other (D-LM-0033,
+D-LM-0016). The field is stored inside the candidate JSON blob (`candidates.json`
+and the `review_items.candidate_json` column), so it needed no schema migration.
+
 Only the redacted transcript is persisted. Redaction runs before any write
 (pattern table + entropy backstop; see `localmind-store/src/redaction.rs`
 module docs for the caught / not-caught guarantee).

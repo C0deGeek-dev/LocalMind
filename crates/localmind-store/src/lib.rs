@@ -90,7 +90,8 @@ pub use revalidation::{
 };
 pub use review_modes::{ReviewModeError, ReviewModeProcessor, ReviewModeReport};
 pub use review_queue::{
-    ReviewQueue, ReviewQueueError, ReviewQueueItem, ReviewQueueSummary, REVIEW_DB_FILE_NAME,
+    ProposeOutcome, ProposeScope, ProposedLesson, ReviewQueue, ReviewQueueError, ReviewQueueItem,
+    ReviewQueueSummary, REVIEW_DB_FILE_NAME,
 };
 pub use schema::SchemaError;
 pub use signing::{

@@ -35,6 +35,13 @@ pub struct CandidateLesson {
     /// deleted).
     #[serde(default)]
     pub requires_edit_before_promotion: bool,
+    /// Where this candidate came from when it was *proposed* directly by an
+    /// agent (`claude-code`, `open-ai-codex`, …) rather than extracted from a
+    /// transcript closeout. `None` for the transcript-extraction path.
+    /// `#[serde(default)]` so candidate JSON written before proposals existed
+    /// still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl CandidateLesson {
@@ -62,7 +69,17 @@ impl CandidateLesson {
             tool_use: None,
             evidence_text: None,
             requires_edit_before_promotion: false,
+            source: None,
         }
+    }
+
+    /// Record the agent that proposed this candidate directly (as opposed to a
+    /// transcript extraction), so review can show — and later filter by — where
+    /// a candidate came from.
+    #[must_use]
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
     }
 
     /// Attach full carried source evidence, kept separate from the summary so
@@ -170,6 +187,16 @@ impl Confidence {
         } else {
             Err(ContractError::InvalidConfidence { value })
         }
+    }
+
+    /// A confidence from an untrusted value, clamped into `[0, 1]`. A non-finite
+    /// input (NaN/±inf) resolves to `fallback` (itself clamped). Infallible — for
+    /// a caller (e.g. an agent proposal) that would rather accept a coerced value
+    /// than reject the whole submission.
+    #[must_use]
+    pub fn clamped(value: f32, fallback: f32) -> Self {
+        let coerce = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { fallback.clamp(0.0, 1.0) };
+        Self(coerce(value))
     }
 
     #[must_use]

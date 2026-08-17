@@ -5,6 +5,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Agents can propose a distilled lesson directly into the review queue without a
+  transcript closeout: `localmind propose "<lesson>" [--body --category --scope
+  --source --tag --file --confidence]`, and a host-side `memory_propose` tool
+  (D-LM-0033). A proposal enters as a **pending** candidate — never
+  auto-accepted (D-LM-0016) — deduplicated against existing pending candidates,
+  carrying the write-time quality note (D-LM-0024). `CandidateLesson` gained an
+  optional `source` field recording the proposing agent (serde-default; no
+  migration — candidates are JSON blobs). See `docs/on-disk-contract.md`.
+
 ## v3.1.0 - 2026-08-11
 
 Coordinated LocalX release.
