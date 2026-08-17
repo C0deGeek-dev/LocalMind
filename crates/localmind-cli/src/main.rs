@@ -82,8 +82,8 @@ enum Command {
         #[arg(long, default_value = "Process")]
         category: String,
         /// Which store the accepted memory would live in.
-        #[arg(long, value_enum, default_value_t = ScopeArg::Project)]
-        scope: ScopeArg,
+        #[arg(long, value_enum, default_value_t = ProposeScopeArg::Project)]
+        scope: ProposeScopeArg,
         /// The proposing agent (recorded on the candidate).
         #[arg(long, default_value = "cli")]
         source: String,
@@ -93,6 +93,12 @@ enum Command {
         /// A free tag (repeatable) — a retrieval cue.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// A source pointer or bounded excerpt shown only during review.
+        #[arg(long)]
+        evidence: Option<String>,
+        /// Stable retry key; reusing it with different content is refused.
+        #[arg(long)]
+        idempotency_key: Option<String>,
         /// Author confidence in [0, 1].
         #[arg(long, default_value_t = 0.7)]
         confidence: f32,
@@ -373,6 +379,12 @@ enum ScopeArg {
     Project,
     Global,
     Both,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProposeScopeArg {
+    Project,
+    Global,
 }
 
 impl From<ScopeArg> for localmind_store::BundleScope {
@@ -755,10 +767,11 @@ fn main() -> Result<()> {
                 let queue = ReviewQueue::open_project(&root)?;
                 for item in queue.list()? {
                     println!(
-                        "{}\t{:?}\t{}\t{}",
+                        "{}\t{:?}\t{}\t{}\t{}",
                         item.id,
                         item.state,
                         item.session_id,
+                        item.candidate.source.as_deref().unwrap_or("extracted"),
                         item.candidate.summary()
                     );
                 }
@@ -770,6 +783,10 @@ fn main() -> Result<()> {
                     println!("State: {:?}", item.state);
                     println!("Session: {}", item.session_id);
                     println!("Summary: {}", item.candidate.summary());
+                    println!(
+                        "Source: {}",
+                        item.candidate.source.as_deref().unwrap_or("extracted")
+                    );
                     println!("Category: {:?}", item.candidate.category);
                     println!("Confidence: {:.3}", item.candidate.confidence.value());
                     if let Some(replacement) = item.replacement_summary {
@@ -840,6 +857,8 @@ fn main() -> Result<()> {
             source,
             files,
             tags,
+            evidence,
+            idempotency_key,
             confidence,
         } => {
             let queue = ReviewQueue::open_project(&project)?;
@@ -848,21 +867,26 @@ fn main() -> Result<()> {
                 body,
                 category,
                 scope: match scope {
-                    ScopeArg::Global => ProposeScope::Global,
-                    ScopeArg::Project | ScopeArg::Both => ProposeScope::Project,
+                    ProposeScopeArg::Global => ProposeScope::Global,
+                    ProposeScopeArg::Project => ProposeScope::Project,
                 },
                 related_files: files,
                 tags,
+                evidence,
+                idempotency_key,
                 confidence,
             };
             let outcome = queue.propose(&source, &proposal)?;
-            if outcome.accepted {
+            if outcome.created {
                 println!("Queued for review: {}", outcome.candidate_id);
             } else {
                 println!(
-                    "Merged into an existing pending candidate: {}",
+                    "Reused an existing proposal candidate: {}",
                     outcome.candidate_id
                 );
+            }
+            if let Some(duplicate) = outcome.duplicate_of {
+                println!("similar accepted memory: {duplicate}");
             }
             if let Some(note) = outcome.quality_note {
                 println!("note: {note}");

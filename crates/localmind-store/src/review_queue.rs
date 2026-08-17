@@ -10,6 +10,24 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 pub const REVIEW_DB_FILE_NAME: &str = "localmind.sqlite";
+/// Maximum Unicode scalar values in a proposed lesson title.
+pub const PROPOSAL_TITLE_MAX_CHARS: usize = 240;
+/// Maximum Unicode scalar values in a proposal rationale/body.
+pub const PROPOSAL_BODY_MAX_CHARS: usize = 16_384;
+/// Maximum Unicode scalar values in a carried evidence pointer/excerpt.
+pub const PROPOSAL_EVIDENCE_MAX_CHARS: usize = 4_096;
+/// Maximum related-file cues on one proposal.
+pub const PROPOSAL_MAX_RELATED_FILES: usize = 64;
+/// Maximum free tags on one proposal.
+pub const PROPOSAL_MAX_TAGS: usize = 32;
+/// Maximum Unicode scalar values in one related-file cue.
+pub const PROPOSAL_RELATED_FILE_MAX_CHARS: usize = 512;
+/// Maximum Unicode scalar values in one tag.
+pub const PROPOSAL_TAG_MAX_CHARS: usize = 128;
+/// Maximum Unicode scalar values in a source or idempotency key.
+pub const PROPOSAL_KEY_MAX_CHARS: usize = 128;
+/// Maximum Unicode scalar values in a category name.
+pub const PROPOSAL_CATEGORY_MAX_CHARS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReviewQueueItem {
@@ -42,6 +60,7 @@ pub struct ReviewQueueSummary {
 }
 
 pub struct ReviewQueue {
+    config: ProjectConfig,
     connection: Connection,
 }
 
@@ -60,7 +79,7 @@ impl ReviewQueue {
                 source,
             }
         })?;
-        let queue = Self { connection };
+        let queue = Self { config, connection };
         queue.migrate()?;
         Ok(queue)
     }
@@ -124,42 +143,8 @@ impl ReviewQueue {
         let mut pending = self.pending_dedup_keys()?;
 
         for candidate in candidates {
-            let summary = candidate.summary();
-            let hash = crate::dedup::canonical_hash(summary);
-            if let Some(survivor) = find_duplicate(&pending, &hash, summary) {
-                self.bump_seen_count(&survivor)?;
-                continue;
-            }
-
-            let item_id = ReviewItemId::new(candidate.id.as_str());
-            let candidate_json =
-                serde_json::to_string(candidate).map_err(ReviewQueueError::SerializeCandidate)?;
-            let changed = self
-                .connection
-                .execute(
-                    r#"
-                    INSERT OR IGNORE INTO review_items
-                    (id, session_id, candidate_json, state, created_at, canonical_hash, seen_count)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
-                    "#,
-                    params![
-                        item_id.as_str(),
-                        session_id.as_str(),
-                        candidate_json,
-                        state_name(&ReviewState::Pending),
-                        now_string(),
-                        hash,
-                    ],
-                )
-                .map_err(ReviewQueueError::Sqlite)?;
-            inserted += changed;
-            if changed > 0 {
-                pending.push(DedupKey {
-                    id: item_id.to_string(),
-                    canonical_hash: hash,
-                    summary: summary.to_string(),
-                });
-            }
+            let outcome = self.enqueue_candidate(session_id, candidate, &mut pending)?;
+            inserted += usize::from(outcome.created);
         }
 
         Ok(inserted)
@@ -182,15 +167,21 @@ impl ReviewQueue {
         source: &str,
         proposal: &ProposedLesson,
     ) -> Result<ProposeOutcome, ReviewQueueError> {
+        let source = source.trim();
         let title = proposal.title.trim();
         if title.is_empty() {
             return Err(ReviewQueueError::EmptyProposal);
         }
+        if source.is_empty() {
+            return Err(ReviewQueueError::EmptyProposalField { field: "source" });
+        }
+        validate_proposal(source, proposal, title)?;
         let body = proposal.body.as_deref().unwrap_or("").trim();
-        let category = crate::markdown::parse_category(&proposal.category);
+        let category_name = proposal.category.trim();
+        let category = crate::markdown::parse_category(category_name);
         let confidence = Confidence::clamped(proposal.confidence, 0.7);
         let session_id = SessionId::new(format!("proposal-{source}"));
-        let candidate_id = LessonId::new(propose_candidate_id(source, title));
+        let candidate_id = LessonId::new(propose_candidate_id(source, title, body, proposal));
 
         let mut candidate = CandidateLesson::new(
             candidate_id.clone(),
@@ -203,29 +194,142 @@ impl ReviewQueue {
         if !body.is_empty() {
             candidate.rationale = Some(body.to_string());
         }
+        if let Some(evidence) = proposal
+            .evidence
+            .as_deref()
+            .map(str::trim)
+            .filter(|evidence| !evidence.is_empty())
+        {
+            candidate = candidate.with_evidence_text(evidence);
+        }
         candidate.suggested_destination = proposal.scope.destination();
-        candidate.related_files = proposal.related_files.clone();
-        candidate.related_entities = proposal.tags.clone();
+        candidate.related_files = normalized_values(&proposal.related_files);
+        candidate.related_entities = normalized_values(&proposal.tags);
 
         // Write-time quality classification: a low-quality proposal is still
         // queued (never dropped, never auto-accepted), with the reason attached
         // for the reviewer.
         let quality = crate::quality::classify_quality(&category, title, body);
         let quality_note = quality.review_note().map(str::to_string);
-        if let Some(note) = &quality_note {
-            candidate.review_annotation = Some(localmind_core::ReviewAnnotation {
-                score: confidence,
-                duplicate_of: None,
-                conflict: false,
-                notes: note.clone(),
+        // An exact replay returns the first result without bumping `seen_count`.
+        // This makes the store operation genuinely idempotent for identical
+        // arguments (and for an explicit idempotency key).
+        let item_id = ReviewItemId::new(candidate_id.as_str());
+        if let Some(existing) = self.get(&item_id)? {
+            if !same_proposal(&existing.candidate, &candidate) {
+                return Err(ReviewQueueError::IdempotencyConflict {
+                    key: proposal
+                        .idempotency_key
+                        .as_deref()
+                        .unwrap_or(candidate_id.as_str())
+                        .to_string(),
+                });
+            }
+            return Ok(ProposeOutcome {
+                candidate_id: existing.id.to_string(),
+                created: false,
+                duplicate_of: existing
+                    .candidate
+                    .review_annotation
+                    .as_ref()
+                    .and_then(|annotation| annotation.duplicate_of.clone()),
+                quality_note,
             });
         }
 
-        let inserted = self.enqueue_candidates(&session_id, std::slice::from_ref(&candidate))?;
+        // Compare accepted memory at propose time using the same lexical and
+        // optional semantic ladder as review-mode processing. A match is only
+        // annotated for human review; it never deletes or auto-merges memory.
+        let persistence = crate::MemoryPersistence::open_project(&self.config.project_root)
+            .map_err(|source| ReviewQueueError::AcceptedMemoryProbe {
+                source: Box::new(source),
+            })?;
+        let accepted = crate::review_modes::accepted_memory_match(
+            &self.config,
+            &persistence,
+            candidate.summary(),
+        )
+        .map_err(|source| ReviewQueueError::AcceptedMemoryProbe {
+            source: Box::new(source),
+        })?;
+        let duplicate_of = accepted.duplicate_of;
+        let mut notes = Vec::new();
+        if duplicate_of.is_some() {
+            notes.push(if accepted.borderline_duplicate {
+                "Borderline semantic match (review band); human review required.".to_string()
+            } else {
+                "Similar accepted memory found; human review required.".to_string()
+            });
+        }
+        if let Some(note) = &quality_note {
+            notes.push(note.clone());
+        }
+        if !notes.is_empty() {
+            candidate.review_annotation = Some(localmind_core::ReviewAnnotation {
+                score: confidence,
+                duplicate_of: duplicate_of.clone(),
+                conflict: false,
+                notes: notes.join(" "),
+            });
+        }
+
+        let mut pending = self.pending_dedup_keys()?;
+        let enqueued = self.enqueue_candidate(&session_id, &candidate, &mut pending)?;
         Ok(ProposeOutcome {
-            candidate_id: candidate_id.as_str().to_string(),
-            accepted: inserted > 0,
+            candidate_id: enqueued.item_id,
+            created: enqueued.created,
+            duplicate_of,
             quality_note,
+        })
+    }
+
+    fn enqueue_candidate(
+        &self,
+        session_id: &SessionId,
+        candidate: &CandidateLesson,
+        pending: &mut Vec<DedupKey>,
+    ) -> Result<EnqueueCandidateOutcome, ReviewQueueError> {
+        let summary = candidate.summary();
+        let hash = crate::dedup::canonical_hash(summary);
+        if let Some(survivor) = find_duplicate(pending, &hash, summary) {
+            self.bump_seen_count(&survivor)?;
+            return Ok(EnqueueCandidateOutcome {
+                item_id: survivor,
+                created: false,
+            });
+        }
+
+        let item_id = ReviewItemId::new(candidate.id.as_str());
+        let candidate_json =
+            serde_json::to_string(candidate).map_err(ReviewQueueError::SerializeCandidate)?;
+        let changed = self
+            .connection
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO review_items
+                (id, session_id, candidate_json, state, created_at, canonical_hash, seen_count)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                "#,
+                params![
+                    item_id.as_str(),
+                    session_id.as_str(),
+                    candidate_json,
+                    state_name(&ReviewState::Pending),
+                    now_string(),
+                    hash,
+                ],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        if changed > 0 {
+            pending.push(DedupKey {
+                id: item_id.to_string(),
+                canonical_hash: hash,
+                summary: summary.to_string(),
+            });
+        }
+        Ok(EnqueueCandidateOutcome {
+            item_id: item_id.to_string(),
+            created: changed > 0,
         })
     }
 
@@ -461,6 +565,11 @@ struct DedupKey {
     summary: String,
 }
 
+struct EnqueueCandidateOutcome {
+    item_id: String,
+    created: bool,
+}
+
 /// The id of an existing pending candidate that `summary`/`hash` duplicates —
 /// an exact canonical match or a lexical near-duplicate — or `None` when novel.
 fn find_duplicate(pending: &[DedupKey], hash: &str, summary: &str) -> Option<String> {
@@ -533,7 +642,7 @@ impl ProposeScope {
 /// An agent-proposed lesson: the distilled, reusable claim in `title`, an
 /// optional `body` for the why/how, and light metadata. Turned into a review
 /// candidate by [`ReviewQueue::propose`]; never a direct memory write.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ProposedLesson {
     /// The one-line reusable lesson (becomes the candidate summary). Required.
     pub title: String,
@@ -548,8 +657,30 @@ pub struct ProposedLesson {
     pub related_files: Vec<String>,
     /// Free tags / related entities (retrieval cues).
     pub tags: Vec<String>,
+    /// A bounded source pointer or excerpt shown to the reviewer but never
+    /// promoted as memory text.
+    pub evidence: Option<String>,
+    /// Stable caller key for retry-safe proposals. Reusing a key with different
+    /// content is rejected instead of silently replacing the first proposal.
+    pub idempotency_key: Option<String>,
     /// Author confidence in `[0, 1]`; out-of-range is clamped, absent is 0.7.
     pub confidence: f32,
+}
+
+impl Default for ProposedLesson {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            body: None,
+            category: "Process".to_string(),
+            scope: ProposeScope::Project,
+            related_files: Vec::new(),
+            tags: Vec::new(),
+            evidence: None,
+            idempotency_key: None,
+            confidence: 0.7,
+        }
+    }
 }
 
 /// What [`ReviewQueue::propose`] did with a proposal.
@@ -557,23 +688,153 @@ pub struct ProposedLesson {
 pub struct ProposeOutcome {
     /// The candidate's id in the review queue.
     pub candidate_id: String,
-    /// `true` when a new pending candidate was enqueued; `false` when it merged
-    /// into an existing pending candidate (its `seen_count` was bumped instead).
-    pub accepted: bool,
+    /// `true` when a new pending candidate was enqueued; `false` for an exact
+    /// idempotent replay or a merge into an existing pending candidate.
+    pub created: bool,
+    /// Accepted memory this proposal resembles, when the lexical/semantic
+    /// duplicate ladder found one. This is review guidance, never an auto-merge.
+    pub duplicate_of: Option<String>,
     /// The write-time quality note (D-LM-0024), when the proposal was flagged
     /// low-quality — it is still queued, never dropped.
     pub quality_note: Option<String>,
 }
 
-/// A stable candidate id for a proposal, so the same lesson proposed twice
-/// resolves to the same row (the dedup ladder then merges it).
-fn propose_candidate_id(source: &str, title: &str) -> String {
+/// A stable candidate id for a proposal. An explicit idempotency key owns the
+/// identity; otherwise all normalized arguments do, so retrying identical input
+/// is a no-op while a materially different proposal still reaches dedup.
+fn propose_candidate_id(
+    source: &str,
+    title: &str,
+    body: &str,
+    proposal: &ProposedLesson,
+) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in format!("propose\n{source}\n{title}").as_bytes() {
-        hash ^= u64::from(*byte);
+    let mut feed = |value: &str| {
+        for byte in value.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
         hash = hash.wrapping_mul(0x100000001b3);
+    };
+    feed("propose");
+    feed(source);
+    if let Some(key) = proposal
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        feed("idempotency-key");
+        feed(key);
+    } else {
+        feed(title);
+        feed(body);
+        feed(proposal.category.trim());
+        feed(match proposal.scope {
+            ProposeScope::Project => "project",
+            ProposeScope::Global => "global",
+        });
+        if let Some(evidence) = proposal.evidence.as_deref().map(str::trim) {
+            feed(evidence);
+        }
+        for file in &proposal.related_files {
+            feed(file.trim());
+        }
+        for tag in &proposal.tags {
+            feed(tag.trim());
+        }
+        feed(&proposal.confidence.to_bits().to_string());
     }
     format!("lesson-{hash:016x}")
+}
+
+fn normalized_values(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn validate_proposal(
+    source: &str,
+    proposal: &ProposedLesson,
+    title: &str,
+) -> Result<(), ReviewQueueError> {
+    validate_length("source", source, PROPOSAL_KEY_MAX_CHARS)?;
+    validate_length("title", title, PROPOSAL_TITLE_MAX_CHARS)?;
+    validate_length(
+        "category",
+        proposal.category.trim(),
+        PROPOSAL_CATEGORY_MAX_CHARS,
+    )?;
+    if let Some(body) = proposal.body.as_deref() {
+        validate_length("body", body.trim(), PROPOSAL_BODY_MAX_CHARS)?;
+    }
+    if let Some(evidence) = proposal.evidence.as_deref() {
+        validate_length("evidence", evidence.trim(), PROPOSAL_EVIDENCE_MAX_CHARS)?;
+    }
+    if let Some(key) = proposal.idempotency_key.as_deref() {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ReviewQueueError::EmptyProposalField {
+                field: "idempotency_key",
+            });
+        }
+        validate_length("idempotency_key", key, PROPOSAL_KEY_MAX_CHARS)?;
+    }
+    validate_values(
+        "related_files",
+        &proposal.related_files,
+        PROPOSAL_MAX_RELATED_FILES,
+        PROPOSAL_RELATED_FILE_MAX_CHARS,
+    )?;
+    validate_values(
+        "tags",
+        &proposal.tags,
+        PROPOSAL_MAX_TAGS,
+        PROPOSAL_TAG_MAX_CHARS,
+    )?;
+    Ok(())
+}
+
+fn validate_values(
+    field: &'static str,
+    values: &[String],
+    max_values: usize,
+    max_chars: usize,
+) -> Result<(), ReviewQueueError> {
+    if values.len() > max_values {
+        return Err(ReviewQueueError::TooManyProposalValues {
+            field,
+            max: max_values,
+        });
+    }
+    for value in values {
+        validate_length(field, value.trim(), max_chars)?;
+    }
+    Ok(())
+}
+
+fn validate_length(field: &'static str, value: &str, max: usize) -> Result<(), ReviewQueueError> {
+    if value.chars().count() > max {
+        return Err(ReviewQueueError::ProposalTooLarge { field, max });
+    }
+    Ok(())
+}
+
+fn same_proposal(existing: &CandidateLesson, candidate: &CandidateLesson) -> bool {
+    existing.summary() == candidate.summary()
+        && existing.rationale == candidate.rationale
+        && existing.category == candidate.category
+        && existing.confidence == candidate.confidence
+        && existing.evidence_text == candidate.evidence_text
+        && existing.related_files == candidate.related_files
+        && existing.related_entities == candidate.related_entities
+        && existing.suggested_destination == candidate.suggested_destination
+        && existing.source == candidate.source
 }
 
 #[derive(Debug, Error)]
@@ -582,6 +843,18 @@ pub enum ReviewQueueError {
     Config(#[from] StoreConfigError),
     #[error("a proposed lesson needs a non-empty title")]
     EmptyProposal,
+    #[error("a proposed lesson needs a non-empty {field}")]
+    EmptyProposalField { field: &'static str },
+    #[error("proposed lesson field {field} exceeds {max} characters")]
+    ProposalTooLarge { field: &'static str, max: usize },
+    #[error("proposed lesson field {field} exceeds {max} values")]
+    TooManyProposalValues { field: &'static str, max: usize },
+    #[error("proposal idempotency key {key:?} was already used with different content")]
+    IdempotencyConflict { key: String },
+    #[error("failed to compare a proposal with accepted memory: {source}")]
+    AcceptedMemoryProbe {
+        source: Box<crate::MemoryPersistenceError>,
+    },
     #[error(transparent)]
     Schema(#[from] crate::schema::SchemaError),
     #[error("failed to create LocalMind state directory {path:?}: {source}")]
@@ -775,6 +1048,20 @@ mod propose_tests {
         ReviewQueue::open_project(root).unwrap()
     }
 
+    fn candidate(id: &str, summary: &str) -> CandidateLesson {
+        CandidateLesson::new(
+            LessonId::new(id),
+            summary,
+            localmind_core::LessonCategory::ProjectConvention,
+            Confidence::new(0.8).unwrap(),
+            localmind_core::SuggestedAction::PromoteToMemory,
+        )
+    }
+
+    fn session() -> SessionId {
+        SessionId::new("proposal-test-session")
+    }
+
     #[test]
     fn a_proposed_lesson_enters_the_queue_pending_with_its_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -790,17 +1077,24 @@ mod propose_tests {
                     scope: ProposeScope::Project,
                     related_files: vec!["src/search.rs".to_string()],
                     tags: vec!["search".to_string()],
+                    evidence: Some("docs/search.md#performance".to_string()),
+                    idempotency_key: Some("search-rule-v1".to_string()),
                     confidence: 0.9,
                 },
             )
             .unwrap();
-        assert!(outcome.accepted, "a fresh proposal is newly enqueued");
+        assert!(outcome.created, "a fresh proposal is newly enqueued");
+        assert_eq!(outcome.duplicate_of, None);
 
         let items = queue.list().unwrap();
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.state, ReviewState::Pending, "never auto-accepted");
         assert_eq!(item.candidate.source.as_deref(), Some("claude-code"));
+        assert_eq!(
+            item.candidate.evidence_text.as_deref(),
+            Some("docs/search.md#performance")
+        );
         assert_eq!(
             item.candidate.rationale.as_deref(),
             Some("It respects .gitignore and is faster on large trees.")
@@ -838,10 +1132,181 @@ mod propose_tests {
             confidence: 0.7,
             ..ProposedLesson::default()
         };
-        assert!(queue.propose("claude-code", &make()).unwrap().accepted);
+        assert!(queue.propose("claude-code", &make()).unwrap().created);
         let second = queue.propose("claude-code", &make()).unwrap();
-        assert!(!second.accepted, "a restatement merges, not duplicates");
+        assert!(!second.created, "an identical retry is idempotent");
         assert_eq!(queue.list().unwrap().len(), 1);
+        assert_eq!(queue.list().unwrap()[0].seen_count, 1);
+    }
+
+    #[test]
+    fn a_near_duplicate_returns_the_real_surviving_candidate_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let first = queue
+            .propose(
+                "claude-code",
+                &ProposedLesson {
+                    title: "Prefer ripgrep for fast repository text search".to_string(),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+        let merged = queue
+            .propose(
+                "open-ai-codex",
+                &ProposedLesson {
+                    title: "For fast repository text search prefer ripgrep".to_string(),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+
+        assert!(!merged.created);
+        assert_eq!(merged.candidate_id, first.candidate_id);
+        let survivor = queue
+            .get(&ReviewItemId::new(&merged.candidate_id))
+            .unwrap()
+            .expect("reported candidate id exists");
+        assert_eq!(survivor.seen_count, 2);
+    }
+
+    #[test]
+    fn an_idempotency_key_cannot_be_reused_for_different_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let proposal = |title: &str| ProposedLesson {
+            title: title.to_string(),
+            idempotency_key: Some("turn-17-lesson-1".to_string()),
+            ..ProposedLesson::default()
+        };
+        queue
+            .propose("open-ai-codex", &proposal("Keep retries bounded"))
+            .unwrap();
+        let error = queue
+            .propose(
+                "open-ai-codex",
+                &proposal("Retry forever until the service responds"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReviewQueueError::IdempotencyConflict { .. }
+        ));
+        assert_eq!(queue.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn oversized_proposals_are_rejected_before_the_queue_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let error = queue
+            .propose(
+                "open-ai-codex",
+                &ProposedLesson {
+                    title: "x".repeat(PROPOSAL_TITLE_MAX_CHARS + 1),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ReviewQueueError::ProposalTooLarge { field: "title", .. }
+        ));
+        assert!(queue.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_proposal_is_annotated_against_accepted_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .unwrap();
+        let queue = ReviewQueue::open_project(dir.path()).unwrap();
+        let accepted = candidate(
+            "accepted-search-rule",
+            "Prefer ripgrep for repository text search",
+        );
+        queue
+            .enqueue_candidates(&session(), std::slice::from_ref(&accepted))
+            .unwrap();
+        queue
+            .decide(ReviewDecision {
+                item_id: ReviewItemId::new(accepted.id.as_str()),
+                action: ReviewAction::Accept,
+                reviewer: "test".to_string(),
+                decided_at: None,
+                note: None,
+                replacement_summary: None,
+                evidence: Vec::new(),
+            })
+            .unwrap();
+        crate::MemoryPersistence::open_project(dir.path())
+            .unwrap()
+            .promote_review_item(&ReviewItemId::new(accepted.id.as_str()))
+            .unwrap();
+
+        let outcome = queue
+            .propose(
+                "open-ai-codex",
+                &ProposedLesson {
+                    title: "For repository text search prefer ripgrep".to_string(),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            outcome.duplicate_of.as_deref(),
+            Some("accepted-search-rule")
+        );
+        let item = queue
+            .get(&ReviewItemId::new(&outcome.candidate_id))
+            .unwrap()
+            .expect("proposal queued");
+        assert_eq!(
+            item.candidate
+                .review_annotation
+                .and_then(|annotation| annotation.duplicate_of)
+                .as_deref(),
+            Some("accepted-search-rule")
+        );
+    }
+
+    #[test]
+    fn automatic_review_mode_never_auto_accepts_an_agent_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[review]\nmode = \"automatic\"\n",
+        )
+        .unwrap();
+        let queue = ReviewQueue::open_project(dir.path()).unwrap();
+        let outcome = queue
+            .propose(
+                "claude-code",
+                &ProposedLesson {
+                    title: "Keep generated output out of source control".to_string(),
+                    confidence: 1.0,
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+
+        let report = crate::ReviewModeProcessor::apply_project(dir.path()).unwrap();
+        assert_eq!(report.accepted, 0);
+        assert_eq!(report.manual, 1);
+        assert_eq!(
+            queue
+                .get(&ReviewItemId::new(outcome.candidate_id))
+                .unwrap()
+                .expect("proposal remains")
+                .state,
+            ReviewState::Pending
+        );
     }
 
     #[test]

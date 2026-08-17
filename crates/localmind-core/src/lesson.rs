@@ -195,8 +195,16 @@ impl Confidence {
     /// than reject the whole submission.
     #[must_use]
     pub fn clamped(value: f32, fallback: f32) -> Self {
-        let coerce = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { fallback.clamp(0.0, 1.0) };
-        Self(coerce(value))
+        let fallback = if fallback.is_finite() {
+            fallback.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        Self(if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            fallback
+        })
     }
 
     #[must_use]

@@ -41,6 +41,15 @@ const VECTOR_REVIEW_BAND: f32 = 0.83;
 /// Mirrors the retrieval path's `limit.max(20)` candidate window.
 const VECTOR_DUPLICATE_CANDIDATES: usize = 20;
 
+/// Accepted-memory comparison shared by the review-mode processor and direct
+/// agent proposals. Keeping this in one helper prevents the write tool from
+/// drifting to a weaker dedup ladder than transcript closeout.
+pub(crate) struct AcceptedMemoryMatch {
+    pub(crate) best: Option<(crate::MemorySearchResult, f32)>,
+    pub(crate) duplicate_of: Option<String>,
+    pub(crate) borderline_duplicate: bool,
+}
+
 /// Markers that a statement reverses or forbids prior guidance.
 const NEGATION_MARKERS: [&str; 11] = [
     "do not",
@@ -67,6 +76,44 @@ fn is_contradiction(candidate: &str, related: Option<&str>) -> bool {
         Some(_) => has_negation,
         None => lower.contains("contradict") || lower.contains("no longer"),
     }
+}
+
+/// Compare one candidate summary with accepted project/global memory using the
+/// same lexical floor and optional semantic rung as review-mode processing.
+pub(crate) fn accepted_memory_match(
+    config: &ProjectConfig,
+    persistence: &MemoryPersistence,
+    summary: &str,
+) -> Result<AcceptedMemoryMatch, MemoryPersistenceError> {
+    let candidate_tokens = token_set(summary);
+    let mut best: Option<(crate::MemorySearchResult, f32)> = None;
+    for hit in persistence.search(summary)? {
+        let similarity = similarity(&candidate_tokens, &token_set(&hit.snippet));
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_similarity)| similarity > *best_similarity)
+        {
+            best = Some((hit, similarity));
+        }
+    }
+
+    let mut duplicate_of = best
+        .as_ref()
+        .filter(|(_, similarity)| *similarity >= DUPLICATE_SIMILARITY)
+        .map(|(hit, _)| hit.memory_id.to_string());
+    let mut borderline_duplicate = false;
+    if duplicate_of.is_none() && config.semantic_dedup_active() {
+        if let Some(found) = vector_duplicate_of(persistence, summary)? {
+            borderline_duplicate = !found.confident;
+            duplicate_of = Some(found.memory_id);
+        }
+    }
+
+    Ok(AcceptedMemoryMatch {
+        best,
+        duplicate_of,
+        borderline_duplicate,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,19 +143,18 @@ impl ReviewModeProcessor {
             if !matches!(item.state, localmind_core::ReviewState::Pending) {
                 continue;
             }
+            // A direct agent proposal is always human-gated (D-LM-0033), even
+            // when this project otherwise uses trusted/automatic review. The
+            // source is provenance, never authority to promote memory.
+            if item.candidate.source.is_some() {
+                report.manual += 1;
+                continue;
+            }
             let confidence = item.candidate.confidence.value();
             // Recall candidates with FTS, then keep only those that are actually
             // similar to the candidate — not merely sharing one keyword (the old
             // top-1 behaviour produced false duplicates and missed real ones).
             let summary = item.candidate.summary();
-            let candidate_tokens = token_set(summary);
-            let mut best: Option<(crate::MemorySearchResult, f32)> = None;
-            for hit in persistence.search(summary)? {
-                let sim = similarity(&candidate_tokens, &token_set(&hit.snippet));
-                if best.as_ref().is_none_or(|(_, score)| sim > *score) {
-                    best = Some((hit, sim));
-                }
-            }
             // Lexical overlap is the cheap first pass and the no-embeddings
             // fallback. When semantic dedup is active (the `review.semantic_dedup`
             // opt-in plus a configured embedding endpoint) and lexical did not
@@ -117,21 +163,14 @@ impl ReviewModeProcessor {
             // words. With embeddings unavailable, behaviour is exactly the lexical
             // contract. A semantic match only *flags* `duplicate_of` → routed to
             // review like a lexical duplicate, never auto-deleted.
-            let mut duplicate_of = best
-                .as_ref()
-                .filter(|(_, sim)| *sim >= DUPLICATE_SIMILARITY)
-                .map(|(hit, _)| hit.memory_id.to_string());
+            let accepted = accepted_memory_match(&config, &persistence, summary)?;
+            let best = accepted.best;
+            let duplicate_of = accepted.duplicate_of;
             // Whether the duplicate was a *borderline* semantic match (in the
             // route-to-review band, below the confident bar) — surfaced to a human
             // with that caveat, never auto-merged. A lexical duplicate is always
             // confident.
-            let mut borderline_duplicate = false;
-            if duplicate_of.is_none() && config.semantic_dedup_active() {
-                if let Some(found) = vector_duplicate_of(&persistence, summary)? {
-                    borderline_duplicate = !found.confident;
-                    duplicate_of = Some(found.memory_id);
-                }
-            }
+            let borderline_duplicate = accepted.borderline_duplicate;
             // A genuine contradiction: a corrective/negating statement that
             // overlaps an existing memory's topic (it likely reverses it), or an
             // explicit "no longer"/"contradicts" assertion on its own.
@@ -328,7 +367,7 @@ struct VectorDuplicate {
 fn vector_duplicate_of(
     persistence: &MemoryPersistence,
     summary: &str,
-) -> Result<Option<VectorDuplicate>, ReviewModeError> {
+) -> Result<Option<VectorDuplicate>, MemoryPersistenceError> {
     let Some(vector) = persistence.embed_query(summary)? else {
         return Ok(None);
     };
