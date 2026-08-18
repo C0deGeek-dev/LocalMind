@@ -5,6 +5,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Write-path hardening: `localmind propose --json-file <path>` (`-` for stdin)
+  reads a whole proposal as one JSON object instead of many flags (handy for a
+  hook passing a long body); a read-only `memory_status` MCP tool reports the
+  server's store readiness (learning on/off, accepted-memory / pending-review /
+  doc-index counts) without consuming the proposal cap; and `localmind mcp serve`
+  now walks up from its launch directory to the nearest `.localmind.toml` (like
+  `ui`/`review`), so a client binds to the workspace it started in instead of a
+  hard-coded `--project`.
+
 - Agents can propose a distilled lesson directly into the review queue without a
   transcript closeout: `localmind propose "<lesson>" [--body --category --scope
   --source --tag --file --evidence --idempotency-key --confidence]`, and the

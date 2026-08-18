@@ -252,10 +252,14 @@ MCP-capable agent can query LocalMind directly:
 localmind mcp serve --project .
 ```
 
-Ten tools: `memory_search`, `memory_context_export`, `doc_search`, the four
+Eleven tools: `memory_search`, `memory_context_export`, `doc_search`,
+`memory_status` (a read-only store-readiness snapshot), the four
 `memory_symbol_*` code-graph tools, skill list/fetch, and `memory_propose`. The
-proposal tool is the only write surface: it is additive, bounded, retry-safe,
-capped per server session, and can only enqueue a human-review candidate. It
+server binds to the project it is launched in — `mcp serve` walks up from the
+launch directory to the nearest `.localmind.toml`, so no fixed `--project` is
+needed. The proposal tool is the only write surface: it is additive, bounded,
+retry-safe, capped per server session, and can only enqueue a human-review
+candidate. It
 never accepts or promotes memory, including under automatic review mode.
 
 ## Index code and documentation

@@ -54,6 +54,22 @@ localmind propose "Keep retry loops bounded" --source open-ai-codex `
 arguments is a no-op; reusing an idempotency key for different content is
 refused. Trusted or automatic review mode never auto-accepts an agent proposal.
 
+A hook with a long body can pass the whole proposal as one JSON object instead
+of flags — `--json-file <path>`, or `-` for stdin (the keys mirror the flags:
+`title`, `body`, `category`, `scope`, `source`, `tags`, `related_files`,
+`evidence`, `idempotency_key`, `confidence`):
+
+```powershell
+'{ "title": "Keep retry loops bounded", "source": "open-ai-codex", "scope": "global" }' |
+  localmind propose --json-file -
+```
+
+An MCP client can check readiness before proposing with the read-only
+`memory_status` tool (learning on/off, accepted-memory / pending-review /
+doc-index counts). `localmind mcp serve` binds to the workspace it is launched
+in — it walks up to the nearest `.localmind.toml` — so no fixed `--project` is
+needed in the client config.
+
 ## Export agent context and draft skills
 
 ```powershell
