@@ -67,6 +67,21 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Import `lessons.md` bullet lists (e.g. LocalHub `plans/**/lessons.md`)
+    /// into the review queue as pending candidates (never auto-accepted).
+    ImportLessons {
+        /// A `lessons.md` file, or a directory tree to scan for them.
+        path: PathBuf,
+        /// Project root whose review queue receives the candidates.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Source label recorded on each candidate.
+        #[arg(long, default_value = "localhub-lessons")]
+        source: String,
+        /// Write the candidates. Without it, only a dry-run count is printed.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Summarize an imported session and extract candidate lessons.
     Closeout {
         /// Imported session id to process.
@@ -875,6 +890,26 @@ fn main() -> Result<()> {
                 println!(
                     "Dry run: {} memory file(s) would enqueue {} candidate(s) ({} duplicate, {} skipped). Re-run with --apply.",
                     report.total, report.added, report.duplicate, report.skipped
+                );
+            }
+        }
+        Command::ImportLessons {
+            path,
+            project,
+            source,
+            apply,
+        } => {
+            let importer = localmind_store::AgentMemoryImporter::new(project);
+            let report = importer.import_lessons(&path, &source, apply)?;
+            if apply {
+                println!(
+                    "Imported {} lesson bullet(s): {} queued for review, {} duplicate",
+                    report.total, report.added, report.duplicate
+                );
+            } else {
+                println!(
+                    "Dry run: {} lesson bullet(s) would enqueue {} candidate(s) ({} duplicate). Re-run with --apply.",
+                    report.total, report.added, report.duplicate
                 );
             }
         }

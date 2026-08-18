@@ -99,10 +99,56 @@ impl AgentMemoryImporter {
                 None => skipped += 1,
             }
         }
-        let total = candidates.len();
+        self.enqueue_or_predict(&candidates, source, apply, skipped)
+    }
 
+    /// Read `lessons.md`-style bullet lists (LocalHub `plans/**/lessons.md`) and
+    /// enqueue each top-level `- ` bullet as a review candidate. `path` may be a
+    /// single file or a directory tree (every `lessons.md` under it is read).
+    ///
+    /// # Errors
+    /// [`ReviewQueueError`] if the review queue cannot be opened or written.
+    pub fn import_lessons(
+        &self,
+        path: &Path,
+        source: &str,
+        apply: bool,
+    ) -> Result<AgentMemoryImportReport, ReviewQueueError> {
+        let mut files = Vec::new();
+        if path.is_dir() {
+            collect_lessons_files(path, &mut files);
+        } else {
+            files.push(path.to_path_buf());
+        }
+        files.sort();
+
+        let redactor = crate::Redactor::new(self.excluded_paths.clone());
+        let mut skipped = 0;
+        let mut candidates = Vec::new();
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else {
+                skipped += 1;
+                continue;
+            };
+            for bullet in parse_lesson_bullets(&text) {
+                candidates.push(lesson_to_candidate(&bullet, file, source, &redactor));
+            }
+        }
+        self.enqueue_or_predict(&candidates, source, apply, skipped)
+    }
+
+    /// Shared tail: dry-run prediction, or a real enqueue, over already-built
+    /// candidates.
+    fn enqueue_or_predict(
+        &self,
+        candidates: &[CandidateLesson],
+        source: &str,
+        apply: bool,
+        skipped: usize,
+    ) -> Result<AgentMemoryImportReport, ReviewQueueError> {
+        let total = candidates.len();
         if !apply {
-            let (added, duplicate) = self.predict(&candidates)?;
+            let (added, duplicate) = self.predict(candidates)?;
             return Ok(AgentMemoryImportReport {
                 total,
                 added,
@@ -111,10 +157,9 @@ impl AgentMemoryImporter {
                 applied: false,
             });
         }
-
         let queue = ReviewQueue::open_project(&self.project_root)?;
         let session = SessionId::new(format!("import-{source}"));
-        let added = queue.enqueue_candidates(&session, &candidates)?;
+        let added = queue.enqueue_candidates(&session, candidates)?;
         Ok(AgentMemoryImportReport {
             total,
             added,
@@ -265,6 +310,115 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Recursively collect files named `lessons.md` under `dir`.
+fn collect_lessons_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lessons_files(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "lessons.md") {
+            out.push(path);
+        }
+    }
+}
+
+/// Extract each top-level `- ` bullet from a `lessons.md` file, joining
+/// continuation (indented) lines into one lesson. Link-list entries (a bullet
+/// that is just a `[title](path)` pointer, as in a generated discovery index)
+/// and very short fragments are dropped.
+fn parse_lesson_bullets(text: &str) -> Vec<String> {
+    let mut bullets = Vec::new();
+    let mut current: Option<String> = None;
+    let flush = |current: &mut Option<String>, bullets: &mut Vec<String>| {
+        if let Some(bullet) = current.take() {
+            let bullet = bullet.trim().to_string();
+            let is_link_entry = bullet.starts_with('[') && bullet.contains("](");
+            if bullet.chars().count() >= 20 && !is_link_entry {
+                bullets.push(bullet);
+            }
+        }
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("- ") {
+            flush(&mut current, &mut bullets);
+            current = Some(rest.trim().to_string());
+        } else if (line.starts_with("  ") || line.starts_with('\t')) && current.is_some() {
+            let cont = line.trim();
+            if !cont.is_empty() {
+                if let Some(bullet) = current.as_mut() {
+                    bullet.push(' ');
+                    bullet.push_str(cont);
+                }
+            }
+        } else {
+            // A header, blank line, or non-bullet paragraph ends the bullet.
+            flush(&mut current, &mut bullets);
+        }
+    }
+    flush(&mut current, &mut bullets);
+    bullets
+}
+
+/// One lesson bullet → a redacted review candidate. The candidate summary is the
+/// bullet's first sentence (or a word-bounded truncation); the full bullet is the
+/// rationale.
+fn lesson_to_candidate(
+    bullet: &str,
+    path: &Path,
+    source: &str,
+    redactor: &crate::Redactor,
+) -> CandidateLesson {
+    let full = redactor.redact(bullet).redacted_text;
+    let summary = lesson_summary(&full);
+    let id = LessonId::new(format!(
+        "lessonimport-{}",
+        &crate::digest_hex(format!("{source}|{full}").as_bytes())[..16]
+    ));
+    let mut candidate = CandidateLesson::new(
+        id,
+        summary.clone(),
+        crate::markdown::parse_category("Process"),
+        Confidence::clamped(0.7, 0.7),
+        SuggestedAction::PromoteToMemory,
+    )
+    .with_source(source);
+    if full != summary {
+        candidate.rationale = Some(full);
+    }
+    let note = format!("imported from {}", path.display());
+    candidate =
+        candidate.with_evidence(EvidenceRef::new(EvidenceKind::ManualNote, note).redacted());
+    candidate
+}
+
+/// A concise one-line summary for a lesson bullet: the first sentence when it is
+/// a reasonable length, else a word-bounded truncation.
+fn lesson_summary(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some(index) = trimmed.find(". ") {
+        if index >= 20 {
+            return trimmed[..=index].trim().to_string();
+        }
+    }
+    if trimmed.chars().count() <= 160 {
+        return trimmed.to_string();
+    }
+    let mut out = String::new();
+    for word in trimmed.split_whitespace() {
+        if out.chars().count() + word.chars().count() + 1 > 160 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    format!("{out}…")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -339,6 +493,47 @@ mod tests {
         assert_eq!(again.added, 0);
         assert_eq!(again.duplicate, 2);
         assert_eq!(queue.list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parses_top_level_bullets_joining_continuations_and_dropping_links() {
+        let text = "# Lessons\n\n- A function documented and tested but with no caller\n  is a live bug, not spare capacity.\n- [Some plan](plan.md) — a link-list entry that is not a lesson\n- x\n- Read only the header of a big binary; never the tensor data.\n";
+        let bullets = parse_lesson_bullets(text);
+        assert_eq!(bullets.len(), 2, "{bullets:?}");
+        assert!(bullets[0].contains("live bug, not spare capacity"));
+        assert!(bullets[0].contains("no caller is a live bug"));
+        assert!(bullets[1].starts_with("Read only the header"));
+    }
+
+    #[test]
+    fn imports_a_lessons_file_as_pending_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let lessons = dir.path().join("lessons.md");
+        std::fs::write(
+            &lessons,
+            "- Prefer typed errors over panics on library paths, always.\n- Pin the toolchain so CI and local agree on lints.\n",
+        )
+        .unwrap();
+
+        let importer = AgentMemoryImporter::new(dir.path());
+        let applied = importer
+            .import_lessons(&lessons, "localhub-lessons", true)
+            .unwrap();
+        assert_eq!(applied.added, 2);
+
+        let queue = ReviewQueue::open_project(dir.path()).unwrap();
+        let items = queue.list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .all(|item| item.candidate.source.as_deref() == Some("localhub-lessons")));
+
+        // Idempotent re-run.
+        let again = importer
+            .import_lessons(&lessons, "localhub-lessons", true)
+            .unwrap();
+        assert_eq!(again.added, 0);
     }
 
     #[test]
