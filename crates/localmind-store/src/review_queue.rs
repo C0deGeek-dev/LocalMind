@@ -175,59 +175,124 @@ impl ReviewQueue {
         if source.is_empty() {
             return Err(ReviewQueueError::EmptyProposalField { field: "source" });
         }
+        if !source
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(ReviewQueueError::InvalidProposalSource);
+        }
         validate_proposal(source, proposal, title)?;
-        let body = proposal.body.as_deref().unwrap_or("").trim();
-        let category_name = proposal.category.trim();
-        let category = crate::markdown::parse_category(category_name);
+        let redactor = crate::Redactor::new(self.config.config.learning.excluded_paths.clone());
+        let title = redactor.redact(title).redacted_text;
+        let body = redactor
+            .redact(proposal.body.as_deref().unwrap_or("").trim())
+            .redacted_text;
+        let category_name = redactor.redact(proposal.category.trim()).redacted_text;
+        let category = crate::markdown::parse_category(&category_name);
         let confidence = Confidence::clamped(proposal.confidence, 0.7);
         let session_id = SessionId::new(format!("proposal-{source}"));
-        let candidate_id = LessonId::new(propose_candidate_id(source, title, body, proposal));
+        let evidence = proposal
+            .evidence
+            .as_deref()
+            .map(str::trim)
+            .filter(|evidence| !evidence.is_empty())
+            .map(|evidence| redactor.redact(evidence).redacted_text);
+        let related_files = normalized_values(&proposal.related_files)
+            .into_iter()
+            .map(|value| redactor.redact(&value).redacted_text)
+            .collect::<Vec<_>>();
+        let tags = normalized_values(&proposal.tags)
+            .into_iter()
+            .map(|value| redactor.redact(&value).redacted_text)
+            .collect::<Vec<_>>();
+        let normalized = ProposedLesson {
+            title: title.clone(),
+            body: (!body.is_empty()).then_some(body.clone()),
+            category: category_name,
+            scope: proposal.scope,
+            related_files,
+            tags,
+            evidence,
+            idempotency_key: proposal
+                .idempotency_key
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_string),
+            confidence: confidence.value(),
+        };
+        let fingerprint = proposal_fingerprint(source, &normalized);
+        let candidate_id = LessonId::new(propose_candidate_id(
+            source,
+            normalized.idempotency_key.as_deref(),
+            &fingerprint,
+        ));
 
         let mut candidate = CandidateLesson::new(
             candidate_id.clone(),
-            title,
+            &title,
             category.clone(),
             confidence,
             localmind_core::SuggestedAction::PromoteToMemory,
         )
         .with_source(source);
         if !body.is_empty() {
-            candidate.rationale = Some(body.to_string());
+            candidate.rationale = Some(body.clone());
         }
-        if let Some(evidence) = proposal
-            .evidence
-            .as_deref()
-            .map(str::trim)
-            .filter(|evidence| !evidence.is_empty())
-        {
+        if let Some(evidence) = normalized.evidence.clone() {
             candidate = candidate.with_evidence_text(evidence);
         }
         candidate.suggested_destination = proposal.scope.destination();
-        candidate.related_files = normalized_values(&proposal.related_files);
-        candidate.related_entities = normalized_values(&proposal.tags);
+        candidate.related_files = normalized.related_files.clone();
+        candidate.related_entities = normalized.tags.clone();
 
         // Write-time quality classification: a low-quality proposal is still
         // queued (never dropped, never auto-accepted), with the reason attached
         // for the reviewer.
-        let quality = crate::quality::classify_quality(&category, title, body);
+        let quality = crate::quality::classify_quality(&category, &title, &body);
         let quality_note = quality.review_note().map(str::to_string);
+        if let Some(receipt) = self.proposal_receipt(candidate_id.as_str())? {
+            if receipt.fingerprint != fingerprint {
+                return Err(ReviewQueueError::IdempotencyConflict);
+            }
+            if let Some(existing) = self.get(&ReviewItemId::new(&receipt.survivor_id))? {
+                return Ok(ProposeOutcome {
+                    candidate_id: existing.id.to_string(),
+                    created: false,
+                    changed: false,
+                    duplicate_of: existing
+                        .candidate
+                        .review_annotation
+                        .as_ref()
+                        .and_then(|annotation| annotation.duplicate_of.clone()),
+                    quality_note,
+                });
+            }
+            // A stale receipt can only be left by an older/manual database
+            // mutation. Remove it so the proposal can safely be recorded again.
+            self.connection
+                .execute(
+                    "DELETE FROM proposal_receipts WHERE proposal_id = ?1",
+                    params![candidate_id.as_str()],
+                )
+                .map_err(ReviewQueueError::Sqlite)?;
+        }
         // An exact replay returns the first result without bumping `seen_count`.
         // This makes the store operation genuinely idempotent for identical
         // arguments (and for an explicit idempotency key).
         let item_id = ReviewItemId::new(candidate_id.as_str());
         if let Some(existing) = self.get(&item_id)? {
             if !same_proposal(&existing.candidate, &candidate) {
-                return Err(ReviewQueueError::IdempotencyConflict {
-                    key: proposal
-                        .idempotency_key
-                        .as_deref()
-                        .unwrap_or(candidate_id.as_str())
-                        .to_string(),
-                });
+                return Err(ReviewQueueError::IdempotencyConflict);
             }
+            let survivor = self.remember_proposal_receipt(
+                candidate_id.as_str(),
+                &fingerprint,
+                existing.id.as_str(),
+            )?;
             return Ok(ProposeOutcome {
-                candidate_id: existing.id.to_string(),
+                candidate_id: survivor,
                 created: false,
+                changed: false,
                 duplicate_of: existing
                     .candidate
                     .review_annotation
@@ -275,9 +340,12 @@ impl ReviewQueue {
 
         let mut pending = self.pending_dedup_keys()?;
         let enqueued = self.enqueue_candidate(&session_id, &candidate, &mut pending)?;
+        let survivor =
+            self.remember_proposal_receipt(candidate_id.as_str(), &fingerprint, &enqueued.item_id)?;
         Ok(ProposeOutcome {
-            candidate_id: enqueued.item_id,
+            candidate_id: survivor,
             created: enqueued.created,
+            changed: enqueued.changed,
             duplicate_of,
             quality_note,
         })
@@ -296,6 +364,7 @@ impl ReviewQueue {
             return Ok(EnqueueCandidateOutcome {
                 item_id: survivor,
                 created: false,
+                changed: true,
             });
         }
 
@@ -330,19 +399,75 @@ impl ReviewQueue {
         Ok(EnqueueCandidateOutcome {
             item_id: item_id.to_string(),
             created: changed > 0,
+            changed: changed > 0,
         })
+    }
+
+    fn proposal_receipt(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<ProposalReceipt>, ReviewQueueError> {
+        self.connection
+            .query_row(
+                "SELECT fingerprint, survivor_id FROM proposal_receipts WHERE proposal_id = ?1",
+                params![proposal_id],
+                |row| {
+                    Ok(ProposalReceipt {
+                        fingerprint: row.get(0)?,
+                        survivor_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ReviewQueueError::Sqlite)
+    }
+
+    fn remember_proposal_receipt(
+        &self,
+        proposal_id: &str,
+        fingerprint: &str,
+        survivor_id: &str,
+    ) -> Result<String, ReviewQueueError> {
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO proposal_receipts
+                 (proposal_id, fingerprint, survivor_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![proposal_id, fingerprint, survivor_id, now_string()],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        let receipt = self
+            .proposal_receipt(proposal_id)?
+            .ok_or(ReviewQueueError::MissingProposalReceipt)?;
+        if receipt.fingerprint != fingerprint {
+            return Err(ReviewQueueError::IdempotencyConflict);
+        }
+        Ok(receipt.survivor_id)
     }
 
     /// Delete every pending review candidate, returning how many rows were
     /// removed. Accepted/rejected/edited/merged decisions and all accepted-memory
     /// tables are untouched — this clears only the un-reviewed backlog.
     pub fn purge_pending(&self) -> Result<usize, ReviewQueueError> {
-        self.connection
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(ReviewQueueError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM proposal_receipts
+                 WHERE survivor_id IN (SELECT id FROM review_items WHERE state = ?1)",
+                params![state_name(&ReviewState::Pending)],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        let removed = transaction
             .execute(
                 "DELETE FROM review_items WHERE state = ?1",
                 params![state_name(&ReviewState::Pending)],
             )
-            .map_err(ReviewQueueError::Sqlite)
+            .map_err(ReviewQueueError::Sqlite)?;
+        transaction.commit().map_err(ReviewQueueError::Sqlite)?;
+        Ok(removed)
     }
 
     /// The dedup keys of every pending candidate, for merge detection at enqueue.
@@ -568,6 +693,12 @@ struct DedupKey {
 struct EnqueueCandidateOutcome {
     item_id: String,
     created: bool,
+    changed: bool,
+}
+
+struct ProposalReceipt {
+    fingerprint: String,
+    survivor_id: String,
 }
 
 /// The id of an existing pending candidate that `summary`/`hash` duplicates —
@@ -691,6 +822,9 @@ pub struct ProposeOutcome {
     /// `true` when a new pending candidate was enqueued; `false` for an exact
     /// idempotent replay or a merge into an existing pending candidate.
     pub created: bool,
+    /// Whether this call changed the queue: a new row or a near-duplicate
+    /// `seen_count` bump. `false` only for an exact idempotent replay.
+    pub changed: bool,
     /// Accepted memory this proposal resembles, when the lexical/semantic
     /// duplicate ladder found one. This is review guidance, never an auto-merge.
     pub duplicate_of: Option<String>,
@@ -702,51 +836,42 @@ pub struct ProposeOutcome {
 /// A stable candidate id for a proposal. An explicit idempotency key owns the
 /// identity; otherwise all normalized arguments do, so retrying identical input
 /// is a no-op while a materially different proposal still reaches dedup.
-fn propose_candidate_id(
-    source: &str,
-    title: &str,
-    body: &str,
-    proposal: &ProposedLesson,
-) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    let mut feed = |value: &str| {
-        for byte in value.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    };
-    feed("propose");
-    feed(source);
-    if let Some(key) = proposal
-        .idempotency_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-    {
-        feed("idempotency-key");
-        feed(key);
+fn propose_candidate_id(source: &str, idempotency_key: Option<&str>, fingerprint: &str) -> String {
+    let digest = if let Some(key) = idempotency_key {
+        proposal_digest(["proposal-id", source, key])
     } else {
-        feed(title);
-        feed(body);
-        feed(proposal.category.trim());
-        feed(match proposal.scope {
-            ProposeScope::Project => "project",
-            ProposeScope::Global => "global",
-        });
-        if let Some(evidence) = proposal.evidence.as_deref().map(str::trim) {
-            feed(evidence);
-        }
-        for file in &proposal.related_files {
-            feed(file.trim());
-        }
-        for tag in &proposal.tags {
-            feed(tag.trim());
-        }
-        feed(&proposal.confidence.to_bits().to_string());
+        fingerprint.to_string()
+    };
+    format!("lesson-{}", &digest[..16])
+}
+
+fn proposal_fingerprint(source: &str, proposal: &ProposedLesson) -> String {
+    let mut values = vec![
+        "proposal-content".to_string(),
+        source.to_string(),
+        proposal.title.clone(),
+        proposal.body.clone().unwrap_or_default(),
+        proposal.category.clone(),
+        match proposal.scope {
+            ProposeScope::Project => "project".to_string(),
+            ProposeScope::Global => "global".to_string(),
+        },
+        proposal.evidence.clone().unwrap_or_default(),
+    ];
+    values.extend(proposal.related_files.iter().cloned());
+    values.push("tags".to_string());
+    values.extend(proposal.tags.iter().cloned());
+    values.push(proposal.confidence.to_bits().to_string());
+    proposal_digest(values.iter().map(String::as_str))
+}
+
+fn proposal_digest<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let mut bytes = Vec::new();
+    for value in values {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
     }
-    format!("lesson-{hash:016x}")
+    crate::digest_hex(&bytes)
 }
 
 fn normalized_values(values: &[String]) -> Vec<String> {
@@ -849,8 +974,12 @@ pub enum ReviewQueueError {
     ProposalTooLarge { field: &'static str, max: usize },
     #[error("proposed lesson field {field} exceeds {max} values")]
     TooManyProposalValues { field: &'static str, max: usize },
-    #[error("proposal idempotency key {key:?} was already used with different content")]
-    IdempotencyConflict { key: String },
+    #[error("a proposal idempotency key was already used with different content")]
+    IdempotencyConflict,
+    #[error("a proposal receipt disappeared immediately after it was recorded")]
+    MissingProposalReceipt,
+    #[error("proposal source may contain only ASCII letters, digits, '.', '_' and '-'")]
+    InvalidProposalSource,
     #[error("failed to compare a proposal with accepted memory: {source}")]
     AcceptedMemoryProbe {
         source: Box<crate::MemoryPersistenceError>,
@@ -1140,6 +1269,26 @@ mod propose_tests {
     }
 
     #[test]
+    fn purging_a_pending_proposal_also_removes_its_retry_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let proposal = ProposedLesson {
+            title: "Keep generated output out of source control".to_string(),
+            idempotency_key: Some("turn-19-lesson-1".to_string()),
+            ..ProposedLesson::default()
+        };
+        let first = queue.propose("open-ai-codex", &proposal).unwrap();
+        assert_eq!(queue.purge_pending().unwrap(), 1);
+
+        let reproposed = queue.propose("open-ai-codex", &proposal).unwrap();
+
+        assert!(reproposed.created);
+        assert!(reproposed.changed);
+        assert_eq!(reproposed.candidate_id, first.candidate_id);
+        assert_eq!(queue.list().unwrap().len(), 1);
+    }
+
+    #[test]
     fn a_near_duplicate_returns_the_real_surviving_candidate_id() {
         let dir = tempfile::tempdir().unwrap();
         let queue = open(dir.path());
@@ -1152,23 +1301,61 @@ mod propose_tests {
                 },
             )
             .unwrap();
-        let merged = queue
-            .propose(
-                "open-ai-codex",
-                &ProposedLesson {
-                    title: "For fast repository text search prefer ripgrep".to_string(),
-                    ..ProposedLesson::default()
-                },
-            )
-            .unwrap();
+        let proposal = ProposedLesson {
+            title: "For fast repository text search prefer ripgrep".to_string(),
+            ..ProposedLesson::default()
+        };
+        let merged = queue.propose("open-ai-codex", &proposal).unwrap();
 
         assert!(!merged.created);
+        assert!(merged.changed);
         assert_eq!(merged.candidate_id, first.candidate_id);
+        let retry = queue.propose("open-ai-codex", &proposal).unwrap();
+        assert!(!retry.created);
+        assert!(!retry.changed, "an exact near-merge retry is a no-op");
+        assert_eq!(retry.candidate_id, first.candidate_id);
         let survivor = queue
             .get(&ReviewItemId::new(&merged.candidate_id))
             .unwrap()
             .expect("reported candidate id exists");
         assert_eq!(survivor.seen_count, 2);
+    }
+
+    #[test]
+    fn an_idempotency_key_remains_bound_after_a_near_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        queue
+            .propose(
+                "claude-code",
+                &ProposedLesson {
+                    title: "Prefer ripgrep for fast repository text search".to_string(),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+        let proposal = |title: &str| ProposedLesson {
+            title: title.to_string(),
+            idempotency_key: Some("turn-18-lesson-1".to_string()),
+            ..ProposedLesson::default()
+        };
+        queue
+            .propose(
+                "open-ai-codex",
+                &proposal("For fast repository text search prefer ripgrep"),
+            )
+            .unwrap();
+
+        let error = queue
+            .propose(
+                "open-ai-codex",
+                &proposal("Retry forever until the service responds"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ReviewQueueError::IdempotencyConflict));
+        assert_eq!(queue.list().unwrap().len(), 1);
+        assert_eq!(queue.list().unwrap()[0].seen_count, 2);
     }
 
     #[test]
@@ -1190,10 +1377,7 @@ mod propose_tests {
             )
             .unwrap_err();
 
-        assert!(matches!(
-            error,
-            ReviewQueueError::IdempotencyConflict { .. }
-        ));
+        assert!(matches!(error, ReviewQueueError::IdempotencyConflict));
         assert_eq!(queue.list().unwrap().len(), 1);
     }
 
@@ -1216,6 +1400,32 @@ mod propose_tests {
             ReviewQueueError::ProposalTooLarge { field: "title", .. }
         ));
         assert!(queue.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn proposal_secrets_are_redacted_before_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = open(dir.path());
+        let secret = "sk-abcdefghijklmnopqrstuvwx";
+        let outcome = queue
+            .propose(
+                "open-ai-codex",
+                &ProposedLesson {
+                    title: format!("Never persist API key {secret}"),
+                    body: Some(format!("token={secret}")),
+                    evidence: Some(format!("captured from {secret}")),
+                    ..ProposedLesson::default()
+                },
+            )
+            .unwrap();
+        let item = queue
+            .get(&ReviewItemId::new(outcome.candidate_id))
+            .unwrap()
+            .expect("proposal");
+        let serialized = serde_json::to_string(&item.candidate).unwrap();
+
+        assert!(!serialized.contains(secret));
+        assert!(serialized.contains("[REDACTED:"));
     }
 
     #[test]

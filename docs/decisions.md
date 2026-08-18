@@ -17,6 +17,23 @@ write-time quality classification (D-LM-0024) is applied and, when it flags the
 lesson, attached as a review note; a low-quality proposal is still queued, never
 dropped.
 
+The human-only gate is structural: `source = Some(..)` excludes a proposal from
+trusted/automatic promotion. Propose-time duplicate probing reuses the same
+accepted-memory lexical and optional semantic ladder as review-mode processing;
+an accepted-memory match is annotated as `duplicate_of`, never silently merged
+or promoted. Exact retries are no-ops (an explicit idempotency key conflicts if
+reused with different content), near-pending merges return the survivor's real
+candidate id, and store-level length/count bounds apply equally to CLI and MCP.
+Schema v11 stores only a SHA-256 proposal id, content fingerprint, and survivor
+mapping, so that retry contract also holds when pending dedup merged the first
+call into a differently-id'd row; raw idempotency keys and proposal text are not
+stored in the receipt.
+The MCP surface declares an output schema and returns the same object as both
+structured content and JSON text. Its hints are `readOnlyHint=false`,
+`destructiveHint=false`, `idempotentHint=true`, and `openWorldHint=false`; a
+server process also caps proposals so a looping caller cannot grow the queue
+without bound.
+
 The candidate records the proposing agent in a new, optional
 `CandidateLesson.source` field (`#[serde(default)]`, so candidate JSON written
 before proposals existed still loads; no SQL migration — candidates are stored
@@ -24,7 +41,8 @@ as JSON blobs). `source` is a provenance/retrieval cue for the reviewer, not a
 trust signal: a proposal from an agent is reviewed exactly as an extracted
 candidate is. The proposal's scope (`Project` / `Global`) maps to the candidate
 destination; `title` is the reusable one-line lesson (the summary), `body` the
-rationale.
+rationale, and `evidence` is reviewer-only context that is never promoted as
+memory text. Review list/inspect surfaces show the recorded source.
 
 This is the keystone of the agent knowledge-loop
 (`LocalHub/plans/localmind/LocalMindAgentKnowledgeLoop`): it is the write path

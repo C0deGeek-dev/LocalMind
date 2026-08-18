@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 10;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 11;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -93,6 +93,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 10 {
         apply_v10(&tx)?;
+    }
+    if current < 11 {
+        apply_v11(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -334,6 +337,28 @@ fn apply_v10(connection: &Connection) -> Result<(), SchemaError> {
         .map_err(SchemaError::Sqlite)
 }
 
+/// Retry-safe agent proposals. A proposal can merge into a pre-existing review
+/// row, so its derived id is not necessarily the row id. This receipt preserves
+/// that mapping and a content fingerprint without storing the caller's raw
+/// idempotency key or proposal text.
+fn apply_v11(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS proposal_receipts (
+                proposal_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                survivor_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_proposal_receipts_survivor
+                ON proposal_receipts(survivor_id);
+            "#,
+        )
+        .map_err(SchemaError::Sqlite)
+}
+
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error(
@@ -501,6 +526,24 @@ mod tests {
         let count: i64 =
             connection.query_row("SELECT COUNT(*) FROM doc_chunk", [], |row| row.get(0))?;
         assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn v11_adds_retry_safe_proposal_receipts() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        connection.execute(
+            "INSERT INTO proposal_receipts(proposal_id, fingerprint, survivor_id, created_at)
+             VALUES('proposal', 'fingerprint', 'candidate', 'now')",
+            [],
+        )?;
+        let survivor: String = connection.query_row(
+            "SELECT survivor_id FROM proposal_receipts WHERE proposal_id = 'proposal'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(survivor, "candidate");
         Ok(())
     }
 

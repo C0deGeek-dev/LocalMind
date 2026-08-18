@@ -178,6 +178,12 @@ provenance/retrieval cue for review, never a trust signal, and never a promotion
 shortcut — a proposal is a pending review candidate like any other (D-LM-0033,
 D-LM-0016). The field is stored inside the candidate JSON blob (`candidates.json`
 and the `review_items.candidate_json` column), so it needed no schema migration.
+An optional proposal `evidence` value uses the existing `evidence_text` field and
+is likewise reviewer-only: promotion writes the reviewed summary, not that
+evidence. Raw idempotency keys are not stored. A SHA-256-derived proposal id and
+content fingerprint are recorded in `proposal_receipts`, allowing an exact retry
+to find the real surviving candidate even when pending dedup merged the first
+call; reusing a key with different proposal content is refused.
 
 Only the redacted transcript is persisted. Redaction runs before any write
 (pattern table + entropy backstop; see `localmind-store/src/redaction.rs`
@@ -244,13 +250,14 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **10**); every component steps the schema on open and refuses
+(currently **11**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
 |---|---|---|
 | `schema_migrations(version, applied_at)` | human-readable baseline marker | records only the baseline (`version = 1`); the stepper does **not** append a row per applied step, so `PRAGMA user_version` (above) is the authoritative schema version — read that, not this table, to gate on the schema |
 | `review_items(id, session_id, candidate_json, state, reviewer_action, reviewer, note, replacement_summary, created_at, updated_at)` | review queue | `candidate_json` is a serialized `CandidateLesson` |
+| `proposal_receipts(proposal_id, fingerprint, survivor_id, created_at)` | retry-safe agent proposal routing (schema v11) | SHA-256-derived ids/fingerprints only; maps an exact retry to the surviving `review_items` row after pending dedup without storing raw keys or proposal text |
 | `audit_events(id, kind, actor, subject, metadata_json, happened_at)` | audit log | `metadata_json` is always valid JSON (serde-built) |
 | `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language, hit_count, last_used_at)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval; `hit_count` (default 0) and `last_used_at` (NULL = never) are the **runtime usage signal** — bumped post-turn when a memory is injected, used by the freshness pass to surface never-retrieved dead weight. Unlike the other columns these two are **not** rebuildable from the Markdown source of truth: a reindex resets them to zero-usage (the same state as a pre-v8 upgrade), which is acceptable for a best-effort signal; `origin_device` (schema v10, NULL when not synced) is the label of the machine that wrote a synced memory, derived from the Markdown origin stamp, so injection can down-weight a foreign-machine lesson without dropping it |
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |

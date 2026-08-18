@@ -7,10 +7,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 - Agents can propose a distilled lesson directly into the review queue without a
   transcript closeout: `localmind propose "<lesson>" [--body --category --scope
-  --source --tag --file --confidence]`, and a host-side `memory_propose` tool
-  (D-LM-0033). A proposal enters as a **pending** candidate — never
-  auto-accepted (D-LM-0016) — deduplicated against existing pending candidates,
-  carrying the write-time quality note (D-LM-0024). `CandidateLesson` gained an
+  --source --tag --file --evidence --idempotency-key --confidence]`, and the
+  `memory_propose` MCP tool (D-LM-0033). A bounded proposal enters as a
+  **pending** candidate even under trusted/automatic review — never
+  auto-accepted (D-LM-0016) — and is deduplicated against pending and accepted
+  memory through the existing lexical/semantic ladder. MCP calls return a
+  schema-declared structured result, advertise additive/idempotent/closed-world
+  annotations, and are capped per server session. Schema v11 adds hashed
+  proposal receipts so retries remain no-ops even when pending dedup routed the
+  first call to a different survivor. `CandidateLesson` gained an
   optional `source` field recording the proposing agent (serde-default; no
   migration — candidates are JSON blobs). See `docs/on-disk-contract.md`.
 

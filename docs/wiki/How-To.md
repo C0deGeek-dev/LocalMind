@@ -41,6 +41,19 @@ localmind promote lesson-1234 --project .
 Promotion writes the Markdown memory file, updates the search index and
 relationship metadata, and records a SQLite audit event.
 
+An agent or script can skip transcript closeout when it already has one
+distilled lesson. This still creates only a pending review item:
+
+```powershell
+localmind propose "Keep retry loops bounded" --source open-ai-codex `
+  --body "Stop after the configured attempt budget." `
+  --evidence "src/retry.rs#policy" --idempotency-key retry-policy-v1
+```
+
+`review list` and `review inspect` show the proposal source. Repeating the same
+arguments is a no-op; reusing an idempotency key for different content is
+refused. Trusted or automatic review mode never auto-accepts an agent proposal.
+
 ## Export agent context and draft skills
 
 ```powershell
@@ -90,8 +103,11 @@ runtime). Register it in an MCP-capable client, e.g. a `.mcp.json`:
 }
 ```
 
-Nine read/query tools: `memory_search`, `memory_context_export`, `doc_search`,
-the four `memory_symbol_*` code-graph tools, and skill list/fetch.
+Ten tools: the nine existing read/query tools (`memory_search`,
+`memory_context_export`, `doc_search`, four `memory_symbol_*` tools, and skill
+list/fetch) plus `memory_propose`. The proposal tool is the only write: it is
+bounded, capped per MCP server session, idempotent for identical arguments, and
+can only enqueue a **pending** human-review candidate.
 
 ## Build the code graph over a repository
 

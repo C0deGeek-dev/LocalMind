@@ -71,9 +71,9 @@ list.
 }
 ```
 
-Expect: the client lists nine `localmind` tools — memory search, context
-export, doc search, the four code-graph tools, skill list/fetch — served over
-stdio; no socket is opened.
+Expect: the client lists ten `localmind` tools — memory search, context export,
+doc search, the four code-graph tools, skill list/fetch, and the bounded
+`memory_propose` review-queue write — served over stdio; no socket is opened.
 
 See the on-disk contract for the exact file shapes:
 [on-disk-contract.md](https://github.com/C0deGeek-dev/LocalMind/blob/main/docs/on-disk-contract.md).

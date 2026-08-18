@@ -33,7 +33,7 @@ human to review them, and stores accepted knowledge as readable project files.
 | **It remembers** | Only lessons you explicitly accept or edit |
 | **It stores** | Readable Markdown memory plus a local SQLite audit/search index |
 | **You review it in** | The CLI, or a localhost web app (`localmind ui`) |
-| **Agents query it via** | A stdio MCP server (`localmind mcp serve`): memory, docs, code graph, skills |
+| **Agents use it via** | A stdio MCP server (`localmind mcp serve`): query memory/docs/code/skills and propose review-gated lessons |
 | **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
 | **Cloud required** | No |
 
@@ -108,6 +108,13 @@ localmind closeout <session-id> --project .
 localmind review list --project .
 ```
 
+When an agent has already distilled one reusable lesson, it can propose it
+directly without bypassing review:
+
+```sh
+localmind propose "Keep retry loops bounded" --source open-ai-codex --idempotency-key retry-policy-v1
+```
+
 Accept one durable lesson, then promote and find it:
 
 ```sh
@@ -146,6 +153,7 @@ cloud inference is not the default.
 | Command | What happens |
 |---|---|
 | `localmind review list` | Show pending candidates |
+| `localmind propose "…"` | Add a bounded, source-labelled pending candidate; never auto-accept |
 | `localmind review inspect <id>` | Read the evidence before deciding |
 | `localmind review accept <id>` | Mark the lesson as durable enough to keep |
 | `localmind review edit <id> "…"` | Correct the lesson before accepting it |
@@ -244,9 +252,11 @@ MCP-capable agent can query LocalMind directly:
 localmind mcp serve --project .
 ```
 
-Nine read/query tools: `memory_search`, `memory_context_export`, `doc_search`,
-the four `memory_symbol_*` code-graph tools, and skill list/fetch. All are
-read-only over the store; nothing writes memory through MCP.
+Ten tools: `memory_search`, `memory_context_export`, `doc_search`, the four
+`memory_symbol_*` code-graph tools, skill list/fetch, and `memory_propose`. The
+proposal tool is the only write surface: it is additive, bounded, retry-safe,
+capped per server session, and can only enqueue a human-review candidate. It
+never accepts or promotes memory, including under automatic review mode.
 
 ## Index code and documentation
 
