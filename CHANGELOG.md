@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v3.2.0 - 2026-08-18
+
+Coordinated LocalX release.
+
 - Import existing agent knowledge into the review queue: `localmind import-memory
   <dir>` reads a directory of Claude Code memory files (front-matter Markdown),
   and `localmind import-lessons <path>` reads `lessons.md` bullet lists (a file
