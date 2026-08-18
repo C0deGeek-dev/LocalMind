@@ -844,6 +844,9 @@ fn main() -> Result<()> {
             );
             println!("review:  {} candidate(s) pending", snapshot.pending_review);
             println!("schema:  v{}", snapshot.schema_version);
+            for note in &snapshot.notes {
+                println!("problem: {note}");
+            }
             println!(
                 "status:  {}",
                 if snapshot.ready {

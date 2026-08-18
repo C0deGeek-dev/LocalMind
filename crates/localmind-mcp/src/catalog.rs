@@ -177,7 +177,8 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "pending_review": { "type": "integer" },
                     "doc_chunks": { "type": "integer" },
                     "doc_vectors": { "type": "integer" },
-                    "schema_version": { "type": "integer" }
+                    "schema_version": { "type": "integer" },
+                    "notes": { "type": "array", "items": { "type": "string" } }
                 }),
                 &[
                     "ready",
@@ -189,6 +190,7 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "doc_chunks",
                     "doc_vectors",
                     "schema_version",
+                    "notes",
                 ],
             )),
             annotations: Some(ToolAnnotations {

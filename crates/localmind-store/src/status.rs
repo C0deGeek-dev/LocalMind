@@ -3,17 +3,18 @@
 //!
 //! [`StatusSnapshot::read`] is deliberately **best-effort and total**: a missing
 //! or invalid `.localmind.toml`, or a store that will not open, yields
-//! `ready = false` with zeroed counts rather than an error — so a caller can
-//! always report *something* structured (the MCP read in particular must never
-//! turn a not-ready project into a tool error).
+//! `ready = false` (with the reason captured in `notes`) rather than an error —
+//! so a caller can always report *something* structured (the MCP read in
+//! particular must never turn a not-ready project into a tool error).
 
 use std::path::Path;
 
 /// A point-in-time readiness snapshot of one project's LocalMind store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSnapshot {
-    /// Config discovered, store opened, and review queue opened — the same
-    /// readiness the CLI `status` command reports.
+    /// Config discovered, store opened, review queue read, and all counts read —
+    /// the same readiness the CLI `status` command reports. Any failure flips
+    /// this false and records a line in [`notes`](Self::notes).
     pub ready: bool,
     /// `[learning].enabled` in the resolved config.
     pub learning_enabled: bool,
@@ -31,6 +32,18 @@ pub struct StatusSnapshot {
     pub doc_vectors: i64,
     /// The database schema version this build understands.
     pub schema_version: i32,
+    /// One line per component that failed to read (empty when healthy). Preserves
+    /// the diagnostic detail a bare `ready = false` would otherwise discard.
+    pub notes: Vec<String>,
+}
+
+/// Whether a persisted scope label names the machine-wide global store. Memory
+/// rows persist their scope as the `Debug` label (`"GlobalUser"` / `"Project"`,
+/// see `memory_persistence`), so this matches that exact label — a lowercase
+/// substring check silently misclassifies every global row as project.
+#[must_use]
+fn is_global_scope(scope: &str) -> bool {
+    scope == "GlobalUser"
 }
 
 impl StatusSnapshot {
@@ -47,6 +60,7 @@ impl StatusSnapshot {
             doc_chunks: 0,
             doc_vectors: 0,
             schema_version: crate::schema::DB_SCHEMA_VERSION,
+            notes: Vec::new(),
         };
 
         match crate::ProjectConfig::discover(project) {
@@ -54,28 +68,48 @@ impl StatusSnapshot {
                 snapshot.learning_enabled = config.config.learning.enabled;
                 snapshot.inference_configured = config.config.inference.is_some();
             }
-            Err(_) => snapshot.ready = false,
+            Err(error) => {
+                snapshot.ready = false;
+                snapshot.notes.push(format!("config: {error}"));
+            }
         }
 
         match crate::MemoryPersistence::open_project(project) {
             Ok(store) => {
-                if let Ok(memories) = store.list_memory() {
-                    for record in &memories {
-                        // Scope is serialized snake_case (`global_user`); match on
-                        // the stem so the split survives a serialization tweak.
-                        if record.scope.contains("global") {
-                            snapshot.accepted_global += 1;
-                        } else {
-                            snapshot.accepted_project += 1;
+                match store.list_memory() {
+                    Ok(memories) => {
+                        for record in &memories {
+                            if is_global_scope(&record.scope) {
+                                snapshot.accepted_global += 1;
+                            } else {
+                                snapshot.accepted_project += 1;
+                            }
                         }
                     }
-                } else {
-                    snapshot.ready = false;
+                    Err(error) => {
+                        snapshot.ready = false;
+                        snapshot.notes.push(format!("memory list: {error}"));
+                    }
                 }
-                snapshot.doc_chunks = store.doc_chunk_count().unwrap_or(0);
-                snapshot.doc_vectors = store.doc_vector_count().unwrap_or(0);
+                match store.doc_chunk_count() {
+                    Ok(count) => snapshot.doc_chunks = count,
+                    Err(error) => {
+                        snapshot.ready = false;
+                        snapshot.notes.push(format!("doc chunks: {error}"));
+                    }
+                }
+                match store.doc_vector_count() {
+                    Ok(count) => snapshot.doc_vectors = count,
+                    Err(error) => {
+                        snapshot.ready = false;
+                        snapshot.notes.push(format!("doc vectors: {error}"));
+                    }
+                }
             }
-            Err(_) => snapshot.ready = false,
+            Err(error) => {
+                snapshot.ready = false;
+                snapshot.notes.push(format!("store: {error}"));
+            }
         }
 
         match crate::ReviewQueue::open_project(project) {
@@ -86,9 +120,15 @@ impl StatusSnapshot {
                         .filter(|item| item.state == localmind_core::ReviewState::Pending)
                         .count();
                 }
-                Err(_) => snapshot.ready = false,
+                Err(error) => {
+                    snapshot.ready = false;
+                    snapshot.notes.push(format!("review queue: {error}"));
+                }
             },
-            Err(_) => snapshot.ready = false,
+            Err(error) => {
+                snapshot.ready = false;
+                snapshot.notes.push(format!("review queue: {error}"));
+            }
         }
 
         snapshot
@@ -110,6 +150,7 @@ mod tests {
         assert_eq!(snapshot.accepted_global, 0);
         assert_eq!(snapshot.pending_review, 0);
         assert_eq!(snapshot.schema_version, crate::schema::DB_SCHEMA_VERSION);
+        assert!(!snapshot.notes.is_empty(), "a failure records a note");
     }
 
     #[test]
@@ -122,8 +163,20 @@ mod tests {
         .unwrap();
         let snapshot = StatusSnapshot::read(dir.path());
         assert!(snapshot.ready);
+        assert!(snapshot.notes.is_empty());
         assert!(snapshot.learning_enabled);
         assert!(!snapshot.inference_configured);
         assert_eq!(snapshot.pending_review, 0);
+    }
+
+    #[test]
+    fn the_persisted_scope_labels_classify_correctly() {
+        // Rows persist the Debug label; the classifier must match it exactly.
+        assert!(is_global_scope("GlobalUser"));
+        assert!(!is_global_scope("Project"));
+        assert!(
+            !is_global_scope("global_user"),
+            "lowercase is not the label"
+        );
     }
 }

@@ -10,7 +10,7 @@ use localmind_core::{
     MemoryEntryId, MemoryScope, MemoryStatus, ReviewAction, ReviewDecision, ReviewItemId,
     SessionId, SuggestedAction,
 };
-use localmind_store::{MemoryPersistence, MemoryPersistenceError, ReviewQueue};
+use localmind_store::{MemoryPersistence, MemoryPersistenceError, ReviewQueue, StatusSnapshot};
 
 /// A project that opts in to global scope, with the machine-wide store rooted at
 /// `global_root` (a single-quoted TOML literal so a Windows path needs no
@@ -219,4 +219,27 @@ fn a_promoted_global_category_lesson_is_routed_to_the_global_store() {
             .any(|h| h.memory_id.as_str() == "t1"),
         "the promoted global lesson must be in the machine-wide store"
     );
+}
+
+#[test]
+fn status_snapshot_splits_accepted_project_and_global_counts() {
+    // Regression: accepted counts must split by the persisted scope label. A
+    // lowercase substring check misclassified every global row as project.
+    let global = tempfile::tempdir().unwrap();
+    let global_root = global.path().join("memory");
+    let project = project_with_global(&global_root);
+    let persistence = MemoryPersistence::open_project(project.path()).unwrap();
+    persistence
+        .persist_memory_entry(&entry("p1", "a project note", MemoryScope::Project))
+        .unwrap();
+    persistence
+        .persist_memory_entry(&entry("g1", "a global note", MemoryScope::GlobalUser))
+        .unwrap();
+    drop(persistence);
+
+    let snapshot = StatusSnapshot::read(project.path());
+    assert_eq!(snapshot.accepted_project, 1, "one project row");
+    assert_eq!(snapshot.accepted_global, 1, "one global row");
+    assert!(snapshot.ready);
+    assert!(snapshot.notes.is_empty());
 }

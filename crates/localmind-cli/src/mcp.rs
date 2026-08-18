@@ -329,6 +329,7 @@ fn memory_status(project: &Path) -> Result<ToolOutput, ToolFailure> {
         "doc_chunks": snapshot.doc_chunks,
         "doc_vectors": snapshot.doc_vectors,
         "schema_version": snapshot.schema_version,
+        "notes": snapshot.notes,
     }))
 }
 
