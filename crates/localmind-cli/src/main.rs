@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use localmind_core::SkillDraftId;
 use localmind_core::{
@@ -69,38 +69,45 @@ enum Command {
     /// auto-accepted). The way an agent records knowledge it learned without a
     /// full transcript closeout.
     Propose {
-        /// The one-line reusable lesson.
-        title: String,
+        /// The one-line reusable lesson. Required unless `--json-file` is used.
+        #[arg(required_unless_present = "json_file", conflicts_with = "json_file")]
+        title: Option<String>,
+        /// Read the whole proposal from a JSON file (`-` for stdin) instead of
+        /// flags: an object with title, body, category, scope, source, tags,
+        /// related_files, evidence, idempotency_key, confidence. Lets a hook pass
+        /// a long body without shell-quoting. Exclusive with the flags below.
+        #[arg(long)]
+        json_file: Option<PathBuf>,
         /// Project root containing .localmind.toml.
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// The rationale / how-to-apply detail.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json_file")]
         body: Option<String>,
         /// A LessonCategory name (e.g. CodePattern, DebuggingRecipe,
         /// SecurityWarning); unknown names are kept as Other.
-        #[arg(long, default_value = "Process")]
+        #[arg(long, default_value = "Process", conflicts_with = "json_file")]
         category: String,
         /// Which store the accepted memory would live in.
-        #[arg(long, value_enum, default_value_t = ProposeScopeArg::Project)]
+        #[arg(long, value_enum, default_value_t = ProposeScopeArg::Project, conflicts_with = "json_file")]
         scope: ProposeScopeArg,
         /// The proposing agent (recorded on the candidate).
-        #[arg(long, default_value = "cli")]
+        #[arg(long, default_value = "cli", conflicts_with = "json_file")]
         source: String,
         /// A related file (repeatable) — a retrieval cue.
-        #[arg(long = "file")]
+        #[arg(long = "file", conflicts_with = "json_file")]
         files: Vec<String>,
         /// A free tag (repeatable) — a retrieval cue.
-        #[arg(long = "tag")]
+        #[arg(long = "tag", conflicts_with = "json_file")]
         tags: Vec<String>,
         /// A source pointer or bounded excerpt shown only during review.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json_file")]
         evidence: Option<String>,
         /// Stable retry key; reusing it with different content is refused.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json_file")]
         idempotency_key: Option<String>,
         /// Author confidence in [0, 1].
-        #[arg(long, default_value_t = 0.7)]
+        #[arg(long, default_value_t = 0.7, conflicts_with = "json_file")]
         confidence: f32,
     },
     /// Promote accepted review items into Markdown memory.
@@ -235,7 +242,9 @@ enum IngestCommand {
 enum McpCommand {
     /// Serve the MCP protocol over stdin/stdout (JSON-RPC 2.0).
     Serve {
-        /// Project root containing .localmind.toml.
+        /// Project root. Defaults to the launch directory and walks up to the
+        /// nearest `.localmind.toml`, so the server binds to the workspace it is
+        /// launched in rather than a fixed path.
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -385,6 +394,95 @@ enum ScopeArg {
 enum ProposeScopeArg {
     Project,
     Global,
+}
+
+/// Read `propose --json-file` input: a filesystem path, or `-` for stdin.
+fn read_json_source(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("read proposal JSON from stdin")?;
+        Ok(buf)
+    } else {
+        fs::read_to_string(path)
+            .with_context(|| format!("read proposal JSON from {}", path.display()))
+    }
+}
+
+/// Build a `(source, ProposedLesson)` from one `--json-file` object. Field names
+/// and defaults mirror the `propose` flags; unknown keys are rejected so a typo
+/// is a loud error, not a silently dropped field.
+fn proposal_from_json(value: &serde_json::Value) -> Result<(String, ProposedLesson)> {
+    const ALLOWED: &[&str] = &[
+        "title",
+        "body",
+        "category",
+        "scope",
+        "source",
+        "related_files",
+        "tags",
+        "evidence",
+        "idempotency_key",
+        "confidence",
+    ];
+    let object = value
+        .as_object()
+        .context("proposal JSON must be a single object")?;
+    for key in object.keys() {
+        if !ALLOWED.contains(&key.as_str()) {
+            anyhow::bail!(
+                "unknown proposal field {key:?}; allowed: {}",
+                ALLOWED.join(", ")
+            );
+        }
+    }
+    let string_field = |key: &str| -> Result<Option<String>> {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => anyhow::bail!("proposal field {key:?} must be a string"),
+        }
+    };
+    let string_array = |key: &str| -> Result<Vec<String>> {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_string).with_context(|| {
+                        format!("proposal field {key:?} must contain only strings")
+                    })
+                })
+                .collect(),
+            Some(_) => anyhow::bail!("proposal field {key:?} must be an array of strings"),
+        }
+    };
+    let title = string_field("title")?.context("proposal JSON needs a string \"title\"")?;
+    let scope = match object.get("scope").and_then(serde_json::Value::as_str) {
+        None | Some("project") => ProposeScope::Project,
+        Some("global") => ProposeScope::Global,
+        Some(other) => anyhow::bail!("invalid scope {other:?}; expected \"project\" or \"global\""),
+    };
+    let confidence = match object.get("confidence") {
+        None | Some(serde_json::Value::Null) => 0.7,
+        Some(value) => value
+            .as_f64()
+            .context("proposal \"confidence\" must be a number in [0, 1]")?
+            as f32,
+    };
+    let source = string_field("source")?.unwrap_or_else(|| "cli".to_string());
+    let proposal = ProposedLesson {
+        title,
+        body: string_field("body")?,
+        category: string_field("category")?.unwrap_or_else(|| "Process".to_string()),
+        scope,
+        related_files: string_array("related_files")?,
+        tags: string_array("tags")?,
+        evidence: string_field("evidence")?,
+        idempotency_key: string_field("idempotency_key")?,
+        confidence,
+    };
+    Ok((source, proposal))
 }
 
 impl From<ScopeArg> for localmind_store::BundleScope {
@@ -850,6 +948,7 @@ fn main() -> Result<()> {
         },
         Command::Propose {
             title,
+            json_file,
             project,
             body,
             category,
@@ -862,19 +961,28 @@ fn main() -> Result<()> {
             confidence,
         } => {
             let queue = ReviewQueue::open_project(&project)?;
-            let proposal = ProposedLesson {
-                title,
-                body,
-                category,
-                scope: match scope {
-                    ProposeScopeArg::Global => ProposeScope::Global,
-                    ProposeScopeArg::Project => ProposeScope::Project,
-                },
-                related_files: files,
-                tags,
-                evidence,
-                idempotency_key,
-                confidence,
+            let (source, proposal) = if let Some(path) = json_file {
+                let raw = read_json_source(&path)?;
+                let value: serde_json::Value = serde_json::from_str(&raw)
+                    .with_context(|| format!("parse proposal JSON from {}", path.display()))?;
+                proposal_from_json(&value)?
+            } else {
+                // clap's `required_unless_present = "json_file"` guarantees a title here.
+                let proposal = ProposedLesson {
+                    title: title.unwrap_or_default(),
+                    body,
+                    category,
+                    scope: match scope {
+                        ProposeScopeArg::Global => ProposeScope::Global,
+                        ProposeScopeArg::Project => ProposeScope::Project,
+                    },
+                    related_files: files,
+                    tags,
+                    evidence,
+                    idempotency_key,
+                    confidence,
+                };
+                (source, proposal)
             };
             let outcome = queue.propose(&source, &proposal)?;
             if outcome.created {
@@ -1087,7 +1195,36 @@ fn main() -> Result<()> {
             IngestCommand::Docs { path, project } => ingest::docs(path, project)?,
         },
         Command::Mcp { command } => match command {
-            McpCommand::Serve { project } => mcp::serve(project)?,
+            McpCommand::Serve { project } => {
+                // Resolve the store the same way `ui`/`review` do: walk up from the
+                // launch directory to the nearest `.localmind.toml`, so a client
+                // that launches the server in a workspace gets *that* workspace's
+                // store instead of whatever `--project` was hard-coded to. Logged
+                // to stderr (stdout is the JSON-RPC channel).
+                let root = match store_root::resolve_store_root(&project) {
+                    store_root::StoreRoot::Found { root, walked_up } => {
+                        eprintln!(
+                            "localmind mcp: serving store at {}{}",
+                            root.display(),
+                            if walked_up {
+                                " (found by walking up from the launch directory)"
+                            } else {
+                                ""
+                            }
+                        );
+                        root
+                    }
+                    store_root::StoreRoot::NotFound { start } => {
+                        eprintln!(
+                            "localmind mcp: no .localmind.toml at or above {} — serving it anyway; \
+                             recall and propose stay empty until it is a project (or pass --project <path>)",
+                            start.display()
+                        );
+                        start
+                    }
+                };
+                mcp::serve(root)?
+            }
         },
         Command::Ui {
             project,
@@ -1333,4 +1470,69 @@ fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Resu
     persistence.record_review_item_audit(&item)?;
     println!("{} -> {:?}", item.id, item.state);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_file_proposal_matches_the_equivalent_flags() {
+        let value = serde_json::json!({
+            "title": "Prefer typed errors over panics",
+            "body": "Return a Result; never unwrap on a library path.",
+            "category": "CodePattern",
+            "scope": "global",
+            "source": "claude-code",
+            "related_files": ["src/lib.rs"],
+            "tags": ["errors", "rust"],
+            "evidence": "issue #123",
+            "idempotency_key": "cc-typed-errors-1",
+            "confidence": 0.9
+        });
+        let (source, proposal) = proposal_from_json(&value).expect("valid JSON proposal");
+        assert_eq!(source, "claude-code");
+        assert_eq!(proposal.title, "Prefer typed errors over panics");
+        assert_eq!(proposal.category, "CodePattern");
+        assert!(matches!(proposal.scope, ProposeScope::Global));
+        assert_eq!(proposal.related_files, vec!["src/lib.rs".to_string()]);
+        assert_eq!(
+            proposal.tags,
+            vec!["errors".to_string(), "rust".to_string()]
+        );
+        assert_eq!(proposal.evidence.as_deref(), Some("issue #123"));
+        assert_eq!(
+            proposal.idempotency_key.as_deref(),
+            Some("cc-typed-errors-1")
+        );
+        assert!((proposal.confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn json_file_proposal_applies_flag_defaults_for_omitted_fields() {
+        let value = serde_json::json!({ "title": "Minimal lesson" });
+        let (source, proposal) = proposal_from_json(&value).expect("minimal JSON proposal");
+        assert_eq!(source, "cli");
+        assert_eq!(proposal.category, "Process");
+        assert!(matches!(proposal.scope, ProposeScope::Project));
+        assert!((proposal.confidence - 0.7).abs() < f32::EPSILON);
+        assert!(proposal.body.is_none());
+        assert!(proposal.tags.is_empty());
+    }
+
+    #[test]
+    fn json_file_proposal_rejects_unknown_fields_and_bad_types() {
+        assert!(proposal_from_json(&serde_json::json!({ "titel": "typo" })).is_err());
+        assert!(
+            proposal_from_json(&serde_json::json!({ "title": "x", "scope": "everywhere" }))
+                .is_err()
+        );
+        assert!(proposal_from_json(&serde_json::json!({ "title": 7 })).is_err());
+        assert!(
+            proposal_from_json(&serde_json::json!({ "title": "x", "tags": "not-an-array" }))
+                .is_err()
+        );
+        assert!(proposal_from_json(&serde_json::json!(["not", "an", "object"])).is_err());
+    }
 }

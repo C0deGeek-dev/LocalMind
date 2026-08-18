@@ -25,6 +25,8 @@ pub const TOOL_MEMORY_SEARCH: &str = "memory_search";
 pub const TOOL_MEMORY_CONTEXT_EXPORT: &str = "memory_context_export";
 /// Wire name of the review-gated lesson proposal tool.
 pub const TOOL_MEMORY_PROPOSE: &str = "memory_propose";
+/// Wire name of the read-only store-readiness tool.
+pub const TOOL_MEMORY_STATUS: &str = "memory_status";
 /// Wire name of the semantic documentation search tool.
 pub const TOOL_DOC_SEARCH: &str = "doc_search";
 
@@ -162,6 +164,37 @@ pub fn catalog() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: TOOL_MEMORY_STATUS,
+            description: "Read-only readiness snapshot of this project's LocalMind store: whether learning is enabled, accepted-memory and pending-review counts, and doc-index counts. No writes, no network.",
+            input_schema: object_schema(json!({}), &[]),
+            output_schema: Some(object_schema(
+                json!({
+                    "ready": { "type": "boolean" },
+                    "learning_enabled": { "type": "boolean" },
+                    "inference_configured": { "type": "boolean" },
+                    "accepted_memory": { "type": "integer" },
+                    "pending_review": { "type": "integer" },
+                    "doc_chunks": { "type": "integer" },
+                    "doc_vectors": { "type": "integer" }
+                }),
+                &[
+                    "ready",
+                    "learning_enabled",
+                    "inference_configured",
+                    "accepted_memory",
+                    "pending_review",
+                    "doc_chunks",
+                    "doc_vectors",
+                ],
+            )),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: true,
+                destructive_hint: false,
+                idempotent_hint: true,
+                open_world_hint: false,
+            }),
+        },
+        ToolSpec {
             name: TOOL_DOC_SEARCH,
             description: "Semantic search over ingested repository documentation. Returns the most relevant doc passages (path, heading, text) by meaning, not keyword.",
             input_schema: object_schema(
@@ -237,16 +270,38 @@ pub fn catalog() -> Vec<ToolSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog, TOOL_MEMORY_PROPOSE};
+    use super::{catalog, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_STATUS};
 
     #[test]
     fn catalog_lists_all_tools_with_schemas() {
         let tools = catalog();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         for tool in &tools {
             assert!(!tool.name.is_empty());
             assert_eq!(tool.input_schema["type"], "object");
         }
+    }
+
+    #[test]
+    fn status_tool_is_read_only_with_a_structured_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(tool) = catalog()
+            .into_iter()
+            .find(|tool| tool.name == TOOL_MEMORY_STATUS)
+        else {
+            return Err("status tool missing from catalog".into());
+        };
+        let wire = serde_json::to_value(tool)?;
+        assert_eq!(wire["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            wire["outputSchema"]["properties"]["pending_review"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            wire["outputSchema"]["properties"]["ready"]["type"],
+            "boolean"
+        );
+        Ok(())
     }
 
     #[test]

@@ -10,7 +10,7 @@ mod skills;
 
 pub use catalog::{
     catalog, ToolAnnotations, ToolSpec, TOOL_DOC_SEARCH, TOOL_MEMORY_CONTEXT_EXPORT,
-    TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH,
+    TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_STATUS,
 };
 pub use graph::{
     handle, tool_names, AnchoredKnowledge, GraphToolError, GraphToolRequest, GraphToolResponse,

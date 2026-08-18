@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use localmind_mcp::{
     catalog, fetch_active_skill, handle, list_active_skills, GraphToolRequest, TOOL_DOC_SEARCH,
-    TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH, TOOL_SKILL_FETCH,
-    TOOL_SKILL_LIST, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE,
-    TOOL_SYMBOL_NEIGHBORHOOD,
+    TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_STATUS,
+    TOOL_SKILL_FETCH, TOOL_SKILL_LIST, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE,
+    TOOL_SYMBOL_KNOWLEDGE, TOOL_SYMBOL_NEIGHBORHOOD,
 };
 use localmind_store::{
     ContextExportTarget, ContextExporter, DocSearchStatus, GraphStore, MemoryPersistence,
-    ProposeScope, ProposedLesson, ReviewQueue,
+    ProjectConfig, ProposeScope, ProposedLesson, ReviewQueue,
 };
 use serde_json::{json, Value};
 
@@ -169,6 +169,7 @@ fn call_tool(
         TOOL_MEMORY_SEARCH => memory_search(project, args).map(ToolOutput::text),
         TOOL_MEMORY_CONTEXT_EXPORT => memory_context_export(project, args).map(ToolOutput::text),
         TOOL_MEMORY_PROPOSE => memory_propose(project, args, state),
+        TOOL_MEMORY_STATUS => memory_status(project),
         TOOL_DOC_SEARCH => doc_search(project, args).map(ToolOutput::text),
         TOOL_SYMBOL_NEIGHBORHOOD => graph_tool(
             project,
@@ -307,6 +308,43 @@ fn memory_propose(
         "changed": outcome.changed,
         "duplicate_of": outcome.duplicate_of,
         "quality_note": outcome.quality_note,
+    }))
+}
+
+/// Read-only readiness snapshot of this server's project store — the same facts
+/// `localmind status` reports, so an agent can check learning is on and the
+/// review backlog before it proposes. No writes, no network.
+fn memory_status(project: &Path) -> Result<ToolOutput, ToolFailure> {
+    // Config is best-effort: an unusable/absent .localmind.toml is a valid
+    // "not ready" state, not a tool error.
+    let (learning_enabled, inference_configured, config_ok) = match ProjectConfig::discover(project)
+    {
+        Ok(config) => (
+            config.config.learning.enabled,
+            config.config.inference.is_some(),
+            true,
+        ),
+        Err(_) => (false, false, false),
+    };
+    let store = MemoryPersistence::open_project(project).map_err(exec)?;
+    let accepted_memory = store.list_memory().map_err(exec)?.len();
+    let doc_chunks = store.doc_chunk_count().map_err(exec)?;
+    let doc_vectors = store.doc_vector_count().map_err(exec)?;
+    let pending_review = ReviewQueue::open_project(project)
+        .map_err(exec)?
+        .list()
+        .map_err(exec)?
+        .iter()
+        .filter(|item| item.state == localmind_core::ReviewState::Pending)
+        .count();
+    ToolOutput::structured(json!({
+        "ready": config_ok,
+        "learning_enabled": learning_enabled,
+        "inference_configured": inference_configured,
+        "accepted_memory": accepted_memory,
+        "pending_review": pending_review,
+        "doc_chunks": doc_chunks,
+        "doc_vectors": doc_vectors,
     }))
 }
 
@@ -602,6 +640,36 @@ mod tests {
             .expect("automatic review pass");
         assert_eq!(report.accepted, 0);
         assert_eq!(report.manual, 1);
+    }
+
+    #[test]
+    fn memory_status_reports_readonly_store_facts_without_consuming_the_cap() {
+        let dir = tempfile::tempdir().expect("project");
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .expect("config");
+        let mut state = McpSessionState::default();
+        // Seed one pending proposal so the pending count is observable.
+        let propose = json!({
+            "name": TOOL_MEMORY_PROPOSE,
+            "arguments": { "title": "seed lesson", "source": "cli" }
+        });
+        dispatch(dir.path(), "tools/call", &propose, json!(1), &mut state);
+        assert_eq!(state.proposals, 1);
+
+        let params = json!({ "name": TOOL_MEMORY_STATUS, "arguments": {} });
+        let response = dispatch(dir.path(), "tools/call", &params, json!(2), &mut state);
+        assert_eq!(response["result"]["isError"], false);
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["ready"], true);
+        assert_eq!(structured["learning_enabled"], true);
+        assert_eq!(structured["pending_review"], 1);
+        assert_eq!(structured["accepted_memory"], 0);
+        assert_eq!(structured["doc_chunks"], 0);
+        // Read-only: a status call must not consume the proposal write cap.
+        assert_eq!(state.proposals, 1);
     }
 
     #[test]
