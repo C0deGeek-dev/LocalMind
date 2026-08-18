@@ -39,6 +39,18 @@ localmind import-lessons ..\LocalHub\plans\localmind\lessons.md `
 Review what landed with `localmind review list`. A large tree can enqueue a lot —
 run the dry-run first and import a focused subset rather than everything at once.
 
+## Keep an agent always feeding LocalMind (and opt out)
+
+A coding agent (Claude Code, Codex) can feed LocalMind automatically at session
+close: a session-end hook imports the transcript, runs `closeout`, and imports
+the session's memory-file deltas (`import-memory`) — all into the **review
+queue**, never auto-accepted. Point the hook at a build that has the write path,
+prefer it over a stale PATH binary, and make it non-blocking.
+
+Opt out for one session by setting `LOCALMIND_AGENT_OFF=1`, or persistently by
+creating `~/.localmind/agent-off` — the hook checks both and skips when either is
+present.
+
 ## Close out a session into candidate lessons
 
 ```powershell
