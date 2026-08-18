@@ -272,11 +272,11 @@ enum IngestCommand {
 enum McpCommand {
     /// Serve the MCP protocol over stdin/stdout (JSON-RPC 2.0).
     Serve {
-        /// Project root. Defaults to the launch directory and walks up to the
-        /// nearest `.localmind.toml`, so the server binds to the workspace it is
-        /// launched in rather than a fixed path.
-        #[arg(long, default_value = ".")]
-        project: PathBuf,
+        /// Project root. When given it is used **exactly**; when omitted the
+        /// server walks up from its launch directory to the nearest
+        /// `.localmind.toml`, so it binds to the workspace it was launched in.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
 }
 
@@ -426,6 +426,39 @@ enum ProposeScopeArg {
     Global,
 }
 
+/// Where a `mcp serve` store root came from, for the startup banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRootSource {
+    /// An explicit `--project` — used exactly, never walked up.
+    Explicit,
+    /// No `--project`; a `.localmind.toml` was found by walking up from cwd.
+    WalkedUp,
+    /// No `--project`; cwd itself is the project root.
+    InPlace,
+    /// No `--project` and no marker at or above cwd; cwd served anyway.
+    NoProject,
+}
+
+/// Resolve the store root a `mcp serve` binds to. An explicit `--project` is
+/// honoured **exactly** (bind where asked, even without a `.localmind.toml`);
+/// when omitted, walk up from `cwd` to the nearest project marker.
+fn resolve_serve_root(project: Option<PathBuf>, cwd: &Path) -> (PathBuf, ServeRootSource) {
+    if let Some(explicit) = project {
+        return (explicit, ServeRootSource::Explicit);
+    }
+    match store_root::resolve_store_root(cwd) {
+        store_root::StoreRoot::Found {
+            root,
+            walked_up: true,
+        } => (root, ServeRootSource::WalkedUp),
+        store_root::StoreRoot::Found {
+            root,
+            walked_up: false,
+        } => (root, ServeRootSource::InPlace),
+        store_root::StoreRoot::NotFound { start } => (start, ServeRootSource::NoProject),
+    }
+}
+
 /// Read `propose --json-file` input: a filesystem path, or `-` for stdin.
 fn read_json_source(path: &Path) -> Result<String> {
     if path == Path::new("-") {
@@ -488,10 +521,16 @@ fn proposal_from_json(value: &serde_json::Value) -> Result<(String, ProposedLess
         }
     };
     let title = string_field("title")?.context("proposal JSON needs a string \"title\"")?;
-    let scope = match object.get("scope").and_then(serde_json::Value::as_str) {
-        None | Some("project") => ProposeScope::Project,
-        Some("global") => ProposeScope::Global,
-        Some(other) => anyhow::bail!("invalid scope {other:?}; expected \"project\" or \"global\""),
+    // Match the JSON type: a non-string scope (e.g. `42`) is a typed error, not a
+    // silent fall-through to the default.
+    let scope = match object.get("scope") {
+        None | Some(serde_json::Value::Null) => ProposeScope::Project,
+        Some(serde_json::Value::String(value)) if value == "project" => ProposeScope::Project,
+        Some(serde_json::Value::String(value)) if value == "global" => ProposeScope::Global,
+        Some(serde_json::Value::String(other)) => {
+            anyhow::bail!("invalid scope {other:?}; expected \"project\" or \"global\"")
+        }
+        Some(_) => anyhow::bail!("proposal field \"scope\" must be a string"),
     };
     let confidence = match object.get("confidence") {
         None | Some(serde_json::Value::Null) => 0.7,
@@ -763,21 +802,22 @@ fn main() -> Result<()> {
         project: PathBuf::from("."),
     }) {
         Command::Status { project } => {
-            // Real readiness for the named project: config, store/DB, review
-            // queue, and inference — not a canned "ready".
-            let mut ready = true;
+            // Aggregation is the shared, best-effort StatusSnapshot (same source
+            // the MCP `memory_status` tool reports, so the two never drift). The
+            // extra config-path / inference-endpoint lines below are presentation
+            // detail, not a second aggregation.
+            let snapshot = localmind_store::StatusSnapshot::read(&project);
             match localmind_store::ProjectConfig::discover(&project) {
                 Ok(pc) => {
-                    let learning = &pc.config.learning;
                     println!(
                         "config:  {} (learning {}, scopes {:?})",
                         pc.config_path.display(),
-                        if learning.enabled {
+                        if snapshot.learning_enabled {
                             "enabled"
                         } else {
                             "disabled"
                         },
-                        learning.allowed_scopes
+                        pc.config.learning.allowed_scopes
                     );
                     match &pc.config.inference {
                         Some(inf) => println!(
@@ -790,70 +830,29 @@ fn main() -> Result<()> {
                     }
                 }
                 Err(error) => {
-                    ready = false;
                     println!("config:  not usable — {error}");
                     println!("         learning is disabled until a valid .localmind.toml exists in this project");
                 }
             }
-            match MemoryPersistence::open_project(&project) {
-                Ok(store) => {
-                    match store.list_memory() {
-                        Ok(memories) => {
-                            println!("store:   open, {} accepted memory item(s)", memories.len());
-                        }
-                        Err(error) => {
-                            ready = false;
-                            println!("store:   open but memory list failed — {error}");
-                        }
-                    }
-                    // Doc-index readiness: chunk and vector counts diverging is
-                    // the "ingested without embeddings" state a bare doc_search
-                    // miss cannot explain.
-                    match (store.doc_chunk_count(), store.doc_vector_count()) {
-                        (Ok(chunks), Ok(vectors)) => {
-                            println!("docs:    {chunks} chunk(s), {vectors} with embeddings");
-                        }
-                        (Err(error), _) | (_, Err(error)) => {
-                            ready = false;
-                            println!("docs:    count failed — {error}");
-                        }
-                    }
-                }
-                Err(error) => {
-                    ready = false;
-                    println!("store:   not open — {error}");
-                }
-            }
-            match ReviewQueue::open_project(&project) {
-                Ok(queue) => match queue.list() {
-                    Ok(items) => {
-                        // Pending means pending: an accepted/rejected/deferred
-                        // item is no longer awaiting review.
-                        let pending = items
-                            .iter()
-                            .filter(|item| item.state == localmind_core::ReviewState::Pending)
-                            .count();
-                        println!("review:  {pending} candidate(s) pending");
-                    }
-                    Err(error) => {
-                        ready = false;
-                        println!("review:  queue read failed — {error}");
-                    }
-                },
-                Err(error) => {
-                    ready = false;
-                    println!("review:  queue not open — {error}");
-                }
-            }
+            println!(
+                "store:   {} project + {} global accepted memory item(s)",
+                snapshot.accepted_project, snapshot.accepted_global
+            );
+            println!(
+                "docs:    {} chunk(s), {} with embeddings",
+                snapshot.doc_chunks, snapshot.doc_vectors
+            );
+            println!("review:  {} candidate(s) pending", snapshot.pending_review);
+            println!("schema:  v{}", snapshot.schema_version);
             println!(
                 "status:  {}",
-                if ready {
+                if snapshot.ready {
                     "ready"
                 } else {
                     "not ready (see above)"
                 }
             );
-            if !ready {
+            if !snapshot.ready {
                 std::process::exit(1);
             }
         }
@@ -1266,33 +1265,26 @@ fn main() -> Result<()> {
         },
         Command::Mcp { command } => match command {
             McpCommand::Serve { project } => {
-                // Resolve the store the same way `ui`/`review` do: walk up from the
-                // launch directory to the nearest `.localmind.toml`, so a client
-                // that launches the server in a workspace gets *that* workspace's
-                // store instead of whatever `--project` was hard-coded to. Logged
-                // to stderr (stdout is the JSON-RPC channel).
-                let root = match store_root::resolve_store_root(&project) {
-                    store_root::StoreRoot::Found { root, walked_up } => {
-                        eprintln!(
-                            "localmind mcp: serving store at {}{}",
-                            root.display(),
-                            if walked_up {
-                                " (found by walking up from the launch directory)"
-                            } else {
-                                ""
-                            }
-                        );
-                        root
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let (root, source) = resolve_serve_root(project, &cwd);
+                // Logged to stderr (stdout is the JSON-RPC channel).
+                match source {
+                    ServeRootSource::Explicit => {
+                        eprintln!("localmind mcp: serving store at {} (--project)", root.display());
                     }
-                    store_root::StoreRoot::NotFound { start } => {
-                        eprintln!(
-                            "localmind mcp: no .localmind.toml at or above {} — serving it anyway; \
-                             recall and propose stay empty until it is a project (or pass --project <path>)",
-                            start.display()
-                        );
-                        start
+                    ServeRootSource::WalkedUp => eprintln!(
+                        "localmind mcp: serving store at {} (found by walking up from the launch directory)",
+                        root.display()
+                    ),
+                    ServeRootSource::InPlace => {
+                        eprintln!("localmind mcp: serving store at {}", root.display());
                     }
-                };
+                    ServeRootSource::NoProject => eprintln!(
+                        "localmind mcp: no .localmind.toml at or above {} — serving it anyway; \
+                         recall and propose stay empty until it is a project (or pass --project <path>)",
+                        root.display()
+                    ),
+                }
                 mcp::serve(root)?
             }
         },
@@ -1598,11 +1590,44 @@ mod tests {
             proposal_from_json(&serde_json::json!({ "title": "x", "scope": "everywhere" }))
                 .is_err()
         );
+        // A non-string scope must be rejected, not silently defaulted to project.
+        assert!(proposal_from_json(&serde_json::json!({ "title": "x", "scope": 42 })).is_err());
+        assert!(proposal_from_json(&serde_json::json!({ "title": "x", "scope": true })).is_err());
         assert!(proposal_from_json(&serde_json::json!({ "title": 7 })).is_err());
         assert!(
             proposal_from_json(&serde_json::json!({ "title": "x", "tags": "not-an-array" }))
                 .is_err()
         );
         assert!(proposal_from_json(&serde_json::json!(["not", "an", "object"])).is_err());
+    }
+
+    #[test]
+    fn serve_root_honours_an_explicit_project_exactly_and_walks_up_otherwise() {
+        // Explicit --project binds exactly, even without a marker — no walk-up.
+        let (root, source) =
+            resolve_serve_root(Some(PathBuf::from("D:/some/where")), Path::new("D:/other"));
+        assert_eq!(root, PathBuf::from("D:/some/where"));
+        assert_eq!(source, ServeRootSource::Explicit);
+
+        // No --project: walk up from cwd to the nearest .localmind.toml.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled=true\n",
+        )
+        .unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let (root, source) = resolve_serve_root(None, &nested);
+        assert_eq!(root, dir.path());
+        assert_eq!(source, ServeRootSource::WalkedUp);
+
+        let (root, source) = resolve_serve_root(None, dir.path());
+        assert_eq!(root, dir.path());
+        assert_eq!(source, ServeRootSource::InPlace);
+        // (The NoProject branch — cwd with no marker at or above it — is not
+        // asserted here: on a machine with a home-level `.localmind.toml` every
+        // temp dir walks up to it, so a truly-marker-less path can't be staged.)
     }
 }

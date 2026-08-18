@@ -18,7 +18,7 @@ use localmind_mcp::{
 };
 use localmind_store::{
     ContextExportTarget, ContextExporter, DocSearchStatus, GraphStore, MemoryPersistence,
-    ProjectConfig, ProposeScope, ProposedLesson, ReviewQueue,
+    ProposeScope, ProposedLesson, ReviewQueue,
 };
 use serde_json::{json, Value};
 
@@ -315,36 +315,20 @@ fn memory_propose(
 /// `localmind status` reports, so an agent can check learning is on and the
 /// review backlog before it proposes. No writes, no network.
 fn memory_status(project: &Path) -> Result<ToolOutput, ToolFailure> {
-    // Config is best-effort: an unusable/absent .localmind.toml is a valid
-    // "not ready" state, not a tool error.
-    let (learning_enabled, inference_configured, config_ok) = match ProjectConfig::discover(project)
-    {
-        Ok(config) => (
-            config.config.learning.enabled,
-            config.config.inference.is_some(),
-            true,
-        ),
-        Err(_) => (false, false, false),
-    };
-    let store = MemoryPersistence::open_project(project).map_err(exec)?;
-    let accepted_memory = store.list_memory().map_err(exec)?.len();
-    let doc_chunks = store.doc_chunk_count().map_err(exec)?;
-    let doc_vectors = store.doc_vector_count().map_err(exec)?;
-    let pending_review = ReviewQueue::open_project(project)
-        .map_err(exec)?
-        .list()
-        .map_err(exec)?
-        .iter()
-        .filter(|item| item.state == localmind_core::ReviewState::Pending)
-        .count();
+    // Best-effort snapshot, shared with the CLI `status` command: a not-ready
+    // project (missing/invalid config, unopenable store) returns a structured
+    // `{ready:false, …}`, never a tool error. Read-only.
+    let snapshot = localmind_store::StatusSnapshot::read(project);
     ToolOutput::structured(json!({
-        "ready": config_ok,
-        "learning_enabled": learning_enabled,
-        "inference_configured": inference_configured,
-        "accepted_memory": accepted_memory,
-        "pending_review": pending_review,
-        "doc_chunks": doc_chunks,
-        "doc_vectors": doc_vectors,
+        "ready": snapshot.ready,
+        "learning_enabled": snapshot.learning_enabled,
+        "inference_configured": snapshot.inference_configured,
+        "accepted_project": snapshot.accepted_project,
+        "accepted_global": snapshot.accepted_global,
+        "pending_review": snapshot.pending_review,
+        "doc_chunks": snapshot.doc_chunks,
+        "doc_vectors": snapshot.doc_vectors,
+        "schema_version": snapshot.schema_version,
     }))
 }
 
@@ -666,10 +650,28 @@ mod tests {
         assert_eq!(structured["ready"], true);
         assert_eq!(structured["learning_enabled"], true);
         assert_eq!(structured["pending_review"], 1);
-        assert_eq!(structured["accepted_memory"], 0);
+        assert_eq!(structured["accepted_project"], 0);
+        assert_eq!(structured["accepted_global"], 0);
         assert_eq!(structured["doc_chunks"], 0);
+        assert!(structured["schema_version"].as_i64().unwrap() >= 11);
         // Read-only: a status call must not consume the proposal write cap.
         assert_eq!(state.proposals, 1);
+    }
+
+    #[test]
+    fn memory_status_of_an_unconfigured_project_is_structured_not_ready_not_an_error() {
+        // A missing/invalid config must return structured {ready:false, …},
+        // never a tool error — the advertised best-effort state.
+        let dir = tempfile::tempdir().expect("project"); // no .localmind.toml
+        let mut state = McpSessionState::default();
+        let params = json!({ "name": TOOL_MEMORY_STATUS, "arguments": {} });
+        let response = dispatch(dir.path(), "tools/call", &params, json!(1), &mut state);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["ready"], false);
+        assert_eq!(structured["learning_enabled"], false);
+        assert_eq!(structured["accepted_project"], 0);
+        assert_eq!(structured["pending_review"], 0);
     }
 
     #[test]

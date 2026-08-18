@@ -172,19 +172,23 @@ pub fn catalog() -> Vec<ToolSpec> {
                     "ready": { "type": "boolean" },
                     "learning_enabled": { "type": "boolean" },
                     "inference_configured": { "type": "boolean" },
-                    "accepted_memory": { "type": "integer" },
+                    "accepted_project": { "type": "integer" },
+                    "accepted_global": { "type": "integer" },
                     "pending_review": { "type": "integer" },
                     "doc_chunks": { "type": "integer" },
-                    "doc_vectors": { "type": "integer" }
+                    "doc_vectors": { "type": "integer" },
+                    "schema_version": { "type": "integer" }
                 }),
                 &[
                     "ready",
                     "learning_enabled",
                     "inference_configured",
-                    "accepted_memory",
+                    "accepted_project",
+                    "accepted_global",
                     "pending_review",
                     "doc_chunks",
                     "doc_vectors",
+                    "schema_version",
                 ],
             )),
             annotations: Some(ToolAnnotations {
