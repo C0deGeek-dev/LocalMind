@@ -4,6 +4,7 @@
 //! and index state. This crate owns that persistence behavior and establishes
 //! the host → engine dependency direction.
 
+mod agent_memory_import;
 mod bundle;
 mod bundle_import;
 mod config;
@@ -36,6 +37,7 @@ mod skill_proposals;
 mod sync_bundle;
 mod sync_engine;
 
+pub use agent_memory_import::{AgentMemoryImportReport, AgentMemoryImporter};
 pub use bundle::{
     BundleError, BundleMetadata, BundleScope, ExportOutcome, MemoryBundle, MemoryBundleExporter,
     SecretScanReport, MEMORY_BUNDLE_FORMAT_VERSION,

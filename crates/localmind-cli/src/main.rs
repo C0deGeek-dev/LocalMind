@@ -52,6 +52,21 @@ enum Command {
         #[arg(long, value_enum, default_value_t = FormatArg::PlainText)]
         format: FormatArg,
     },
+    /// Import a directory of Claude Code memory files (front-matter Markdown)
+    /// into the review queue as pending candidates (never auto-accepted).
+    ImportMemory {
+        /// Directory of memory `.md` files (e.g. a CC project memory dir).
+        dir: PathBuf,
+        /// Project root whose review queue receives the candidates.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Source label recorded on each candidate.
+        #[arg(long, default_value = "claude-code-memory")]
+        source: String,
+        /// Write the candidates. Without it, only a dry-run count is printed.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Summarize an imported session and extract candidate lessons.
     Closeout {
         /// Imported session id to process.
@@ -842,6 +857,26 @@ fn main() -> Result<()> {
             );
             println!("Metadata: {}", report.metadata_path.display());
             println!("Redactions: {}", report.redactions.len());
+        }
+        Command::ImportMemory {
+            dir,
+            project,
+            source,
+            apply,
+        } => {
+            let importer = localmind_store::AgentMemoryImporter::new(project);
+            let report = importer.import(&dir, &source, apply)?;
+            if apply {
+                println!(
+                    "Imported {} memory file(s): {} queued for review, {} duplicate, {} skipped",
+                    report.total, report.added, report.duplicate, report.skipped
+                );
+            } else {
+                println!(
+                    "Dry run: {} memory file(s) would enqueue {} candidate(s) ({} duplicate, {} skipped). Re-run with --apply.",
+                    report.total, report.added, report.duplicate, report.skipped
+                );
+            }
         }
         Command::Closeout {
             session_id,
