@@ -342,6 +342,17 @@ enum ContextCommand {
         #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
         target: ContextTargetArg,
     },
+    /// A queryless "project primer": the most salient accepted memory (category
+    /// prior + bounded usage/recency), no query — a session-start baseline.
+    Primer {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
+        target: ContextTargetArg,
+        /// Max items (clamped to 20).
+        #[arg(long, default_value_t = localmind_store::PRIMER_DEFAULT_LIMIT)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1114,6 +1125,14 @@ fn main() -> Result<()> {
                 let exporter = ContextExporter::open_project(project)?;
                 let export = exporter.export(&query, target.into())?;
                 println!("{}", export.body_markdown);
+            }
+            ContextCommand::Primer {
+                project,
+                target,
+                limit,
+            } => {
+                let primer = localmind_store::build_primer(&project, target.into(), limit)?;
+                print!("{}", primer.body_markdown);
             }
         },
         Command::Memory { command } => match command {

@@ -27,6 +27,8 @@ pub const TOOL_MEMORY_CONTEXT_EXPORT: &str = "memory_context_export";
 pub const TOOL_MEMORY_PROPOSE: &str = "memory_propose";
 /// Wire name of the read-only store-readiness tool.
 pub const TOOL_MEMORY_STATUS: &str = "memory_status";
+/// Wire name of the read-only queryless project-primer tool.
+pub const TOOL_MEMORY_PRIMER: &str = "memory_primer";
 /// Wire name of the semantic documentation search tool.
 pub const TOOL_DOC_SEARCH: &str = "doc_search";
 
@@ -201,6 +203,46 @@ pub fn catalog() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: TOOL_MEMORY_PRIMER,
+            description: "Queryless project primer: the most salient accepted memory for this project (category prior + bounded usage/recency; stale/contradicted excluded, project preferred over global), with no query — a session-start recall baseline. Read-only.",
+            input_schema: object_schema(
+                json!({
+                    "limit": { "type": "integer", "minimum": 1, "description": "Max items (default 12, hard max 20)." },
+                    "target": {
+                        "type": "string",
+                        "enum": ["generic", "claude-code", "open-ai-codex", "localpilot"],
+                        "description": "Formatting target for the text pack. Defaults to claude-code."
+                    }
+                }),
+                &[],
+            ),
+            output_schema: Some(object_schema(
+                json!({
+                    "count": { "type": "integer" },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "memory_id": { "type": "string" },
+                                "scope": { "type": "string" },
+                                "category": { "type": "string" },
+                                "score": { "type": "integer" },
+                                "summary": { "type": "string" }
+                            }
+                        }
+                    }
+                }),
+                &["count", "items"],
+            )),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: true,
+                destructive_hint: false,
+                idempotent_hint: true,
+                open_world_hint: false,
+            }),
+        },
+        ToolSpec {
             name: TOOL_DOC_SEARCH,
             description: "Semantic search over ingested repository documentation. Returns the most relevant doc passages (path, heading, text) by meaning, not keyword.",
             input_schema: object_schema(
@@ -281,7 +323,7 @@ mod tests {
     #[test]
     fn catalog_lists_all_tools_with_schemas() {
         let tools = catalog();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         for tool in &tools {
             assert!(!tool.name.is_empty());
             assert_eq!(tool.input_schema["type"], "object");

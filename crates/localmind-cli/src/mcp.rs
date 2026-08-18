@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use localmind_mcp::{
     catalog, fetch_active_skill, handle, list_active_skills, GraphToolRequest, TOOL_DOC_SEARCH,
-    TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_STATUS,
-    TOOL_SKILL_FETCH, TOOL_SKILL_LIST, TOOL_SYMBOL_CONNECTION, TOOL_SYMBOL_COVERAGE,
-    TOOL_SYMBOL_KNOWLEDGE, TOOL_SYMBOL_NEIGHBORHOOD,
+    TOOL_MEMORY_CONTEXT_EXPORT, TOOL_MEMORY_PRIMER, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_SEARCH,
+    TOOL_MEMORY_STATUS, TOOL_SKILL_FETCH, TOOL_SKILL_LIST, TOOL_SYMBOL_CONNECTION,
+    TOOL_SYMBOL_COVERAGE, TOOL_SYMBOL_KNOWLEDGE, TOOL_SYMBOL_NEIGHBORHOOD,
 };
 use localmind_store::{
-    ContextExportTarget, ContextExporter, DocSearchStatus, GraphStore, MemoryPersistence,
-    ProposeScope, ProposedLesson, ReviewQueue,
+    build_primer, ContextExportTarget, ContextExporter, DocSearchStatus, GraphStore,
+    MemoryPersistence, ProposeScope, ProposedLesson, ReviewQueue, PRIMER_DEFAULT_LIMIT,
 };
 use serde_json::{json, Value};
 
@@ -170,6 +170,7 @@ fn call_tool(
         TOOL_MEMORY_CONTEXT_EXPORT => memory_context_export(project, args).map(ToolOutput::text),
         TOOL_MEMORY_PROPOSE => memory_propose(project, args, state),
         TOOL_MEMORY_STATUS => memory_status(project),
+        TOOL_MEMORY_PRIMER => memory_primer(project, args),
         TOOL_DOC_SEARCH => doc_search(project, args).map(ToolOutput::text),
         TOOL_SYMBOL_NEIGHBORHOOD => graph_tool(
             project,
@@ -331,6 +332,42 @@ fn memory_status(project: &Path) -> Result<ToolOutput, ToolFailure> {
         "schema_version": snapshot.schema_version,
         "notes": snapshot.notes,
     }))
+}
+
+/// Read-only queryless project primer: the most salient accepted memory as a
+/// text pack + structured items. No query, no writes, no audit event.
+fn memory_primer(project: &Path, args: &Value) -> Result<ToolOutput, ToolFailure> {
+    let limit = usize::try_from(u32_arg(args, "limit", PRIMER_DEFAULT_LIMIT as u32))
+        .unwrap_or(PRIMER_DEFAULT_LIMIT);
+    let target = match optional_str_arg(args, "target")?.as_deref() {
+        None | Some("claude-code") => ContextExportTarget::ClaudeCode,
+        Some("generic") => ContextExportTarget::Generic,
+        Some("open-ai-codex") => ContextExportTarget::OpenAiCodex,
+        Some("localpilot") => ContextExportTarget::LocalPilot,
+        Some(other) => {
+            return Err(ToolFailure::Protocol(format!(
+                "invalid target {other:?}; expected generic|claude-code|open-ai-codex|localpilot"
+            )))
+        }
+    };
+    let primer = build_primer(project, target, limit).map_err(exec)?;
+    let items: Vec<Value> = primer
+        .items
+        .iter()
+        .map(|item| {
+            json!({
+                "memory_id": item.memory_id,
+                "scope": item.scope,
+                "category": item.category,
+                "score": item.score,
+                "summary": item.summary,
+            })
+        })
+        .collect();
+    Ok(ToolOutput {
+        text: primer.body_markdown,
+        structured: Some(json!({ "count": primer.items.len(), "items": items })),
+    })
 }
 
 fn doc_search(project: &Path, args: &Value) -> Result<String, ToolFailure> {
@@ -673,6 +710,61 @@ mod tests {
         assert_eq!(structured["learning_enabled"], false);
         assert_eq!(structured["accepted_project"], 0);
         assert_eq!(structured["pending_review"], 0);
+    }
+
+    #[test]
+    fn memory_primer_is_queryless_readonly_structured() {
+        let dir = tempfile::tempdir().expect("project");
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .expect("config");
+        // Promote one memory so the primer has something to rank.
+        let queue = ReviewQueue::open_project(dir.path()).expect("queue");
+        queue
+            .enqueue_candidates(
+                &localmind_core::SessionId::new("s"),
+                &[localmind_core::CandidateLesson::new(
+                    localmind_core::LessonId::new("p1"),
+                    "Prefer typed errors over panics",
+                    localmind_core::LessonCategory::ProjectConvention,
+                    localmind_core::Confidence::new(0.9).expect("conf"),
+                    localmind_core::SuggestedAction::PromoteToMemory,
+                )],
+            )
+            .expect("enqueue");
+        queue
+            .decide(localmind_core::ReviewDecision {
+                item_id: localmind_core::ReviewItemId::new("p1"),
+                action: localmind_core::ReviewAction::Accept,
+                reviewer: "t".to_string(),
+                decided_at: None,
+                note: None,
+                replacement_summary: None,
+                evidence: Vec::new(),
+            })
+            .expect("accept");
+        MemoryPersistence::open_project(dir.path())
+            .expect("store")
+            .promote_review_item(&localmind_core::ReviewItemId::new("p1"))
+            .expect("promote");
+
+        let mut state = McpSessionState::default();
+        let params = json!({ "name": TOOL_MEMORY_PRIMER, "arguments": {} });
+        let response = dispatch(dir.path(), "tools/call", &params, json!(1), &mut state);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert_eq!(response["result"]["structuredContent"]["count"], 1);
+        assert_eq!(
+            response["result"]["structuredContent"]["items"][0]["memory_id"],
+            "p1"
+        );
+        // The text content is the rendered pack, not JSON.
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Project primer")));
+        // Read-only: no proposal cap consumed.
+        assert_eq!(state.proposals, 0);
     }
 
     #[test]

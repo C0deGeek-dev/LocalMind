@@ -5,6 +5,15 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Queryless **project primer**: `localmind context primer` (and the read-only
+  `memory_primer` MCP tool) return the most salient accepted memory for a project
+  with **no query** — a session-start recall baseline. Ranking uses the lesson
+  **category** as the semantic prior (a project decision is never outranked by a
+  popular note), with a bounded usage bucket and recency as small tie-breaks;
+  `stale`/`contradicted` rows are excluded and project memory is preferred over
+  global. Bounded (default 12, hard max 20, ~12 KiB). Read-only — records no
+  audit event.
+
 ## v3.2.0 - 2026-08-18
 
 Coordinated LocalX release.

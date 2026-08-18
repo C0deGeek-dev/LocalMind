@@ -176,6 +176,9 @@ pub struct MemoryRecord {
     /// The single programming language this memory is about, or `None` when it is
     /// language-agnostic / cross-cutting.
     pub language: Option<String>,
+    /// When this memory was accepted/written (RFC-ish text). Used as a recency
+    /// tie-break by the queryless primer.
+    pub created_at: Option<String>,
 }
 
 /// The machine-wide global memory store: a separate SQLite index and Markdown
@@ -539,7 +542,7 @@ impl MemoryPersistence {
             .prepare(
                 r#"
                 SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at,
-                       stale_candidate, contradicted, language
+                       stale_candidate, contradicted, language, created_at
                 FROM memory_index
                 WHERE status = 'active'
                 ORDER BY created_at, memory_id
@@ -560,6 +563,7 @@ impl MemoryPersistence {
                     stale_candidate: row.get::<_, i64>(8)? != 0,
                     contradicted: row.get::<_, i64>(9)? != 0,
                     language: row.get(10)?,
+                    created_at: row.get(11)?,
                 })
             })
             .map_err(MemoryPersistenceError::Sqlite)?;

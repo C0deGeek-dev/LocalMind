@@ -252,8 +252,9 @@ MCP-capable agent can query LocalMind directly:
 localmind mcp serve --project .
 ```
 
-Eleven tools: `memory_search`, `memory_context_export`, `doc_search`,
-`memory_status` (a read-only store-readiness snapshot), the four
+Twelve tools: `memory_search`, `memory_context_export`, `doc_search`,
+`memory_status` (a read-only store-readiness snapshot), `memory_primer` (a
+read-only queryless project primer of the most salient accepted memory), the four
 `memory_symbol_*` code-graph tools, skill list/fetch, and `memory_propose`. The
 server binds to the project it is launched in — `mcp serve` walks up from the
 launch directory to the nearest `.localmind.toml`, so no fixed `--project` is

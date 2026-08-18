@@ -102,6 +102,21 @@ doc-index counts). `localmind mcp serve` binds to the workspace it is launched
 in — it walks up to the nearest `.localmind.toml` — so no fixed `--project` is
 needed in the client config.
 
+## Prime a session with no query
+
+When a session starts and there is no task query yet, get a queryless "project
+primer" — the most salient accepted memory, ranked by lesson category (a project
+convention/decision outranks a popular note), project memory preferred over
+global, stale/contradicted excluded:
+
+```powershell
+localmind context primer --project . --target claude-code --limit 12
+```
+
+It is read-only (no audit event) and bounded. The `memory_primer` MCP tool
+returns the same as structured items plus the text pack. For a task-specific
+pull, use `context export "<query>"` / the `memory_search` tool instead.
+
 ## Export agent context and draft skills
 
 ```powershell

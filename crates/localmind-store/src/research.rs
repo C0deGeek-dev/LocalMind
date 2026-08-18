@@ -458,6 +458,7 @@ mod tests {
             stale_candidate: false,
             contradicted: false,
             language: None,
+            created_at: None,
         }];
         let all = select_memories(&persistence, small, Some("retrieval")).unwrap();
         assert_eq!(all.len(), 1);

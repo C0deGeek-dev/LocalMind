@@ -23,6 +23,7 @@ mod okf;
 mod okf_export;
 mod okf_import;
 mod paths;
+mod primer;
 mod project_identity;
 mod quality;
 mod redaction;
@@ -83,6 +84,9 @@ pub use okf::{OkfFormat, OkfParseError, OKF_VERSION};
 pub use okf_export::{OkfExportError, OkfExportReport, OkfExporter};
 pub use okf_import::{OkfImportError, OkfImportReport, OkfImporter};
 pub use paths::{MemoryPathError, MemoryPathResolver};
+pub use primer::{
+    build_primer, Primer, PrimerItem, PRIMER_CHAR_BUDGET, PRIMER_DEFAULT_LIMIT, PRIMER_MAX_LIMIT,
+};
 pub use project_identity::{ProjectIdentity, ProjectIdentitySource};
 pub use quality::{classify_quality, Quality};
 pub use redaction::{Redaction, RedactionReport, Redactor};

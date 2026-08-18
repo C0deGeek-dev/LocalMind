@@ -22,7 +22,7 @@ impl ContextExportTarget {
     }
 
     #[must_use]
-    fn heading(self) -> &'static str {
+    pub fn heading(self) -> &'static str {
         match self {
             Self::Generic => "Generic agent context",
             Self::ClaudeCode => "Claude Code context",
