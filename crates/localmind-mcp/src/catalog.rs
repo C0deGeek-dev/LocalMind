@@ -9,9 +9,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use localmind_store::{
-    PROPOSAL_BODY_MAX_CHARS, PROPOSAL_CATEGORY_MAX_CHARS, PROPOSAL_EVIDENCE_MAX_CHARS,
-    PROPOSAL_KEY_MAX_CHARS, PROPOSAL_MAX_RELATED_FILES, PROPOSAL_MAX_TAGS,
-    PROPOSAL_RELATED_FILE_MAX_CHARS, PROPOSAL_TAG_MAX_CHARS, PROPOSAL_TITLE_MAX_CHARS,
+    PRIMER_MAX_LIMIT, PROPOSAL_BODY_MAX_CHARS, PROPOSAL_CATEGORY_MAX_CHARS,
+    PROPOSAL_EVIDENCE_MAX_CHARS, PROPOSAL_KEY_MAX_CHARS, PROPOSAL_MAX_RELATED_FILES,
+    PROPOSAL_MAX_TAGS, PROPOSAL_RELATED_FILE_MAX_CHARS, PROPOSAL_TAG_MAX_CHARS,
+    PROPOSAL_TITLE_MAX_CHARS,
 };
 
 use crate::graph::{
@@ -207,7 +208,7 @@ pub fn catalog() -> Vec<ToolSpec> {
             description: "Queryless project primer: the most salient accepted memory for this project (category prior + bounded usage/recency; stale/contradicted excluded, project preferred over global), with no query — a session-start recall baseline. Read-only.",
             input_schema: object_schema(
                 json!({
-                    "limit": { "type": "integer", "minimum": 1, "description": "Max items (default 12, hard max 20)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": PRIMER_MAX_LIMIT, "description": "Max items (default 12; hard-capped at this maximum)." },
                     "target": {
                         "type": "string",
                         "enum": ["generic", "claude-code", "open-ai-codex", "localpilot"],
@@ -318,7 +319,9 @@ pub fn catalog() -> Vec<ToolSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_STATUS};
+    use super::{
+        catalog, PRIMER_MAX_LIMIT, TOOL_MEMORY_PRIMER, TOOL_MEMORY_PROPOSE, TOOL_MEMORY_STATUS,
+    };
 
     #[test]
     fn catalog_lists_all_tools_with_schemas() {
@@ -348,6 +351,28 @@ mod tests {
         assert_eq!(
             wire["outputSchema"]["properties"]["ready"]["type"],
             "boolean"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn primer_tool_is_read_only_and_bounds_its_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(tool) = catalog()
+            .into_iter()
+            .find(|tool| tool.name == TOOL_MEMORY_PRIMER)
+        else {
+            return Err("primer tool missing from catalog".into());
+        };
+        let wire = serde_json::to_value(tool)?;
+        assert_eq!(wire["annotations"]["readOnlyHint"], true);
+        // The advertised hard max is a real schema bound, not just prose.
+        assert_eq!(
+            wire["inputSchema"]["properties"]["limit"]["maximum"],
+            serde_json::json!(PRIMER_MAX_LIMIT)
+        );
+        assert_eq!(
+            wire["outputSchema"]["properties"]["count"]["type"],
+            "integer"
         );
         Ok(())
     }
