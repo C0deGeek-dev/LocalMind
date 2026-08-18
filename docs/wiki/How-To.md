@@ -19,6 +19,26 @@ under `.localmind/sessions/<id>/` with a **redacted** transcript and metadata â€
 likely API keys, tokens, private keys, and configured sensitive paths are
 stripped before anything is stored.
 
+## Import existing knowledge (memory files and lessons)
+
+Bring knowledge that already lives outside LocalMind into the review queue. Both
+importers enqueue **pending** candidates only (never auto-accepted), redact every
+field first, dedup against the queue (so re-running is idempotent), and label each
+candidate with a `--source`. Omit `--apply` for a dry-run count.
+
+```powershell
+# A directory of Claude Code memory files (front-matter Markdown):
+localmind import-memory "$env:USERPROFILE\.claude\projects\<proj>\memory" `
+  --project . --source claude-code-memory --apply
+
+# lessons.md bullet lists (a file, or a tree scanned for lessons.md):
+localmind import-lessons ..\LocalHub\plans\localmind\lessons.md `
+  --project . --source localhub-lessons --apply
+```
+
+Review what landed with `localmind review list`. A large tree can enqueue a lot â€”
+run the dry-run first and import a focused subset rather than everything at once.
+
 ## Close out a session into candidate lessons
 
 ```powershell

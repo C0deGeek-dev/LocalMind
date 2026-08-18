@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- Import existing agent knowledge into the review queue: `localmind import-memory
+  <dir>` reads a directory of Claude Code memory files (front-matter Markdown),
+  and `localmind import-lessons <path>` reads `lessons.md` bullet lists (a file
+  or a directory tree). Both enqueue **pending** candidates only (never
+  auto-accepted, D-LM-0016), redact every field before storing it, dedup against
+  the pending queue so re-running is idempotent, and label each candidate with a
+  `source`. A dry run (the default) reports what an apply would enqueue.
+
 - Write-path hardening: `localmind propose --json-file <path>` (`-` for stdin)
   reads a whole proposal as one JSON object instead of many flags (handy for a
   hook passing a long body); a read-only `memory_status` MCP tool reports the
