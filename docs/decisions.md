@@ -44,8 +44,7 @@ destination; `title` is the reusable one-line lesson (the summary), `body` the
 rationale, and `evidence` is reviewer-only context that is never promoted as
 memory text. Review list/inspect surfaces show the recorded source.
 
-This is the keystone of the agent knowledge-loop
-(`LocalHub/plans/localmind/LocalMindAgentKnowledgeLoop`): it is the write path
+This is the keystone of the agent knowledge-loop: it is the write path
 that lets cloud agents grow the local store, so local models inherit their
 knowledge — while the review gate keeps David the sole acceptor.
 
