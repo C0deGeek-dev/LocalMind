@@ -1272,10 +1272,12 @@ logged, or `Debug`-printed (pinned by a test).
 
 **Security review (recorded).** Crypto dependency: standard, audited, pinned,
 pure-Rust; `cargo deny`/`machete` clean; the only `cargo audit` finding is the
-*pre-existing* `time 0.3.37` RUSTSEC-2026-0009, already documented-ignored in the
-workspace `deny.toml` — its fix (time ≥ 0.3.47) needs edition 2024 / Rust 1.88,
-above MSRV 1.82, and its DoS vector is RFC-2822 parsing, which LocalMind never
-does (timestamps are RFC-3339, including in imported bundles). Threat model: a
+*pre-existing* `time 0.3.37` RUSTSEC-2026-0009, already documented-ignored in
+both `.cargo/audit.toml` (for `cargo audit`) and `deny.toml`'s
+`[advisories] ignore` (for `cargo deny check`) — its fix (time ≥ 0.3.47) needs
+edition 2024 / Rust 1.88, above MSRV 1.82, and its DoS vector is RFC-2822
+parsing, which LocalMind never does (timestamps are
+RFC-3339, including in imported bundles). Threat model: a
 poisoned/forged/oversized/schema-invalid pack cannot reach active memory —
 verification is fail-closed and content is review-gated even when `Trusted`.
 Residual: redaction-on-export is best-effort (documented); a human tech-lead
