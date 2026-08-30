@@ -1,0 +1,28 @@
+[package]
+name = "localmind-cli"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "localmind"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+localmind-codegraph = { path = "../localmind-codegraph" }
+localmind-core = { path = "../localmind-core" }
+localmind-inference = { path = "../localmind-inference" }
+localmind-mcp = { path = "../localmind-mcp" }
+localmind-store = { path = "../localmind-store" }
+serde_json = { workspace = true }
+tiny_http = "=0.12.0"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }

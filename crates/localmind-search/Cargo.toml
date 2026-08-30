@@ -1,0 +1,21 @@
+[package]
+name = "localmind-search"
+version = "5.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+localmind-core = { path = "../localmind-core" }
+localmind-store = { path = "../localmind-store" }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+localmind-codegraph = { path = "../localmind-codegraph" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

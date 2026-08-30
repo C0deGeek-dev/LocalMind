@@ -1,0 +1,2106 @@
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
+use localmind_core::SkillDraftId;
+use localmind_core::{
+    MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SessionId, SessionSource,
+    SuggestedAction,
+};
+use localmind_store::{
+    sign_bundle, BundleImporter, BundleScope, CloseoutProcessor, ContextExportTarget,
+    ContextExporter, ImportTrust, KeyStore, MemoryBundleExporter, MemoryPersistence, OkfExporter,
+    OkfImporter, ProposeScope, ProposedLesson, ReviewQueue, SignedBundle, SkillDraftStore,
+    TranscriptImportFormat, TranscriptImporter,
+};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+mod embedding_lease;
+mod graph;
+mod ingest;
+mod mcp;
+mod skill_actions;
+mod store_root;
+mod sync;
+mod ui;
+
+#[derive(Debug, Parser)]
+#[command(name = "localmind")]
+#[command(version)]
+#[command(about = "Local-first learning engine for AI development sessions.")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Print the current engine readiness status.
+    Status {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Import a transcript into an opted-in project.
+    Import {
+        /// Transcript file to import.
+        input: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Source agent or transcript style.
+        #[arg(long, value_enum, default_value_t = SourceArg::Generic)]
+        source: SourceArg,
+        /// Input transcript format.
+        #[arg(long, value_enum, default_value_t = FormatArg::PlainText)]
+        format: FormatArg,
+    },
+    /// Import a directory of Claude Code memory files (front-matter Markdown)
+    /// into the review queue as pending candidates (never auto-accepted).
+    ImportMemory {
+        /// Directory of memory `.md` files (e.g. a CC project memory dir).
+        dir: PathBuf,
+        /// Project root whose review queue receives the candidates.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Source label recorded on each candidate.
+        #[arg(long, default_value = "claude-code-memory")]
+        source: String,
+        /// Write the candidates. Without it, only a dry-run count is printed.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Import `lessons.md` bullet lists (e.g. LocalHub `plans/**/lessons.md`)
+    /// into the review queue as pending candidates (never auto-accepted).
+    ImportLessons {
+        /// A `lessons.md` file, or a directory tree to scan for them.
+        path: PathBuf,
+        /// Project root whose review queue receives the candidates.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Source label recorded on each candidate.
+        #[arg(long, default_value = "localhub-lessons")]
+        source: String,
+        /// Write the candidates. Without it, only a dry-run count is printed.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Summarize an imported session and extract candidate lessons.
+    Closeout {
+        /// Imported session id to process.
+        session_id: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Review extracted candidate lessons before promotion.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+    /// Propose a distilled lesson directly into the review queue (never
+    /// auto-accepted). The way an agent records knowledge it learned without a
+    /// full transcript closeout.
+    Propose {
+        /// The one-line reusable lesson. Required unless `--json-file` is used.
+        #[arg(required_unless_present = "json_file", conflicts_with = "json_file")]
+        title: Option<String>,
+        /// Read the whole proposal from a JSON file (`-` for stdin) instead of
+        /// flags: an object with title, body, category, scope, source, tags,
+        /// related_files, evidence, idempotency_key, confidence. Lets a hook pass
+        /// a long body without shell-quoting. Exclusive with the flags below.
+        #[arg(long)]
+        json_file: Option<PathBuf>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// The rationale / how-to-apply detail.
+        #[arg(long, conflicts_with = "json_file")]
+        body: Option<String>,
+        /// A LessonCategory name (e.g. CodePattern, DebuggingRecipe,
+        /// SecurityWarning); unknown names are kept as Other.
+        #[arg(long, default_value = "Process", conflicts_with = "json_file")]
+        category: String,
+        /// Which store the accepted memory would live in.
+        #[arg(long, value_enum, default_value_t = ProposeScopeArg::Project, conflicts_with = "json_file")]
+        scope: ProposeScopeArg,
+        /// The proposing agent (recorded on the candidate).
+        #[arg(long, default_value = "cli", conflicts_with = "json_file")]
+        source: String,
+        /// A related file (repeatable) — a retrieval cue.
+        #[arg(long = "file", conflicts_with = "json_file")]
+        files: Vec<String>,
+        /// A free tag (repeatable) — a retrieval cue.
+        #[arg(long = "tag", conflicts_with = "json_file")]
+        tags: Vec<String>,
+        /// A source pointer or bounded excerpt shown only during review.
+        #[arg(long, conflicts_with = "json_file")]
+        evidence: Option<String>,
+        /// Stable retry key; reusing it with different content is refused.
+        #[arg(long, conflicts_with = "json_file")]
+        idempotency_key: Option<String>,
+        /// Author confidence in [0, 1].
+        #[arg(long, default_value_t = 0.7, conflicts_with = "json_file")]
+        confidence: f32,
+    },
+    /// Promote accepted review items into Markdown memory.
+    Promote {
+        item_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Apply configured non-manual review mode to pending items.
+    ReviewMode {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Search accepted memory.
+    Search {
+        query: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Print audit records.
+    Audit {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Export accepted memory and suggested skills as agent-ready context.
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
+    /// Portable signed memory bundles: export accepted memory, import a verified pack.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Interoperate with Google's Open Knowledge Format (OKF): import a bundle as
+    /// review candidates, export accepted memory as a conformant OKF bundle.
+    Okf {
+        #[command(subcommand)]
+        command: OkfCommand,
+    },
+    /// Cross-device sync: enroll this machine's other devices and manage them.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+    /// Generate and inspect disabled skill suggestions.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
+    /// Run batch distillation or research passes.
+    Insights {
+        #[command(subcommand)]
+        command: InsightCommand,
+    },
+    /// Build the code graph over a repository tree (structure ingest).
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommand,
+    },
+    /// Ingest documentation (prose) into the semantic doc index.
+    Ingest {
+        #[command(subcommand)]
+        command: IngestCommand,
+    },
+    /// Report what a session-retention bound would remove. Never deletes.
+    Sessions {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Keep only the N most recently modified sessions.
+        #[arg(long)]
+        keep_newest: Option<usize>,
+        /// Keep only sessions modified within the last N days.
+        #[arg(long)]
+        within_days: Option<u64>,
+        /// Keep newest-first up to this many megabytes.
+        #[arg(long)]
+        total_mb: Option<u64>,
+    },
+    /// Re-embed rows whose vector is missing or out of date.
+    Backfill {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Report what would be re-embedded and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also delete vectors whose memory row is no longer active.
+        #[arg(long)]
+        prune_stale: bool,
+    },
+    /// Serve LocalMind query tools to an MCP client over stdio.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+    /// Serve the local review/management web UI (localhost only).
+    Ui {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Port to bind on 127.0.0.1.
+        #[arg(long, default_value_t = 8091)]
+        port: u16,
+        /// Open the UI in the default browser on start.
+        #[arg(long)]
+        open: bool,
+        /// Require this token as a `?token=` query parameter (for LAN safety).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Score memory quality (extraction precision/recall, retrieval recall@k)
+    /// over the built-in golden fixtures.
+    Eval {
+        /// Retrieval cutoff for recall@k.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+        /// Emit the report as JSON instead of a text summary.
+        #[arg(long)]
+        json: bool,
+        /// Also report the lift of the configured-inference extractor over the
+        /// deterministic baseline. Without a configured local model the model
+        /// path falls back to deterministic, so the lift is zero — an honest
+        /// "no measured lift offline" signal that gates default-on extraction.
+        #[arg(long)]
+        with_lift: bool,
+        /// Project root whose [inference] config the --with-lift pass reads.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GraphCommand {
+    /// Walk a tree, parse supported sources, and reindex the code graph.
+    Reindex {
+        /// Repository root to ingest.
+        path: PathBuf,
+        /// Project root containing .localmind.toml (holds the graph store).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IngestCommand {
+    /// Chunk and embed Markdown docs under a path into the semantic doc index.
+    Docs {
+        /// Root directory to ingest Markdown from.
+        path: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Serve the MCP protocol over stdin/stdout (JSON-RPC 2.0).
+    Serve {
+        /// Project root. When given it is used **exactly**; when omitted the
+        /// server walks up from its launch directory to the nearest
+        /// `.localmind.toml`, so it binds to the workspace it was launched in.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    /// List review queue items.
+    List {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Inspect one review queue item.
+    Inspect {
+        item_id: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Accept one review queue item.
+    Accept(ReviewDecisionArgs),
+    /// Reject one review queue item.
+    Reject(ReviewDecisionArgs),
+    /// Defer one review queue item.
+    Defer(ReviewDecisionArgs),
+    /// Merge one item into another review item, using its suggestion by default.
+    Merge {
+        item_id: String,
+        /// Override the target from the candidate's `duplicate_of` suggestion.
+        #[arg(long)]
+        target: Option<String>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Edit one review queue item before accepting it.
+    Edit {
+        item_id: String,
+        replacement: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Accept one item as the replacement for an existing memory, retiring it.
+    Supersede {
+        item_id: String,
+        /// The memory id this candidate replaces (flipped to superseded on promote).
+        target: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContextCommand {
+    /// Export a context pack for a target agent.
+    Export {
+        query: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
+        target: ContextTargetArg,
+    },
+    /// A queryless "project primer": the most salient accepted memory (category
+    /// prior + bounded usage/recency), no query — a session-start baseline.
+    Primer {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, value_enum, default_value_t = ContextTargetArg::Generic)]
+        target: ContextTargetArg,
+        /// Max items (clamped to 20).
+        #[arg(long, default_value_t = localmind_store::PRIMER_DEFAULT_LIMIT)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Export accepted memory to a portable, signed bundle file.
+    Export {
+        /// Destination file for the signed bundle.
+        #[arg(long)]
+        out: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Which scopes to include.
+        #[arg(long, value_enum, default_value_t = ScopeArg::Both)]
+        scope: ScopeArg,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a signed bundle: verify, then (with --apply) enqueue for review.
+    Import {
+        /// Signed bundle file to import.
+        input: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Write the imported entries as review candidates. Without it this is a
+        /// dry run that reports what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OkfCommand {
+    /// Import an OKF bundle directory: parse each concept and (with --apply)
+    /// enqueue it for review. An OKF bundle is unsigned, so every concept is
+    /// flagged untrusted.
+    Import {
+        /// OKF bundle directory to import.
+        input: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Write the parsed concepts as review candidates. Without it this is a
+        /// dry run that reports what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export accepted memory as a conformant OKF bundle directory.
+    Export {
+        /// Destination directory for the OKF bundle.
+        out: PathBuf,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Which scopes to include.
+        #[arg(long, value_enum, default_value_t = ScopeArg::Both)]
+        scope: ScopeArg,
+        /// Emit a JSON report instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ScopeArg {
+    Project,
+    Global,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProposeScopeArg {
+    Project,
+    Global,
+}
+
+/// Where a `mcp serve` store root came from, for the startup banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRootSource {
+    /// An explicit `--project` — used exactly, never walked up.
+    Explicit,
+    /// No `--project`; a `.localmind.toml` was found by walking up from cwd.
+    WalkedUp,
+    /// No `--project`; cwd itself is the project root.
+    InPlace,
+    /// No `--project` and no marker at or above cwd; cwd served anyway.
+    NoProject,
+}
+
+/// Resolve the store root a `mcp serve` binds to. An explicit `--project` is
+/// honoured **exactly** (bind where asked, even without a `.localmind.toml`);
+/// when omitted, walk up from `cwd` to the nearest project marker.
+fn resolve_serve_root(project: Option<PathBuf>, cwd: &Path) -> (PathBuf, ServeRootSource) {
+    if let Some(explicit) = project {
+        return (explicit, ServeRootSource::Explicit);
+    }
+    match store_root::resolve_store_root(cwd) {
+        store_root::StoreRoot::Found {
+            root,
+            walked_up: true,
+        } => (root, ServeRootSource::WalkedUp),
+        store_root::StoreRoot::Found {
+            root,
+            walked_up: false,
+        } => (root, ServeRootSource::InPlace),
+        store_root::StoreRoot::NotFound { start } => (start, ServeRootSource::NoProject),
+    }
+}
+
+/// Read `propose --json-file` input: a filesystem path, or `-` for stdin.
+fn read_json_source(path: &Path) -> Result<String> {
+    if path == Path::new("-") {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("read proposal JSON from stdin")?;
+        Ok(buf)
+    } else {
+        fs::read_to_string(path)
+            .with_context(|| format!("read proposal JSON from {}", path.display()))
+    }
+}
+
+/// Build a `(source, ProposedLesson)` from one `--json-file` object. Field names
+/// and defaults mirror the `propose` flags; unknown keys are rejected so a typo
+/// is a loud error, not a silently dropped field.
+fn proposal_from_json(value: &serde_json::Value) -> Result<(String, ProposedLesson)> {
+    const ALLOWED: &[&str] = &[
+        "title",
+        "body",
+        "category",
+        "scope",
+        "source",
+        "related_files",
+        "tags",
+        "evidence",
+        "idempotency_key",
+        "confidence",
+    ];
+    let object = value
+        .as_object()
+        .context("proposal JSON must be a single object")?;
+    for key in object.keys() {
+        if !ALLOWED.contains(&key.as_str()) {
+            anyhow::bail!(
+                "unknown proposal field {key:?}; allowed: {}",
+                ALLOWED.join(", ")
+            );
+        }
+    }
+    let string_field = |key: &str| -> Result<Option<String>> {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => anyhow::bail!("proposal field {key:?} must be a string"),
+        }
+    };
+    let string_array = |key: &str| -> Result<Vec<String>> {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str().map(str::to_string).with_context(|| {
+                        format!("proposal field {key:?} must contain only strings")
+                    })
+                })
+                .collect(),
+            Some(_) => anyhow::bail!("proposal field {key:?} must be an array of strings"),
+        }
+    };
+    let title = string_field("title")?.context("proposal JSON needs a string \"title\"")?;
+    // Match the JSON type: a non-string scope (e.g. `42`) is a typed error, not a
+    // silent fall-through to the default.
+    let scope = match object.get("scope") {
+        None | Some(serde_json::Value::Null) => ProposeScope::Project,
+        Some(serde_json::Value::String(value)) if value == "project" => ProposeScope::Project,
+        Some(serde_json::Value::String(value)) if value == "global" => ProposeScope::Global,
+        Some(serde_json::Value::String(other)) => {
+            anyhow::bail!("invalid scope {other:?}; expected \"project\" or \"global\"")
+        }
+        Some(_) => anyhow::bail!("proposal field \"scope\" must be a string"),
+    };
+    let confidence = match object.get("confidence") {
+        None | Some(serde_json::Value::Null) => 0.7,
+        Some(value) => value
+            .as_f64()
+            .context("proposal \"confidence\" must be a number in [0, 1]")?
+            as f32,
+    };
+    let source = string_field("source")?.unwrap_or_else(|| "cli".to_string());
+    let proposal = ProposedLesson {
+        title,
+        body: string_field("body")?,
+        category: string_field("category")?.unwrap_or_else(|| "Process".to_string()),
+        scope,
+        related_files: string_array("related_files")?,
+        tags: string_array("tags")?,
+        evidence: string_field("evidence")?,
+        idempotency_key: string_field("idempotency_key")?,
+        confidence,
+    };
+    Ok((source, proposal))
+}
+
+impl From<ScopeArg> for localmind_store::BundleScope {
+    fn from(value: ScopeArg) -> Self {
+        match value {
+            ScopeArg::Project => Self::Project,
+            ScopeArg::Global => Self::Global,
+            ScopeArg::Both => Self::Both,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Print this machine's shareable device card (public keys + fingerprint).
+    DeviceCard {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Label for this device; defaults to `[sync] device_label` or the hostname.
+        #[arg(long)]
+        label: Option<String>,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enroll a peer device from its card, confirming the out-of-band fingerprint.
+    Enroll {
+        /// Path to the peer's device card JSON (`-` or omitted reads stdin).
+        #[arg(long)]
+        card: Option<PathBuf>,
+        /// The fingerprint read off the other machine; enrollment fails if it
+        /// does not match the card.
+        #[arg(long)]
+        confirm_fingerprint: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List this machine's identity and its enrolled peer devices.
+    Devices {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke an enrolled device by its fingerprint or label.
+    Revoke {
+        /// The device's fingerprint or label.
+        device: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export this device's memory and import peers' via the sync folder.
+    Run {
+        /// Sync folder; defaults to `[sync] folder` in .localmind.toml.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the sync folder, enrolled peers, cursors, and pending review count.
+    Status {
+        /// Sync folder; defaults to `[sync] folder` in .localmind.toml.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Generate disabled skill drafts from accepted review items.
+    Generate {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// List generated skill drafts.
+    List {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Inspect one generated skill draft.
+    Inspect {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Export a generated SKILL.md draft to stdout or a path.
+    Export {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Activate a reviewed skill draft for host consumption.
+    Activate {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// List active host-consumable skills.
+    Active {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Retire an active skill without deleting its provenance.
+    Retire {
+        draft_id: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, default_value = "retired by user")]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InsightCommand {
+    /// Distill accepted memories into higher-level review candidates.
+    Distill {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Topic-scoped accepted-memory distillation: gaps, contradictions, and
+    /// recurring patterns in what this store already knows about the topic.
+    /// Only memories relevant to the topic enter the prompt, under a token
+    /// budget. Local-only — this never searches the web (that is the host's
+    /// research workflow); model-backed, requires a configured `[inference]`
+    /// endpoint, and every generated insight stays review-routed.
+    Research {
+        topic: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Debug, Parser)]
+struct ReviewDecisionArgs {
+    item_id: String,
+    /// Project root containing .localmind.toml.
+    #[arg(long, default_value = ".")]
+    project: PathBuf,
+    /// Reviewer identifier to record.
+    #[arg(long, default_value = "cli")]
+    reviewer: String,
+    /// Optional review note.
+    #[arg(long)]
+    note: Option<String>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum SourceArg {
+    Generic,
+    ClaudeCode,
+    OpenAiCodex,
+    /// The product name is one word, so the flag value is too.
+    #[value(name = "localpilot")]
+    LocalPilot,
+}
+
+impl From<SourceArg> for SessionSource {
+    fn from(value: SourceArg) -> Self {
+        match value {
+            SourceArg::Generic => Self::GenericTranscript,
+            SourceArg::ClaudeCode => Self::ClaudeCode,
+            SourceArg::OpenAiCodex => Self::OpenAiCodex,
+            SourceArg::LocalPilot => Self::LocalPilot,
+        }
+    }
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum FormatArg {
+    PlainText,
+    JsonLines,
+    Markdown,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ContextTargetArg {
+    Generic,
+    ClaudeCode,
+    OpenAiCodex,
+    /// The product name is one word, so the flag value is too.
+    #[value(name = "localpilot")]
+    LocalPilot,
+}
+
+impl From<ContextTargetArg> for ContextExportTarget {
+    fn from(value: ContextTargetArg) -> Self {
+        match value {
+            ContextTargetArg::Generic => Self::Generic,
+            ContextTargetArg::ClaudeCode => Self::ClaudeCode,
+            ContextTargetArg::OpenAiCodex => Self::OpenAiCodex,
+            ContextTargetArg::LocalPilot => Self::LocalPilot,
+        }
+    }
+}
+
+impl From<FormatArg> for TranscriptImportFormat {
+    fn from(value: FormatArg) -> Self {
+        match value {
+            FormatArg::PlainText => Self::PlainText,
+            FormatArg::JsonLines => Self::JsonLines,
+            FormatArg::Markdown => Self::Markdown,
+        }
+    }
+}
+
+/// Print a notice (to stderr) when a batch insight pass has no inference
+/// endpoint configured, so an empty "Enqueued: 0" is not mistaken for "ran and
+/// found nothing" — the model-backed pass is silently skipped without config.
+fn warn_if_no_inference(project: &std::path::Path, pass: &str) {
+    let configured = localmind_store::ProjectConfig::discover(project)
+        .ok()
+        .and_then(|c| c.config.inference)
+        .is_some();
+    if !configured {
+        eprintln!(
+            "note: no [inference] endpoint configured — model-backed {pass} was skipped (nothing ran). Configure chat_base_url/chat_model in .localmind.toml to enable it."
+        );
+    }
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Command::Status {
+        project: PathBuf::from("."),
+    });
+    // Hold one guard across the complete command lifetime. The selector lists
+    // every best-effort production surface that can issue an embedding request;
+    // backfill acquires its required guard after proving there is work to do.
+    let _embedding_lease = best_effort_embedding_project(&command)
+        .map(|project| embedding_lease::acquire(&project, embedding_lease::Need::BestEffort))
+        .transpose()?
+        .flatten();
+
+    match command {
+        Command::Status { project } => {
+            // Aggregation is the shared, best-effort StatusSnapshot (same source
+            // the MCP `memory_status` tool reports, so the two never drift). The
+            // extra config-path / inference-endpoint lines below are presentation
+            // detail, not a second aggregation.
+            let snapshot = localmind_store::StatusSnapshot::read(&project);
+            match localmind_store::ProjectConfig::discover(&project) {
+                Ok(pc) => {
+                    println!(
+                        "config:  {} (learning {}, scopes {:?})",
+                        pc.config_path.display(),
+                        if snapshot.learning_enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        pc.config.learning.allowed_scopes
+                    );
+                    // Report the two endpoints separately. Falling back to a
+                    // "chat endpoint set" label when only `embedding_base_url`
+                    // is configured told the user they had a chat endpoint they
+                    // had never set.
+                    match &pc.config.inference {
+                        Some(inf) => match inf.chat_base_url.as_deref() {
+                            Some(chat) => println!("chat:      configured ({chat})"),
+                            None => println!("chat:      not configured"),
+                        },
+                        None => println!(
+                            "inference: not configured (deterministic paths only; model-backed extraction/insights are skipped)"
+                        ),
+                    }
+                }
+                Err(error) => {
+                    println!("config:  not usable — {error}");
+                    println!("         learning is disabled until a valid .localmind.toml exists in this project");
+                }
+            }
+            println!(
+                "store:   {} project + {} global accepted memory item(s)",
+                snapshot.accepted_project, snapshot.accepted_global
+            );
+            // The embedding endpoint gets its own line whether or not a chat
+            // endpoint exists, and says whether it *answers* rather than only
+            // whether it is set — an unreachable endpoint leaves every semantic
+            // path degraded while the store stays perfectly healthy.
+            println!("embed:     {}", snapshot.embedding.summary());
+            println!(
+                "docs:    {} chunk(s), {} with embeddings",
+                snapshot.doc_chunks, snapshot.doc_vectors
+            );
+            let coverage = snapshot.memory_vectors;
+            println!(
+                "memory:  {} project + {} global active, {} with embeddings",
+                coverage.project_active,
+                coverage.global_active,
+                coverage.project_vectorized + coverage.global_vectorized
+            );
+            // Say the gap out loud. It was previously unexpressible, so months of
+            // failed embedding looked exactly like a healthy store.
+            let holes = coverage.holes();
+            if holes > 0 {
+                println!(
+                    "         {holes} active memor{} carr{} no vector; semantic recall skips {}",
+                    if holes == 1 { "y" } else { "ies" },
+                    if holes == 1 { "ies" } else { "y" },
+                    if holes == 1 { "it" } else { "them" }
+                );
+            }
+            if coverage.stale > 0 {
+                println!(
+                    "         {} vector(s) belong to memories that are no longer active",
+                    coverage.stale
+                );
+            }
+            println!("review:  {} candidate(s) pending", snapshot.pending_review);
+            println!("schema:  v{}", snapshot.schema_version);
+            for note in &snapshot.notes {
+                println!("problem: {note}");
+            }
+            println!(
+                "status:  {}",
+                if snapshot.ready {
+                    "ready"
+                } else {
+                    "not ready (see above)"
+                }
+            );
+            if !snapshot.ready {
+                std::process::exit(1);
+            }
+        }
+        Command::Import {
+            input,
+            project,
+            source,
+            format,
+        } => {
+            let report =
+                TranscriptImporter::import_file(project, input, source.into(), format.into())?;
+            println!("Imported session {}", report.session_id);
+            println!(
+                "Redacted transcript: {}",
+                report.redacted_transcript_path.display()
+            );
+            println!("Metadata: {}", report.metadata_path.display());
+            println!("Redactions: {}", report.redactions.len());
+        }
+        Command::ImportMemory {
+            dir,
+            project,
+            source,
+            apply,
+        } => {
+            let importer = localmind_store::AgentMemoryImporter::new(project);
+            let report = importer.import(&dir, &source, apply)?;
+            if apply {
+                println!(
+                    "Imported {} memory file(s): {} queued for review, {} duplicate, {} skipped",
+                    report.total, report.added, report.duplicate, report.skipped
+                );
+            } else {
+                println!(
+                    "Dry run: {} memory file(s) would enqueue {} candidate(s) ({} duplicate, {} skipped). Re-run with --apply.",
+                    report.total, report.added, report.duplicate, report.skipped
+                );
+            }
+        }
+        Command::ImportLessons {
+            path,
+            project,
+            source,
+            apply,
+        } => {
+            let importer = localmind_store::AgentMemoryImporter::new(project);
+            let report = importer.import_lessons(&path, &source, apply)?;
+            if apply {
+                println!(
+                    "Imported {} lesson bullet(s): {} queued for review, {} duplicate",
+                    report.total, report.added, report.duplicate
+                );
+            } else {
+                println!(
+                    "Dry run: {} lesson bullet(s) would enqueue {} candidate(s) ({} duplicate). Re-run with --apply.",
+                    report.total, report.added, report.duplicate
+                );
+            }
+        }
+        Command::Closeout {
+            session_id,
+            project,
+        } => {
+            let report = CloseoutProcessor::closeout_project_session_with_configured_inference(
+                project,
+                &SessionId::new(session_id),
+            )?;
+            println!("Closed out session {}", report.session_id);
+            println!("Summary: {}", report.summary_path.display());
+            println!("Candidates: {}", report.candidates_path.display());
+            println!("Candidate count: {}", report.candidate_count);
+            println!("Enqueued: {}", report.enqueued_count);
+        }
+        Command::Review { command } => match command {
+            ReviewCommand::List { project } => {
+                let Some(root) = store_root::resolve_or_report(&project) else {
+                    return Ok(());
+                };
+                let queue = ReviewQueue::open_project(&root)?;
+                for item in queue.list()? {
+                    println!(
+                        "{}\t{:?}\t{}\t{}\t{}",
+                        item.id,
+                        item.state,
+                        item.session_id,
+                        item.candidate.source.as_deref().unwrap_or("extracted"),
+                        item.candidate.summary()
+                    );
+                }
+            }
+            ReviewCommand::Inspect { item_id, project } => {
+                let queue = ReviewQueue::open_project(project)?;
+                if let Some(item) = queue.get(&ReviewItemId::new(item_id))? {
+                    println!("ID: {}", item.id);
+                    println!("State: {:?}", item.state);
+                    println!("Session: {}", item.session_id);
+                    println!("Summary: {}", item.candidate.summary());
+                    println!(
+                        "Source: {}",
+                        item.candidate.source.as_deref().unwrap_or("extracted")
+                    );
+                    println!("Category: {:?}", item.candidate.category);
+                    println!("Confidence: {:.3}", item.candidate.confidence.value());
+                    if let Some(replacement) = item.replacement_summary {
+                        println!("Replacement: {replacement}");
+                    }
+                    if let Some(note) = item.note {
+                        println!("Note: {note}");
+                    }
+                } else {
+                    println!("Review item not found");
+                }
+            }
+            ReviewCommand::Accept(args) => apply_review_decision(args, ReviewAction::Accept)?,
+            ReviewCommand::Reject(args) => apply_review_decision(args, ReviewAction::Reject)?,
+            ReviewCommand::Defer(args) => apply_review_decision(args, ReviewAction::MarkTemporary)?,
+            ReviewCommand::Merge {
+                item_id,
+                target,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let item_id = ReviewItemId::new(item_id);
+                let target = match target {
+                    Some(target) => ReviewItemId::new(target),
+                    None => {
+                        let item = queue
+                            .get(&item_id)?
+                            .with_context(|| format!("review item does not exist: {item_id}"))?;
+                        if item.candidate.suggested_action != SuggestedAction::MergeIntoExisting {
+                            anyhow::bail!(
+                                "review item {item_id} has no merge-into-existing suggestion; pass --target explicitly"
+                            );
+                        }
+                        item.candidate
+                            .review_annotation
+                            .and_then(|annotation| annotation.duplicate_of)
+                            .map(ReviewItemId::new)
+                            .with_context(|| {
+                                format!(
+                                    "review item {item_id} has a merge suggestion without a target; pass --target explicitly"
+                                )
+                            })?
+                    }
+                };
+                let item = queue.decide(ReviewDecision {
+                    item_id,
+                    action: ReviewAction::MergeInto(target.clone()),
+                    reviewer,
+                    decided_at: None,
+                    note,
+                    replacement_summary: None,
+                    evidence: Vec::new(),
+                })?;
+                persistence.record_review_item_audit(&item)?;
+                println!("{} -> {:?} (merged into {target})", item.id, item.state);
+            }
+            ReviewCommand::Edit {
+                item_id,
+                replacement,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let item = queue.decide(ReviewDecision {
+                    item_id: ReviewItemId::new(item_id),
+                    action: ReviewAction::Edit,
+                    reviewer,
+                    decided_at: None,
+                    note,
+                    replacement_summary: Some(replacement),
+                    evidence: Vec::new(),
+                })?;
+                persistence.record_review_item_audit(&item)?;
+                println!("{} -> {:?}", item.id, item.state);
+            }
+            ReviewCommand::Supersede {
+                item_id,
+                target,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let item = queue.decide(ReviewDecision {
+                    item_id: ReviewItemId::new(item_id),
+                    action: ReviewAction::Supersede(MemoryEntryId::new(target)),
+                    reviewer,
+                    decided_at: None,
+                    note,
+                    replacement_summary: None,
+                    evidence: Vec::new(),
+                })?;
+                persistence.record_review_item_audit(&item)?;
+                println!(
+                    "{} -> {:?} (promote to retire the target)",
+                    item.id, item.state
+                );
+            }
+        },
+        Command::Propose {
+            title,
+            json_file,
+            project,
+            body,
+            category,
+            scope,
+            source,
+            files,
+            tags,
+            evidence,
+            idempotency_key,
+            confidence,
+        } => {
+            let queue = ReviewQueue::open_project(&project)?;
+            let (source, proposal) = if let Some(path) = json_file {
+                let raw = read_json_source(&path)?;
+                let value: serde_json::Value = serde_json::from_str(&raw)
+                    .with_context(|| format!("parse proposal JSON from {}", path.display()))?;
+                proposal_from_json(&value)?
+            } else {
+                // clap's `required_unless_present = "json_file"` guarantees a title here.
+                let proposal = ProposedLesson {
+                    title: title.unwrap_or_default(),
+                    body,
+                    category,
+                    scope: match scope {
+                        ProposeScopeArg::Global => ProposeScope::Global,
+                        ProposeScopeArg::Project => ProposeScope::Project,
+                    },
+                    related_files: files,
+                    tags,
+                    evidence,
+                    idempotency_key,
+                    confidence,
+                };
+                (source, proposal)
+            };
+            let outcome = queue.propose(&source, &proposal)?;
+            if outcome.created {
+                println!("Queued for review: {}", outcome.candidate_id);
+            } else {
+                println!(
+                    "Reused an existing proposal candidate: {}",
+                    outcome.candidate_id
+                );
+            }
+            if let Some(duplicate) = outcome.duplicate_of {
+                println!("similar accepted memory: {duplicate}");
+            }
+            if let Some(note) = outcome.quality_note {
+                println!("note: {note}");
+            }
+        }
+        Command::Promote { item_id, project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            let entry = persistence.promote_review_item(&ReviewItemId::new(item_id))?;
+            println!("Promoted memory {}", entry.id);
+        }
+        Command::ReviewMode { project } => {
+            let report = localmind_store::ReviewModeProcessor::apply_project(project)?;
+            println!(
+                "Annotated: {} Accepted: {} Manual: {}",
+                report.annotated, report.accepted, report.manual
+            );
+        }
+        Command::Search { query, project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            for result in persistence.search(&query)? {
+                println!(
+                    "{}\t{}\t{}",
+                    result.memory_id,
+                    result.score,
+                    result.path.display()
+                );
+                println!("{}", result.snippet);
+            }
+        }
+        Command::Audit { project } => {
+            let persistence = MemoryPersistence::open_project(project)?;
+            for record in persistence.audit_records()? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    record.id, record.kind, record.actor, record.subject
+                );
+            }
+        }
+        Command::Context { command } => match command {
+            ContextCommand::Export {
+                query,
+                project,
+                target,
+            } => {
+                let exporter = ContextExporter::open_project(project)?;
+                let export = exporter.export(&query, target.into())?;
+                println!("{}", export.body_markdown);
+            }
+            ContextCommand::Primer {
+                project,
+                target,
+                limit,
+            } => {
+                let primer = localmind_store::build_primer(&project, target.into(), limit)?;
+                print!("{}", primer.body_markdown);
+            }
+        },
+        Command::Memory { command } => match command {
+            MemoryCommand::Export {
+                out,
+                project,
+                scope,
+                json,
+            } => memory_export(&out, &project, scope.into(), json)?,
+            MemoryCommand::Import {
+                input,
+                project,
+                apply,
+                json,
+            } => memory_import(&input, &project, apply, json)?,
+        },
+        Command::Okf { command } => match command {
+            OkfCommand::Import {
+                input,
+                project,
+                apply,
+                json,
+            } => okf_import(&input, &project, apply, json)?,
+            OkfCommand::Export {
+                out,
+                project,
+                scope,
+                json,
+            } => okf_export(&out, &project, scope.into(), json)?,
+        },
+        Command::Sync { command } => match command {
+            SyncCommand::DeviceCard {
+                project,
+                label,
+                json,
+            } => sync::device_card(&project, label, json)?,
+            SyncCommand::Enroll {
+                card,
+                confirm_fingerprint,
+                project,
+                json,
+            } => sync::enroll(&project, card, &confirm_fingerprint, json)?,
+            SyncCommand::Devices { project, json } => sync::devices(&project, json)?,
+            SyncCommand::Revoke {
+                device,
+                project,
+                json,
+            } => sync::revoke(&project, &device, json)?,
+            SyncCommand::Run {
+                folder,
+                project,
+                json,
+            } => sync::run(&project, folder, json)?,
+            SyncCommand::Status {
+                folder,
+                project,
+                json,
+            } => sync::status(&project, folder, json)?,
+        },
+        Command::Skills { command } => match command {
+            SkillsCommand::Generate { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                let records = store.generate_from_review_queue()?;
+                for record in records {
+                    println!("{}\t{}", record.draft.id, record.draft_path.display());
+                }
+            }
+            SkillsCommand::List { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                for record in store.list()? {
+                    println!(
+                        "{}\t{}\t{}",
+                        record.draft.id, record.draft.name, record.draft.disabled
+                    );
+                }
+            }
+            SkillsCommand::Inspect { draft_id, project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.get(&SkillDraftId::new(draft_id))? {
+                    println!("ID: {}", record.draft.id);
+                    println!("Name: {}", record.draft.name);
+                    println!("Disabled: {}", record.draft.disabled);
+                    println!("Description: {}", record.draft.description);
+                    println!("Path: {}", record.draft_path.display());
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+            SkillsCommand::Export {
+                draft_id,
+                project,
+                output,
+            } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.get(&SkillDraftId::new(draft_id))? {
+                    if let Some(output) = output {
+                        fs::write(&output, &record.draft.body_markdown)?;
+                        println!("{}", output.display());
+                    } else {
+                        println!("{}", record.draft.body_markdown);
+                    }
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+            SkillsCommand::Activate { draft_id, project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                if let Some(record) = store.activate(&SkillDraftId::new(draft_id))? {
+                    println!("{}\t{}", record.skill.id, record.status);
+                } else {
+                    println!("Skill draft not found");
+                }
+            }
+            SkillsCommand::Active { project } => {
+                let store = SkillDraftStore::open_project(project)?;
+                for record in store.active()? {
+                    println!("{}\t{}", record.skill.id, record.skill.name);
+                }
+            }
+            SkillsCommand::Retire {
+                draft_id,
+                project,
+                reason,
+            } => {
+                let store = SkillDraftStore::open_project(project)?;
+                println!("{}", store.retire(&SkillDraftId::new(draft_id), &reason)?);
+            }
+        },
+        Command::Insights { command } => match command {
+            InsightCommand::Distill { project } => {
+                warn_if_no_inference(&project, "distillation");
+                let report = localmind_store::BatchInsightPipeline::distill(&project)?;
+                println!(
+                    "Enqueued: {} Accepted by mode: {}",
+                    report.enqueued, report.accepted_by_mode
+                );
+            }
+            InsightCommand::Research { topic, project } => {
+                warn_if_no_inference(&project, "research");
+                let report = localmind_store::BatchInsightPipeline::research(&project, &topic)?;
+                println!(
+                    "Enqueued: {} Accepted by mode: {}",
+                    report.enqueued, report.accepted_by_mode
+                );
+            }
+        },
+        Command::Graph { command } => match command {
+            GraphCommand::Reindex { path, project } => graph::reindex(path, project)?,
+        },
+        Command::Ingest { command } => match command {
+            IngestCommand::Docs { path, project } => ingest::docs(path, project)?,
+        },
+        Command::Sessions {
+            project,
+            keep_newest,
+            within_days,
+            total_mb,
+        } => sessions_command(&project, keep_newest, within_days, total_mb)?,
+        Command::Backfill {
+            project,
+            dry_run,
+            prune_stale,
+        } => backfill_command(&project, dry_run, prune_stale)?,
+        Command::Mcp { command } => match command {
+            McpCommand::Serve { project } => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let (root, source) = resolve_serve_root(project, &cwd);
+                // Logged to stderr (stdout is the JSON-RPC channel).
+                match source {
+                    ServeRootSource::Explicit => {
+                        eprintln!("localmind mcp: serving store at {} (--project)", root.display());
+                    }
+                    ServeRootSource::WalkedUp => eprintln!(
+                        "localmind mcp: serving store at {} (found by walking up from the launch directory)",
+                        root.display()
+                    ),
+                    ServeRootSource::InPlace => {
+                        eprintln!("localmind mcp: serving store at {}", root.display());
+                    }
+                    ServeRootSource::NoProject => eprintln!(
+                        "localmind mcp: no .localmind.toml at or above {} — serving it anyway; \
+                         recall and propose stay empty until it is a project (or pass --project <path>)",
+                        root.display()
+                    ),
+                }
+                mcp::serve(root)?
+            }
+        },
+        Command::Ui {
+            project,
+            port,
+            open,
+            token,
+        } => {
+            if let Some(root) = store_root::resolve_or_report(&project) {
+                ui::serve(root, port, open, token)?;
+            }
+        }
+        Command::Eval {
+            k,
+            json,
+            with_lift,
+            project,
+        } => {
+            let work_root =
+                std::env::temp_dir().join(format!("localmind-eval-{}", std::process::id()));
+            fs::create_dir_all(&work_root)?;
+            let fixtures = localmind_store::default_fixtures();
+            // When --with-lift is set, score the deterministic baseline against
+            // the configured-inference extractor (read from the current project's
+            // config, if any) and report the lift. Offline, the model path falls
+            // back to deterministic and the lift is zero.
+            let outcome = if with_lift {
+                let inference = localmind_store::ProjectConfig::discover(&project)
+                    .ok()
+                    .and_then(|config| config.config.inference);
+                localmind_store::run_eval_lift(&fixtures, k, &work_root, inference.as_ref())
+                    .map(|(report, lift)| (report, Some(lift)))
+            } else {
+                localmind_store::run_eval(&fixtures, k, &work_root).map(|report| (report, None))
+            };
+            let _ = fs::remove_dir_all(&work_root);
+            let (report, lift) = outcome?;
+            if json {
+                let mut value = serde_json::to_value(&report)?;
+                if let (Some(lift), Some(object)) = (&lift, value.as_object_mut()) {
+                    object.insert("lift".to_string(), serde_json::to_value(lift)?);
+                }
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("Memory-quality evaluation (recall@{}):", report.k);
+                for score in &report.scores {
+                    println!(
+                        "  {:<22} candidates={:<3} precision={:.3} recall={:.3} recall@k={:.3}",
+                        score.name,
+                        score.candidate_count,
+                        score.extraction_precision,
+                        score.extraction_recall,
+                        score.retrieval_recall_at_k
+                    );
+                }
+                println!(
+                    "  {:<22} {:<14} precision={:.3} recall={:.3} recall@k={:.3}",
+                    "MEAN",
+                    "",
+                    report.mean_extraction_precision,
+                    report.mean_extraction_recall,
+                    report.mean_retrieval_recall_at_k
+                );
+                if let Some(lift) = &lift {
+                    println!(
+                        "  {:<22} {:<14} precision={:+.3} recall={:+.3} recall@k={:+.3}",
+                        "LIFT (model)",
+                        "",
+                        lift.extraction_precision_delta,
+                        lift.extraction_recall_delta,
+                        lift.retrieval_recall_at_k_delta
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `memory export`: export accepted memory to a portable, signed bundle file.
+fn memory_export(out: &PathBuf, project: &PathBuf, scope: BundleScope, json: bool) -> Result<()> {
+    let exporter = MemoryBundleExporter::open_project(project)?;
+    // The signing key's fingerprint is the author identity; generate it the first
+    // time so an export is always attributable.
+    let signing_key = KeyStore::open(project)?.load_or_generate()?;
+    let author = localmind_store::author_fingerprint(&signing_key.verifying_key().to_bytes());
+    let outcome = exporter.export(scope, &author)?;
+    let signed = sign_bundle(&outcome.bundle, &signing_key)?;
+    fs::write(out, signed.to_pretty_json()?)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "output": out.display().to_string(),
+                "entries": outcome.bundle.entries.len(),
+                "redactions": outcome.scan.redactions,
+                "author": author,
+                "digest": signed.signature.digest,
+            }))?
+        );
+    } else {
+        println!(
+            "Exported {} accepted memor{} to {}",
+            outcome.bundle.entries.len(),
+            if outcome.bundle.entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            out.display()
+        );
+        println!(
+            "Signed by author {author} (digest {})",
+            signed.signature.digest
+        );
+        if outcome.scan.found_secrets() {
+            println!(
+                "Redacted {} apparent secret(s) across {} entr{} before export.",
+                outcome.scan.redactions,
+                outcome.scan.entries_with_redactions,
+                if outcome.scan.entries_with_redactions == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `okf export`: write accepted memory as a conformant OKF bundle directory.
+fn okf_export(out: &Path, project: &Path, scope: BundleScope, json: bool) -> Result<()> {
+    let report = OkfExporter::new(project).export(out, scope)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Exported {} accepted memor{} to OKF bundle {} ({} categor{}, {} redaction{}).",
+        report.total,
+        if report.total == 1 { "y" } else { "ies" },
+        out.display(),
+        report.categories,
+        if report.categories == 1 { "y" } else { "ies" },
+        report.redactions,
+        if report.redactions == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+/// `okf import`: read an OKF bundle directory and (with `--apply`) enqueue its
+/// concepts for review. The default is a dry run that writes nothing. An OKF
+/// bundle is unsigned, so every concept is flagged untrusted.
+fn okf_import(input: &Path, project: &Path, apply: bool, json: bool) -> Result<()> {
+    let report = OkfImporter::new(project).import(input, apply)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} {} OKF concept{} (unsigned, untrusted): {} new, {} duplicate, {} skipped.",
+        if report.applied {
+            "Enqueued for review from"
+        } else {
+            "Dry run over"
+        },
+        report.total,
+        if report.total == 1 { "" } else { "s" },
+        report.added,
+        report.duplicate,
+        report.skipped
+    );
+    println!("An OKF bundle is unsigned — imported concepts are reviewed before they are used.");
+    if !report.applied {
+        println!("Re-run with --apply to enqueue these for review.");
+    }
+    Ok(())
+}
+
+/// `memory import`: verify a signed bundle, then (with `--apply`) enqueue its
+/// entries for review. The default is a dry run that writes nothing.
+fn memory_import(input: &PathBuf, project: &PathBuf, apply: bool, json: bool) -> Result<()> {
+    let signed = SignedBundle::from_json(&fs::read_to_string(input)?)?;
+    let report = BundleImporter::new(project).import(&signed, apply)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    match &report.trust {
+        ImportTrust::Rejected(reason) => {
+            println!("Rejected: {reason}. Nothing was imported.");
+            return Ok(());
+        }
+        ImportTrust::Trusted => println!("Verified: trusted author."),
+        ImportTrust::Untrusted => {
+            println!(
+                "Verified: UNTRUSTED author (valid signature, unknown key) — review carefully."
+            );
+        }
+    }
+    println!(
+        "{} {} entr{}: {} new, {} duplicate.",
+        if report.applied {
+            "Enqueued for review from"
+        } else {
+            "Dry run over"
+        },
+        report.total,
+        if report.total == 1 { "y" } else { "ies" },
+        report.added,
+        report.duplicate
+    );
+    // The honest trust UX: a signature attests the author, not the content.
+    println!(
+        "A verified author is not verified content — imported memory is reviewed before it is used."
+    );
+    if !report.applied {
+        println!("Re-run with --apply to enqueue these for review.");
+    }
+    Ok(())
+}
+
+fn apply_review_decision(args: ReviewDecisionArgs, action: ReviewAction) -> Result<()> {
+    let persistence = MemoryPersistence::open_project(&args.project)?;
+    let queue = ReviewQueue::open_project(args.project)?;
+    let item = queue.decide(ReviewDecision {
+        item_id: ReviewItemId::new(args.item_id),
+        action,
+        reviewer: args.reviewer,
+        decided_at: None,
+        note: args.note,
+        replacement_summary: None,
+        evidence: Vec::new(),
+    })?;
+    persistence.record_review_item_audit(&item)?;
+    println!("{} -> {:?}", item.id, item.state);
+    Ok(())
+}
+
+/// Re-embed rows whose vector is missing or out of date.
+///
+/// The sweep set is a query, not a cursor, so this is idempotent: run it twice
+/// and the second run finds nothing. `--dry-run` is what an operator reads
+/// before committing to a long job against a local CPU endpoint.
+fn backfill_command(project: &Path, dry_run: bool, prune_stale: bool) -> Result<()> {
+    let persistence = localmind_store::MemoryPersistence::open_project(project)
+        .context("opening the project store")?;
+
+    if dry_run {
+        let plan = persistence.backfill_plan().context("planning the sweep")?;
+        print_backfill_plan(&plan);
+        if plan.is_empty() {
+            println!("nothing to re-embed.");
+        } else {
+            println!(
+                "
+re-run without --dry-run to embed {}.",
+                plan.total()
+            );
+        }
+        return Ok(());
+    }
+
+    let plan = persistence.backfill_plan().context("planning the sweep")?;
+    let _embedding_lease = if plan.is_empty() {
+        None
+    } else {
+        embedding_lease::acquire(project, embedding_lease::Need::Required)?
+    };
+    let report = persistence
+        .backfill_run(prune_stale)
+        .context("running the sweep")?;
+    print_backfill_plan(&report.planned);
+    println!(
+        "
+embedded: {}",
+        report.embedded
+    );
+    if report.failed > 0 {
+        // A partial sweep is never reported as a whole one: the endpoint may have
+        // gone away mid-run, and the remaining rows are still holes.
+        println!(
+            "failed:   {} (the endpoint refused these; re-run to retry them)",
+            report.failed
+        );
+    }
+    if report.pruned > 0 {
+        println!("pruned:   {} stale vector(s)", report.pruned);
+    } else if report.planned.stale_memory_vectors > 0 {
+        println!(
+            "note:     {} vector(s) belong to memories that are no longer active;              --prune-stale removes them",
+            report.planned.stale_memory_vectors
+        );
+    }
+    Ok(())
+}
+
+/// Project lifetime for commands that may call the embedding endpoint while
+/// still preserving a lexical/no-vector result when it is unavailable.
+fn best_effort_embedding_project(command: &Command) -> Option<PathBuf> {
+    match command {
+        Command::Promote { project, .. } | Command::ReviewMode { project } => Some(project.clone()),
+        Command::Insights {
+            command: InsightCommand::Distill { project } | InsightCommand::Research { project, .. },
+        }
+        | Command::Ingest {
+            command: IngestCommand::Docs { project, .. },
+        } => Some(project.clone()),
+        Command::Mcp {
+            command: McpCommand::Serve { project },
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            Some(resolve_serve_root(project.clone(), &cwd).0)
+        }
+        Command::Ui { project, .. } => match store_root::resolve_store_root(project) {
+            store_root::StoreRoot::Found { root, .. } => Some(root),
+            store_root::StoreRoot::NotFound { .. } => None,
+        },
+        _ => None,
+    }
+}
+
+fn print_backfill_plan(plan: &localmind_store::BackfillPlan) {
+    let line = |label: &str, reasons: &localmind_store::BackfillReasons| {
+        println!(
+            "{label:<8} {} to embed ({} absent, {} edited since embedding, {} under another model)",
+            reasons.total(),
+            reasons.absent,
+            reasons.stale_fingerprint,
+            reasons.model_mismatch
+        );
+    };
+    line("memory:", &plan.memories);
+    line("docs:", &plan.doc_chunks);
+}
+
+/// Report the session inventory, and what a retention bound would remove.
+///
+/// **Never deletes.** Session transcripts have been kept forever, and whether
+/// that should change is a judgement about privacy against usefulness — much
+/// easier to make while looking at the real list than in the abstract. With no
+/// bound given it reports the inventory; with one it shows what that bound would
+/// catch, so the bounds can be compared before anything is chosen.
+fn sessions_command(
+    project: &Path,
+    keep_newest: Option<usize>,
+    within_days: Option<u64>,
+    total_mb: Option<u64>,
+) -> Result<()> {
+    use localmind_store::{plan_retention, scan_sessions, RetentionPolicy};
+
+    let entries = scan_sessions(project).context("reading the session inventory")?;
+    if entries.is_empty() {
+        println!("no sessions under {}", project.display());
+        return Ok(());
+    }
+    let total: u64 = entries.iter().map(|e| e.bytes).sum();
+    println!(
+        "sessions: {}   total: {}",
+        entries.len(),
+        human_bytes(total)
+    );
+
+    let policies: Vec<(String, RetentionPolicy)> = [
+        keep_newest.map(|n| (format!("keep newest {n}"), RetentionPolicy::KeepNewest(n))),
+        within_days.map(|d| (format!("within {d} days"), RetentionPolicy::WithinDays(d))),
+        total_mb.map(|m| {
+            (
+                format!("total under {m} MB"),
+                RetentionPolicy::TotalBytes(m.saturating_mul(1024 * 1024)),
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if policies.is_empty() {
+        // No bound asked for: show the tail, which is what makes the question
+        // concrete. A long tail of small sessions argues for a count bound; a
+        // few large recent ones argue against an age bound.
+        let mut sorted = entries;
+        sorted.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        println!(
+            "
+largest:"
+        );
+        for entry in sorted.iter().take(5) {
+            println!("  {:>10}  {}", human_bytes(entry.bytes), entry.id);
+        }
+        println!(
+            "
+smallest:"
+        );
+        for entry in sorted.iter().rev().take(5) {
+            println!("  {:>10}  {}", human_bytes(entry.bytes), entry.id);
+        }
+        println!(
+            "
+pass --keep-newest N, --within-days N or --total-mb N to see what a bound would remove."
+        );
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now();
+    for (label, policy) in policies {
+        let plan = plan_retention(&entries, policy, now);
+        println!(
+            "
+{label}: would keep {} ({}), remove {} ({})",
+            plan.kept.len(),
+            human_bytes(plan.kept_bytes()),
+            plan.prunable.len(),
+            human_bytes(plan.prunable_bytes())
+        );
+        for entry in plan.prunable.iter().take(5) {
+            println!("    - {:>10}  {}", human_bytes(entry.bytes), entry.id);
+        }
+        if plan.prunable.len() > 5 {
+            println!("    … and {} more", plan.prunable.len() - 5);
+        }
+    }
+    println!(
+        "
+nothing was removed: this command only reports."
+    );
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1.0 {
+        format!("{mb:.1} MiB")
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let kb = bytes as f64 / 1024.0;
+        format!("{kb:.0} KiB")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_file_proposal_matches_the_equivalent_flags() {
+        let value = serde_json::json!({
+            "title": "Prefer typed errors over panics",
+            "body": "Return a Result; never unwrap on a library path.",
+            "category": "CodePattern",
+            "scope": "global",
+            "source": "claude-code",
+            "related_files": ["src/lib.rs"],
+            "tags": ["errors", "rust"],
+            "evidence": "issue #123",
+            "idempotency_key": "cc-typed-errors-1",
+            "confidence": 0.9
+        });
+        let (source, proposal) = proposal_from_json(&value).expect("valid JSON proposal");
+        assert_eq!(source, "claude-code");
+        assert_eq!(proposal.title, "Prefer typed errors over panics");
+        assert_eq!(proposal.category, "CodePattern");
+        assert!(matches!(proposal.scope, ProposeScope::Global));
+        assert_eq!(proposal.related_files, vec!["src/lib.rs".to_string()]);
+        assert_eq!(
+            proposal.tags,
+            vec!["errors".to_string(), "rust".to_string()]
+        );
+        assert_eq!(proposal.evidence.as_deref(), Some("issue #123"));
+        assert_eq!(
+            proposal.idempotency_key.as_deref(),
+            Some("cc-typed-errors-1")
+        );
+        assert!((proposal.confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn json_file_proposal_applies_flag_defaults_for_omitted_fields() {
+        let value = serde_json::json!({ "title": "Minimal lesson" });
+        let (source, proposal) = proposal_from_json(&value).expect("minimal JSON proposal");
+        assert_eq!(source, "cli");
+        assert_eq!(proposal.category, "Process");
+        assert!(matches!(proposal.scope, ProposeScope::Project));
+        assert!((proposal.confidence - 0.7).abs() < f32::EPSILON);
+        assert!(proposal.body.is_none());
+        assert!(proposal.tags.is_empty());
+    }
+
+    #[test]
+    fn json_file_proposal_rejects_unknown_fields_and_bad_types() {
+        assert!(proposal_from_json(&serde_json::json!({ "titel": "typo" })).is_err());
+        assert!(
+            proposal_from_json(&serde_json::json!({ "title": "x", "scope": "everywhere" }))
+                .is_err()
+        );
+        // A non-string scope must be rejected, not silently defaulted to project.
+        assert!(proposal_from_json(&serde_json::json!({ "title": "x", "scope": 42 })).is_err());
+        assert!(proposal_from_json(&serde_json::json!({ "title": "x", "scope": true })).is_err());
+        assert!(proposal_from_json(&serde_json::json!({ "title": 7 })).is_err());
+        assert!(
+            proposal_from_json(&serde_json::json!({ "title": "x", "tags": "not-an-array" }))
+                .is_err()
+        );
+        assert!(proposal_from_json(&serde_json::json!(["not", "an", "object"])).is_err());
+    }
+
+    #[test]
+    fn serve_root_honours_an_explicit_project_exactly_and_walks_up_otherwise() {
+        // Explicit --project binds exactly, even without a marker — no walk-up.
+        let (root, source) =
+            resolve_serve_root(Some(PathBuf::from("D:/some/where")), Path::new("D:/other"));
+        assert_eq!(root, PathBuf::from("D:/some/where"));
+        assert_eq!(source, ServeRootSource::Explicit);
+
+        // No --project: walk up from cwd to the nearest .localmind.toml.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled=true\n",
+        )
+        .unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let (root, source) = resolve_serve_root(None, &nested);
+        assert_eq!(root, dir.path());
+        assert_eq!(source, ServeRootSource::WalkedUp);
+
+        let (root, source) = resolve_serve_root(None, dir.path());
+        assert_eq!(root, dir.path());
+        assert_eq!(source, ServeRootSource::InPlace);
+        // (The NoProject branch — cwd with no marker at or above it — is not
+        // asserted here: on a machine with a home-level `.localmind.toml` every
+        // temp dir walks up to it, so a truly-marker-less path can't be staged.)
+    }
+
+    #[test]
+    fn embedding_lifetime_matrix_covers_every_embedding_capable_cli_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_path_buf();
+        std::fs::write(
+            project.join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let commands = vec![
+            (
+                "promote",
+                Command::Promote {
+                    item_id: "item".to_string(),
+                    project: project.clone(),
+                },
+                true,
+            ),
+            (
+                "review-mode",
+                Command::ReviewMode {
+                    project: project.clone(),
+                },
+                true,
+            ),
+            (
+                "ingest-docs",
+                Command::Ingest {
+                    command: IngestCommand::Docs {
+                        path: project.clone(),
+                        project: project.clone(),
+                    },
+                },
+                true,
+            ),
+            (
+                "mcp-serve",
+                Command::Mcp {
+                    command: McpCommand::Serve {
+                        project: Some(project.clone()),
+                    },
+                },
+                true,
+            ),
+            (
+                "ui",
+                Command::Ui {
+                    project: project.clone(),
+                    port: 8091,
+                    open: false,
+                    token: None,
+                },
+                true,
+            ),
+            (
+                "insights-distill",
+                Command::Insights {
+                    command: InsightCommand::Distill {
+                        project: project.clone(),
+                    },
+                },
+                true,
+            ),
+            (
+                "insights-research",
+                Command::Insights {
+                    command: InsightCommand::Research {
+                        topic: "topic".to_string(),
+                        project: project.clone(),
+                    },
+                },
+                true,
+            ),
+            (
+                "lexical-search",
+                Command::Search {
+                    query: "query".to_string(),
+                    project: project.clone(),
+                },
+                false,
+            ),
+            (
+                "backfill-has-a-required-work-aware-boundary",
+                Command::Backfill {
+                    project: project.clone(),
+                    dry_run: false,
+                    prune_stale: false,
+                },
+                false,
+            ),
+            (
+                "status-only-probes",
+                Command::Status {
+                    project: project.clone(),
+                },
+                false,
+            ),
+        ];
+
+        for (name, command, expected) in commands {
+            assert_eq!(
+                best_effort_embedding_project(&command).is_some(),
+                expected,
+                "wrong embedding lifetime classification for {name}"
+            );
+        }
+    }
+}

@@ -1,0 +1,374 @@
+```
+╔═════╗   ╔═════╗		██╗      ██████╗  ██████╗ █████╗ ██╗     ███╗   ███╗██╗███╗   ██╗██████╗
+║ ███ ║═══║ ███ ║		██║     ██╔═══██╗██╔════╝██╔══██╗██║     ████╗ ████║██║████╗  ██║██╔══██╗
+║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ███████║██║     ██╔████╔██║██║██╔██╗ ██║██║  ██║
+║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ██╔══██║██║     ██║╚██╔╝██║██║██║╚██╗██║██║  ██║
+╚═════╝   ╚═════╝║		███████╗╚██████╔╝╚██████╗██║  ██║███████╗██║ ╚═╝ ██║██║██║ ╚████║██████╔╝
+ ╚═══════════════╝		╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝
+```
+
+<div align="center">
+  <h1>LocalMind</h1>
+  <p><strong>Turn reviewed AI sessions into useful project memory. Locally.</strong></p>
+  <p>
+    <a href="docs/wiki/Getting-Started.md">Getting started</a> ·
+    <a href="docs/on-disk-contract.md">On-disk contract</a> ·
+    <a href="vision.md">Vision</a> ·
+    <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
+  </p>
+  <p>
+    <a href="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg"></a>
+    <img alt="LocalX release train 5.0.0" src="https://img.shields.io/badge/release%20train-v5.0.0-69d987?style=flat-square">
+    <img alt="Markdown and SQLite storage" src="https://img.shields.io/badge/storage-Markdown%20%C2%B7%20SQLite-59636e?style=flat-square">
+  </p>
+</div>
+
+LocalMind is a local-first learning layer for AI-assisted development. It imports
+opted-in sessions, removes likely secrets, extracts candidate lessons, asks a
+human to review them, and stores accepted knowledge as readable project files.
+
+| At a glance | |
+|---|---|
+| **Use it when** | Your agent keeps rediscovering the same fixes, decisions, and project conventions |
+| **It remembers** | Only lessons you explicitly accept or edit |
+| **It stores** | Readable Markdown memory plus a local SQLite audit/search index |
+| **You review it in** | The CLI, or a localhost web app (`localmind ui`) |
+| **Agents use it via** | A stdio MCP server (`localmind mcp serve`): query memory/docs/code/skills and propose review-gated lessons |
+| **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
+| **Cloud required** | No |
+
+## Privacy by design
+
+LocalMind keeps the knowledge extracted from your work under your control.
+
+- **No usage telemetry is sent.** Sessions, candidate lessons, searches, and
+  memory activity are not reported to LocalX or an analytics service.
+- **Memory stays local.** Accepted knowledge is stored as readable Markdown and
+  a local SQLite index in paths you control.
+- **Learning is opt-in per project.** A repo with no `.localmind.toml` is never
+  learned from; creating the file is the opt-in. Once enabled, accepted lessons
+  write to both the project store **and** the same-machine global store by
+  default (cross-project knowledge) — set `allowed_scopes = ["project"]` to keep
+  a project's memory project-only. Nothing leaves the machine (`local_only`).
+- **Inference is optional.** Deterministic local behavior works without a cloud
+  service; any configured inference or embedding endpoint is an explicit choice.
+- **Nothing becomes memory silently.** Secret redaction and human review happen
+  before durable project knowledge is written.
+
+> [!IMPORTANT]
+> LocalMind is opt-in and review-gated. It refuses project memory writes until
+> `.localmind.toml` enables learning, and it never promotes a candidate lesson
+> automatically.
+
+## Quick start
+
+The quickest install is the LocalX one-liner, which installs `localmind`
+alongside the rest of the stack at one version — no Rust toolchain needed:
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+The tools are cut as a set and only tested together, so they are installed as a
+set; `localpilot update --all` re-runs it. Each release also publishes verified
+per-platform archives if you would rather install `localmind` on its own.
+
+Build the CLI:
+
+```sh
+git clone https://github.com/C0deGeek-dev/LocalMind.git
+cd LocalMind
+cargo build -p localmind-cli
+cargo run -p localmind-cli -- --help
+```
+
+Enable local-only learning in the project you want LocalMind to serve:
+
+```toml
+# .localmind.toml
+[learning]
+enabled = true
+local_only = true
+memory_root = ".localmind/memory"
+allowed_scopes = ["project"]
+excluded_paths = ["target/**", ".git/**"]
+```
+
+Import a transcript, close the session out, and inspect the review queue:
+
+```sh
+localmind import ./session.txt --project . --source open-ai-codex
+localmind closeout <session-id> --project .
+localmind review list --project .
+```
+
+When an agent has already distilled one reusable lesson, it can propose it
+directly without bypassing review:
+
+```sh
+localmind propose "Keep retry loops bounded" --source open-ai-codex --idempotency-key retry-policy-v1
+```
+
+Accept one durable lesson, then promote and find it:
+
+```sh
+localmind review accept <lesson-id> --project . --reviewer <your-name>
+localmind promote <lesson-id> --project .
+localmind search "deterministic fixtures" --project .
+```
+
+If you are running from the checkout instead of an installed binary, prefix a
+command with `cargo run -p localmind-cli --`.
+
+## The learning loop
+
+```text
+opted-in session
+      │
+      ▼
+redact ──> summarize ──> candidate lessons ──> human review
+                                                   │
+                               accepted only ──────┘
+                                      │
+                                      ▼
+                         Markdown memory + local index
+                                      │
+                                      ▼
+                           context for a later session
+```
+
+The current extractor is deterministic: explicit `Lesson:` markers plus
+heuristics for failure-and-resolution pairs, repeated commands, and user
+corrections. `SessionExtractor` is the seam for future model-backed extraction;
+cloud inference is not the default.
+
+## Review is the safety boundary
+
+| Command | What happens |
+|---|---|
+| `localmind review list` | Show pending candidates |
+| `localmind propose "…"` | Add a bounded, source-labelled pending candidate; never auto-accept |
+| `localmind review inspect <id>` | Read the evidence before deciding |
+| `localmind review accept <id>` | Mark the lesson as durable enough to keep |
+| `localmind review edit <id> "…"` | Correct the lesson before accepting it |
+| `localmind review reject <id>` | Reject it, optionally with a note |
+| `localmind review defer <id>` | Leave it for later |
+| `localmind promote <id>` | Write an accepted lesson to project memory |
+| `localmind audit` | Inspect the local decision history |
+
+Promotion writes readable Markdown below `.localmind/memory/project/`, updates
+the local search and relationship index, and records an audit event in
+`.localmind/localmind.sqlite`.
+
+## What gets written
+
+An imported session receives a deterministic folder under
+`.localmind/sessions/<session-id>/`:
+
+```text
+transcript.redacted.txt
+metadata.json
+summary.json
+candidates.json
+```
+
+Likely API keys, bearer tokens, token/password assignments, connection-string
+passwords, private keys, and configured sensitive paths are redacted before the
+transcript is persisted.
+
+## Context and skill drafts
+
+Accepted memory can be packaged for different agent hosts:
+
+```sh
+localmind context export "release checklist" --target localpilot --project .
+localmind context export "deterministic fixtures" --target open-ai-codex --project .
+```
+
+Repeated workflows can become disabled `SKILL.md` drafts:
+
+```sh
+localmind skills generate --project .
+localmind skills list --project .
+localmind skills inspect <skill-id> --project .
+localmind skills export <skill-id> --project .
+```
+
+LocalMind never installs or activates a generated skill by itself.
+
+## Cross-device sync
+
+Memory can follow you between your machines, encrypted end-to-end. LocalMind
+opens no sockets — you point it at a folder your own transport already syncs
+(Syncthing, OneDrive, a network share, a private git repo).
+
+```sh
+# On each machine: publish its card, then enroll the other after checking the
+# fingerprint matches on both screens.
+localmind sync device-card --project .
+localmind sync enroll --card ./their-card.json --confirm-fingerprint <fingerprint> --project .
+localmind sync devices --project .
+
+# Exchange memory through the folder, then review what arrived.
+localmind sync run --folder /path/to/synced/folder --project .
+localmind sync status --project .
+```
+
+Every synced memory is signed and sealed to your enrolled devices, so the folder
+only ever holds ciphertext. Incoming memory lands in the **review queue**, never
+straight into active memory; an unknown signer is rejected, and a conflicting
+edit is surfaced for you to reconcile rather than silently overwritten.
+
+## Review in the browser
+
+`localmind ui` serves the same store as a self-contained localhost web app —
+one binary, no build step, no external assets:
+
+```sh
+localmind ui --project . --open
+```
+
+Tabs: a dashboard, the review queue (bulk actions; `j`/`k` to move, `a`/`r`/`d`
+to decide, `e` to edit, `x` to select), the memory browser with provenance and
+audited delete, semantic search over ingested docs, an interactive code-graph
+view, and the audit log. Every endpoint is a thin wrapper over the same store
+methods the CLI calls, so the review gate cannot be bypassed. The server binds
+`127.0.0.1` only (default port 8091); `--token <secret>` additionally requires
+`?token=` on every request if the port is ever exposed beyond the machine.
+
+## Serve tools over MCP
+
+`localmind mcp serve` speaks the Model Context Protocol over stdio — a
+synchronous, newline-delimited JSON-RPC 2.0 loop, no async runtime — so an
+MCP-capable agent can query LocalMind directly:
+
+```sh
+localmind mcp serve --project .
+```
+
+Twelve tools: `memory_search`, `memory_context_export`, `doc_search`,
+`memory_status` (a read-only store-readiness snapshot), `memory_primer` (a
+read-only queryless project primer of the most salient accepted memory), the four
+`memory_symbol_*` code-graph tools, skill list/fetch, and `memory_propose`. The
+server binds to the project it is launched in — `mcp serve` walks up from the
+launch directory to the nearest `.localmind.toml`, so no fixed `--project` is
+needed. The proposal tool is the only write surface: it is additive, bounded,
+retry-safe, capped per server session, and can only enqueue a human-review
+candidate. It
+never accepts or promotes memory, including under automatic review mode.
+
+## Index code and documentation
+
+Two ingest commands feed the query tools above:
+
+```sh
+localmind graph reindex . --project .
+localmind ingest docs ./docs --project .
+```
+
+`graph reindex` walks a repository tree (VCS, build, and vendored directories
+are skipped; only source and Markdown extensions are candidates, so a stray
+binary cannot abort the pass) and drives the resumable code-graph reindexer to
+completion. `ingest docs` chunks Markdown at headings, embeds each passage
+into the semantic doc index, and is idempotent: re-ingesting an edited or
+shrunk file replaces its passages and prunes the stale tail. Embedding is
+best-effort — without a reachable embedding endpoint the text is stored
+un-vectored and still browsable. When LocalPilot already owns the configured
+server, the standalone CLI takes a machine-global lease for the complete
+embedding-capable command lifetime so LocalPilot cannot stop it mid-request.
+LocalMind never starts, stops, discovers, or locates LocalBox: a reachable
+user-managed endpoint is used without an ownership claim, and an unreachable
+endpoint degrades truthfully. `localmind backfill` is the exception because its
+entire job is embedding; with pending rows it exits with the exact repair cue
+`localbox embed-serve` instead of reporting a successful empty sweep.
+
+## Evidence so far
+
+In the controlled `localbench-uplift-v1` evaluation, injecting accepted lessons
+lifted a deliberately headroom-rich held-out suite from **0% to 100%**. The
+effect held on a second local model. This is evidence that reviewed memory can
+change outcomes, not a claim that every task becomes solvable.
+
+## Architecture for host authors
+
+The learning engine is split into host-neutral Rust crates. LocalPilot embeds it
+through an adapter; the core never depends on LocalPilot. The standalone CLI
+uses the same contracts for generic transcripts and other agent hosts.
+
+### What the standalone `localmind` CLI exposes
+
+Several engine capabilities are **implemented and tested in the crates but
+mounted by a host** (LocalPilot), not surfaced by this binary. Know which you get
+from the CLI alone:
+
+| Capability | Standalone `localmind` CLI | Notes |
+|---|---|---|
+| Import → closeout → review → promote → search (FTS5) → audit → context export | ✅ | The core loop |
+| Signed memory bundle export/import, `eval`, `status`, skill drafts | ✅ | |
+| Batch `insights` (distill/research) | ✅ (needs `[inference]`) | Model-backed; skipped with a notice when no endpoint |
+| Hybrid keyword+vector search, rerank | host-mounted | The LocalPilot host runs the rerank stage on its memory-injection retrieval (D-LM-0026); CLI **memory** search stays keyword (FTS5). The semantic surface the CLI does own is the doc index: `ingest docs` embeds documentation, and the `doc_search` MCP tool or the UI Docs tab retrieves it |
+| Code graph ingest + query, MCP graph tools | ✅ | `graph reindex` builds the graph over a repository tree; `mcp serve` and the UI Graph tab query it. Change-impact and the cold-start primer remain host-mounted |
+| Freshness pass, usage stats, provenance, source revalidation, memory delete | host-mounted | Exposed by the LocalPilot `learning`/`memory` commands |
+
+The `[retrieval] rerank` config keys take effect through a host that runs the
+rerank stage (default off; without an embedding endpoint the deterministic
+blend order is the whole story).
+
+**`local_only` note.** `local_only = true` is mandatory (setting it `false` is a
+typed error) and constrains both storage scope and inference egress. Configured
+inference endpoints must be explicit loopback destinations and are checked again
+at request time; hostnames and remote/LAN addresses are refused rather than
+resolved optimistically (D-LM-0034).
+
+| Area | Start here |
+|---|---|
+| Product scope and implementation status | [Vision](vision.md) |
+| Files, schema, versioning, and host contracts | [On-disk contract](docs/on-disk-contract.md) |
+| Architecture decisions | [Decisions](docs/decisions.md) |
+| Research ingestion and distillation | [Research distillation](docs/research-distillation.md) |
+| Full documentation map | [Docs index](docs/README.md) |
+| Release history | [Changelog](CHANGELOG.md) |
+
+<details>
+<summary><strong>Developing LocalMind</strong></summary>
+
+The local gate mirrors CI:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo check --workspace
+cargo run -p localmind-cli -- --help
+```
+
+CI aliases live in `.cargo/config.toml`: `cargo ci-fmt`, `cargo ci-lint`,
+`cargo ci-test`, and `cargo ci-doctest`. `localmind eval` runs the memory-quality
+regression suite and can emit JSON with `--json`.
+
+</details>
+
+## LocalX
+
+LocalMind is the learning layer in the
+[LocalX toolchain](https://c0degeek-dev.github.io/LocalStack/):
+
+| Project | Role |
+|---|---|
+| [LocalBox](https://github.com/C0deGeek-dev/LocalBox) | Run local models |
+| [LocalBench](https://github.com/C0deGeek-dev/LocalBench) | Find fast, stable settings |
+| [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) | Code through the agent harness |
+| **LocalMind** | Turn reviewed sessions into reusable project memory |
+
+## License
+
+LocalX-owned source is available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires a
+separate license. See [LICENSING.md](LICENSING.md) for the commercial contact,
+the 30 August 2026 licensing boundary, and third-party terms.

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LocalMind</title>
+  <link rel="stylesheet" href="/css/localmind.css">
+</head>
+<body>
+
+<header>
+  <h1><span class="logo">✳</span>LocalMind</h1>
+  <nav id="nav">
+    <a href="#dashboard">Dashboard</a>
+    <a href="#review">Review</a>
+    <a href="#memory">Memory</a>
+    <a href="#docs">Docs</a>
+    <a href="#skills">Skills</a>
+    <a href="#graph">Graph</a>
+    <a href="#audit">Audit</a>
+  </nav>
+  <span class="grow"></span>
+  <label class="rev">reviewer <input type="text" id="reviewer" size="18" maxlength="64" placeholder="who is reviewing?"></label>
+  <span class="pill" id="pill">…</span>
+  <button class="sm" id="helpBtn" title="What does everything mean?">ⓘ Help</button>
+</header>
+
+<div id="view"></div>
+
+<!-- Reviewer identity overlay: shown until an identity is stored. Not
+     dismissable — decisions are attributed to this name in the append-only
+     audit log, so no action may fire without an explicit answer. -->
+<div id="ident" class="overlay"><div class="box">
+  <h2>Who is reviewing?</h2>
+  <p>Every accept, reject, defer, edit and promote is recorded with your name in the
+  <b>append-only</b> audit log. Browsing needs no identity; deciding does.</p>
+  <form id="identForm">
+    <input type="text" id="identName" maxlength="64" placeholder="your name" autocomplete="off">
+    <button class="primary" type="submit">Save</button>
+  </form>
+</div></div>
+
+<!-- Help overlay -->
+<div id="help" class="overlay"><div class="box">
+  <button class="x sm" onclick="document.getElementById('help').classList.remove('on')">close</button>
+  <h2>What is what</h2>
+  <p>LocalMind holds three layers of local knowledge, all reviewed by you. Nothing becomes memory silently.</p>
+  <h3>Review — the candidate queue</h3>
+  <p><b>Accept &amp; promote</b>: mark the lesson good <b>and</b> write it to durable memory (a Markdown file + a vector embedding) so an agent recalls it. The normal action.</p>
+  <p><b>Accept only</b>: mark it accepted but don't write it to memory yet (rare — use if you'll promote later).</p>
+  <p><b>Promote</b>: write an already-accepted item to memory (the second half of the pipeline).</p>
+  <p><b>Reject</b>: discard the candidate — it will not become memory. <b>Defer</b>: keep it pending for later.</p>
+  <h3>Memory — accepted lessons</h3>
+  <p>Your durable, retrievable lessons. Search or browse, open one for its full text + <b>provenance</b> ("why do you think that"). <b>Delete</b> removes it permanently (recorded in Audit).</p>
+  <h3>Docs — ingested prose</h3>
+  <p>Semantic search <b>and</b> a file browser over every repo's Markdown (READMEs, vision, ADRs, plans). Reference passages, not memory.</p>
+  <h3>Graph — code structure</h3>
+  <p>Symbols and their call / import / test edges. See the <b>overview</b> (counts, languages, hotspots) or search a symbol and walk its neighborhood.</p>
+  <h3>Audit — the log</h3>
+  <p>An <b>append-only</b> record of every action (accept, promote, delete, …). Entries are never edited or deleted — it is the history, not something you change.</p>
+</div></div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Module scripts -->
+<script type="module" src="/js/app.js"></script>
+
+</body>
+</html>

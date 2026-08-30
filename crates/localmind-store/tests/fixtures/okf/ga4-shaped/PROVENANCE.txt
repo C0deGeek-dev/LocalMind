@@ -1,0 +1,14 @@
+OKF conformance fixtures — provenance and clean-room note
+
+These files are ORIGINAL fixtures authored for LocalMind's OKF conformance
+tests. They conform to the Open Knowledge Format v0.1 specification (reserved
+fields type/title/description/resource/tags/timestamp; only `type` required;
+no-frontmatter `index.md` navigation; markdown-link concept graph) and model the
+STRUCTURE of the public Google Cloud `knowledge-catalog` GA4 sample bundle
+(https://github.com/GoogleCloudPlatform/knowledge-catalog, Apache-2.0).
+
+They are NOT copied from that repository. Byte-for-byte vendoring of the upstream
+Apache-2.0 sample bundles is intentionally deferred (opportunistic): the authored
+fixtures here prove conformance to the OKF v0.1 format, which is the contract
+under test. This file is `.txt`, not `.md`, so the importer's markdown walk does
+not treat it as a concept.

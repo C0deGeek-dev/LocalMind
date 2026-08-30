@@ -1,0 +1,70 @@
+//! Deterministic code-structure ingestion for the LocalMind graph.
+//!
+//! The host hands this crate a list of files it is allowed to read; the
+//! ingester walks nothing on its own. Parsing is AST-based (tree-sitter, Rust
+//! first), offline, and deterministic: no network and no model in the
+//! pipeline. Extracted nodes and edges carry the same provenance and
+//! confidence vocabulary as lessons and persist through the graph store.
+
+mod boundary;
+mod highlight;
+mod impact;
+mod ingest;
+mod join;
+mod language;
+mod overview;
+mod parse;
+mod primer;
+mod provider;
+mod reindex;
+mod resolve;
+mod staleness;
+mod tags;
+
+pub use boundary::{AdmittedFile, BoundaryRejection, IngestBoundary};
+pub use highlight::{highlight, HighlightSpan};
+pub use impact::{
+    compute_impact, ChangeImpact, ChangedSpan, ImpactOptions, ImpactedSymbol, RiskTier,
+};
+pub use ingest::{IngestReport, Ingester};
+pub use join::{anchor_memory, AnchorReport};
+pub use language::Language;
+pub use overview::{
+    compute_overview, ArchitectureOverview, LanguageStat, OverviewOptions, PackageStat, SymbolStat,
+};
+pub use parse::{CallSite, ParsedFile, RustParser, UsePath};
+pub use primer::{distill_primer, overview_content_hash, primer_is_stale};
+pub use provider::{CodeIntelligenceProvider, NativeProvider};
+pub use reindex::{ReindexBatchReport, ReindexPlan, Reindexer};
+pub use resolve::{resolve_edges, resolve_file_edges, ResolutionContext};
+pub use staleness::{
+    change_affected_memories, flag_stale_candidates, AffectedMemory, StalenessConfig,
+    StalenessReport,
+};
+
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CodeGraphError {
+    #[error("workspace root {path:?} is not usable: {source}")]
+    InvalidRoot {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to read {path:?}: {source}")]
+    ReadSource {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("the Rust grammar failed to load: {0}")]
+    Grammar(String),
+    #[error("confidence value out of range: {0}")]
+    Confidence(#[from] localmind_core::ContractError),
+    #[error(transparent)]
+    Store(#[from] localmind_store::GraphStoreError),
+    #[error(transparent)]
+    Memory(#[from] localmind_store::MemoryPersistenceError),
+    #[error(transparent)]
+    Review(#[from] localmind_store::ReviewQueueError),
+}

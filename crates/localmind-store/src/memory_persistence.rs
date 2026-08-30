@@ -1,0 +1,3187 @@
+use crate::revalidation::{
+    is_revalidation_candidate, parse_verdict, RevalidationConfig, RevalidationReport,
+    RevalidationVerdict, VerdictSource, VERDICT_PROMPT,
+};
+use crate::{
+    MemoryPathResolver, ProjectConfig, ReviewQueue, ReviewQueueError, ReviewQueueItem,
+    StoreConfigError,
+};
+use localmind_core::{
+    content_fingerprint, AuditEventKind, CandidateDestination, Confidence, EnvFingerprint,
+    EpistemicStatus, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus, ReviewItemId,
+    ReviewState, SkillDraft, SyncMeta,
+};
+use localmind_inference::{
+    ChatEndpoint, ChatMessage, InferenceCapability, InferenceError, TokenUsage,
+};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::fs;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+use time::OffsetDateTime;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub kind: String,
+    pub actor: String,
+    pub subject: String,
+    pub metadata_json: String,
+    pub happened_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySearchResult {
+    pub memory_id: MemoryEntryId,
+    pub path: PathBuf,
+    pub score: i64,
+    pub snippet: String,
+    /// Whether this body contains the query's **rarest** term — its subject.
+    ///
+    /// A question's rarest term carries its specificity: in *what should I know
+    /// about `process_dir`*, `process_dir` is what is being asked about and
+    /// `know`/`about` are the shape of the asking. A body containing the subject
+    /// is answering the question that was asked; a body matching only the
+    /// scaffolding is answering the shape of it.
+    ///
+    /// Exposed because the distinction survives past retrieval: a caller applying
+    /// a semantic relevance floor should exempt a hit that already earned its
+    /// place lexically, and apply the floor to one that did not. `false` when no
+    /// gate applied (fewer significant terms than the gate needs) — the
+    /// conservative reading, since no subject was identified.
+    pub subject_matched: bool,
+    /// The memory's lesson category (e.g. `SecurityWarning`, `ProjectConvention`),
+    /// exposed at retrieval time so a caller can gate or dedup injection by
+    /// category without a second lookup.
+    pub category: String,
+    /// Index timestamp of the entry, as stored (RFC-ish text).
+    pub created_at: String,
+    /// Flagged by change-aware invalidation: the code this memory was anchored to
+    /// changed, so it may be stale and is awaiting review. Still served — callers
+    /// down-rank or mark it rather than dropping it.
+    pub stale_candidate: bool,
+    /// The memory's deterministic epistemic status (observation/hypothesis/fact/
+    /// decision/procedure), so trust is legible at retrieval time.
+    pub epistemic_status: EpistemicStatus,
+    /// True when this memory is in a `contradicts` relationship with another, so
+    /// the agent can flag the conflict instead of asserting one side blindly.
+    pub contradicted: bool,
+    /// How many times this memory has been injected into a turn (the usage
+    /// signal; 0 = never retrieved). Exposed read-only at retrieval; the bump is
+    /// post-turn, never on this read path.
+    pub hit_count: i64,
+    /// The label of the machine that wrote this memory, when it was synced from
+    /// another device (else `None`). Exposed at retrieval so injection can
+    /// down-weight — never drop — a lesson whose origin machine differs from the
+    /// one retrieving it.
+    pub origin_device: Option<String>,
+}
+
+/// The provenance answer for one memory — "why do you think that?". Source
+/// session, confidence, epistemic status, and the memories it contradicts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryProvenance {
+    pub memory_id: MemoryEntryId,
+    pub source_session: Option<String>,
+    pub confidence: f32,
+    pub epistemic_status: EpistemicStatus,
+    pub status: String,
+    pub stale_candidate: bool,
+    pub contradicts: Vec<MemoryEntryId>,
+    /// The machine that wrote this memory, when it was synced from another device
+    /// (else `None`) — the "which of my machines taught me this" surface.
+    pub origin_device: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSearchResult {
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub score: f32,
+}
+
+/// One semantic hit over ingested documentation: the source file, the chunk's
+/// ordinal and (optional) heading, the passage text, and the cosine score.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocSearchResult {
+    pub path: String,
+    pub ordinal: i64,
+    pub heading: Option<String>,
+    pub body: String,
+    pub score: f32,
+}
+
+/// Why an ad-hoc query embedding did or did not come back — the diagnosed
+/// variant of the best-effort `embed_query` contract. A degraded state is a
+/// value, never an error, so semantic features keep degrading gracefully
+/// while their callers can explain the degradation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EmbedQueryOutcome {
+    /// No embedding endpoint/model is configured (or the embeddings feature is
+    /// disabled) — semantic search cannot run until `[inference]`
+    /// `embedding_base_url` + `embedding_model` are set.
+    NotConfigured,
+    /// An endpoint is configured but the embed call failed or returned nothing.
+    EndpointUnavailable { error: String },
+    /// The query embedded successfully.
+    Embedded(Vec<f32>),
+}
+
+/// The capability state behind a semantic doc-search response, so an empty
+/// result is diagnosable instead of ambiguous.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocSearchStatus {
+    /// The doc index has no passages at all — nothing has been ingested.
+    NoDocChunks,
+    /// Passages exist but embeddings are not configured, so semantic search
+    /// cannot run.
+    EmbeddingsNotConfigured,
+    /// Passages exist and an endpoint is configured, but the embed call failed.
+    EmbeddingEndpointUnavailable { error: String },
+    /// Passages exist but none of them carries a stored vector — ingest ran
+    /// without (working) embeddings.
+    NoDocVectors,
+    /// Doc vectors exist but none is readable against the active query model:
+    /// the index was embedded under a different model or dimension count and
+    /// needs a re-embed (re-run ingest with the active embedding model).
+    IndexMismatch {
+        indexed_models: Vec<String>,
+        query_dimensions: usize,
+    },
+    /// A valid semantic search ran; `results` holds every hit at or above the
+    /// relevance floor (possibly none — a genuine no-match).
+    Searched,
+}
+
+/// A semantic doc search plus the capability state it ran under.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocSearchReport {
+    pub status: DocSearchStatus,
+    pub results: Vec<DocSearchResult>,
+}
+
+/// How much accepted memory carries an embedding, per scope, plus vectors whose
+/// memory row is no longer active.
+///
+/// Counted over `status = 'active'` rows on both sides deliberately: deriving the
+/// gap as `total - vectors` is wrong whenever a superseded row's vector was never
+/// pruned, because the two errors cancel and the number still looks right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryVectorCoverage {
+    pub project_active: i64,
+    pub project_vectorized: i64,
+    pub global_active: i64,
+    pub global_vectorized: i64,
+    /// Vectors under `subject_kind = 'memory'` with no matching active row.
+    pub stale: i64,
+}
+
+impl MemoryVectorCoverage {
+    /// Active accepted memories, both scopes, with no stored vector.
+    #[must_use]
+    pub fn holes(&self) -> i64 {
+        (self.project_active - self.project_vectorized)
+            + (self.global_active - self.global_vectorized)
+    }
+}
+
+/// Why a diagnosed memory vector scan returned what it did.
+///
+/// The memory-side counterpart to [`DocSearchStatus`]. Its absence is why months
+/// of failed embedding presented as an ordinary empty result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryScanStatus {
+    /// No `[inference]` embedding endpoint is configured.
+    EmbeddingsNotConfigured,
+    /// An endpoint is configured but did not answer.
+    EmbeddingEndpointUnavailable { error: String },
+    /// No accepted memory carries a vector yet.
+    NoMemoryVectors,
+    /// Memory vectors exist, but none is comparable with the active model's
+    /// output — a model or dimension change the index has not caught up with.
+    IndexMismatch { indexed_models: Vec<String> },
+    /// The scan ran.
+    Scanned,
+}
+
+/// A diagnosed memory vector scan: the ranked rows plus why.
+#[derive(Clone, Debug)]
+pub struct MemoryScanReport {
+    pub status: MemoryScanStatus,
+    pub scored: Vec<VectorSearchResult>,
+}
+
+/// One kind-filtered ranked vector scan: the readable scored rows (sorted,
+/// untruncated), how many candidate rows the index holds for the kind, and
+/// the distinct models those rows were embedded under (for mismatch
+/// reporting).
+///
+/// `candidates` and `models` are what let a caller tell "no vectors of this
+/// kind" apart from "vectors exist but were embedded under a different model",
+/// which otherwise both present as an empty result.
+#[derive(Clone, Debug)]
+pub struct VectorKindScan {
+    pub scored: Vec<VectorSearchResult>,
+    pub candidates: i64,
+    pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryRecord {
+    pub memory_id: MemoryEntryId,
+    pub path: PathBuf,
+    pub scope: String,
+    pub category: String,
+    pub status: String,
+    pub body: String,
+    /// How many times this memory has been injected into a turn (the usage
+    /// signal; 0 = never retrieved). Runtime-accumulated, best-effort.
+    pub hit_count: i64,
+    /// When this memory was last injected (RFC-ish text), or `None` if never.
+    pub last_used_at: Option<String>,
+    /// Flagged for review (change-aware staleness or the freshness pass).
+    pub stale_candidate: bool,
+    /// In a `contradicts` relationship with another memory.
+    pub contradicted: bool,
+    /// The single programming language this memory is about, or `None` when it is
+    /// language-agnostic / cross-cutting.
+    pub language: Option<String>,
+    /// When this memory was accepted/written (RFC-ish text). Used as a recency
+    /// tie-break by the queryless primer.
+    pub created_at: Option<String>,
+}
+
+/// The machine-wide global memory store: a separate SQLite index and Markdown
+/// root under the per-user home, shared by every project on the machine. Opened
+/// alongside the project store only when the project opts in to `GlobalUser`
+/// scope, so a global lesson is never written or read without consent.
+struct GlobalStore {
+    /// The global index/FTS/vector database, distinct from the project database.
+    /// The Markdown root is resolved from the project config's
+    /// `global_memory_root()`, so it is not duplicated here.
+    connection: Connection,
+}
+
+pub struct MemoryPersistence {
+    config: ProjectConfig,
+    connection: Connection,
+    global: Option<GlobalStore>,
+}
+
+impl MemoryPersistence {
+    pub fn open_project(project_root: impl AsRef<Path>) -> Result<Self, MemoryPersistenceError> {
+        let config =
+            ProjectConfig::discover(project_root).map_err(MemoryPersistenceError::Config)?;
+        let state_dir = config.project_root.join(".localmind");
+        fs::create_dir_all(&state_dir).map_err(|source| {
+            MemoryPersistenceError::CreateStateDir {
+                path: state_dir.clone(),
+                source,
+            }
+        })?;
+        let db_path = state_dir.join("localmind.sqlite");
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            MemoryPersistenceError::OpenDatabase {
+                path: db_path,
+                source,
+            }
+        })?;
+        let global = Self::open_global(&config)?;
+        let persistence = Self {
+            config,
+            connection,
+            global,
+        };
+        persistence.migrate()?;
+        Ok(persistence)
+    }
+
+    /// Open the machine-wide global store when the project opts in. The global
+    /// database lives beside the global memory root's parent (`~/.localmind/`), so
+    /// it is shared across projects and resolved independently of any project.
+    fn open_global(config: &ProjectConfig) -> Result<Option<GlobalStore>, MemoryPersistenceError> {
+        if !config.allows_global() {
+            return Ok(None);
+        }
+        let Some(root) = config.global_memory_root() else {
+            return Ok(None);
+        };
+        // The DB sits in the global root's parent (the `.localmind/` state dir),
+        // mirroring the project layout (`project/.localmind/localmind.sqlite` with
+        // memory under `project/.localmind/memory`).
+        let state_dir = root.parent().unwrap_or(root.as_path()).to_path_buf();
+        fs::create_dir_all(&state_dir).map_err(|source| {
+            MemoryPersistenceError::CreateStateDir {
+                path: state_dir.clone(),
+                source,
+            }
+        })?;
+        let db_path = state_dir.join("localmind.sqlite");
+        let connection = crate::schema::open_database(&db_path).map_err(|source| {
+            MemoryPersistenceError::OpenDatabase {
+                path: db_path,
+                source,
+            }
+        })?;
+        crate::schema::migrate(&connection).map_err(MemoryPersistenceError::Schema)?;
+        Ok(Some(GlobalStore { connection }))
+    }
+
+    /// The connection that owns an entry of the given scope: the global store for
+    /// `GlobalUser`, otherwise the project store. Errors when a global entry is
+    /// requested but the project did not open a global store.
+    fn connection_for(&self, scope: &MemoryScope) -> Result<&Connection, MemoryPersistenceError> {
+        match scope {
+            MemoryScope::GlobalUser => self
+                .global
+                .as_ref()
+                .map(|store| &store.connection)
+                .ok_or(MemoryPersistenceError::GlobalScopeDisabled),
+            _ => Ok(&self.connection),
+        }
+    }
+
+    pub fn migrate(&self) -> Result<(), MemoryPersistenceError> {
+        crate::schema::migrate(&self.connection).map_err(MemoryPersistenceError::Schema)
+    }
+
+    pub fn promote_review_item(
+        &self,
+        item_id: &ReviewItemId,
+    ) -> Result<MemoryEntry, MemoryPersistenceError> {
+        let queue = ReviewQueue::open_project(&self.config.project_root)?;
+        let item =
+            queue
+                .get(item_id)?
+                .ok_or_else(|| MemoryPersistenceError::MissingReviewItem {
+                    item_id: item_id.clone(),
+                })?;
+        if !matches!(item.state, ReviewState::Accepted | ReviewState::Edited) {
+            return Err(MemoryPersistenceError::ReviewItemNotAccepted {
+                item_id: item_id.clone(),
+                state: format!("{:?}", item.state),
+            });
+        }
+        // A provenance-backed excerpt is evidence, not a reusable lesson: it
+        // stays reviewable but never becomes durable memory verbatim — the
+        // reviewer distils it first (their replacement text is what promotes).
+        if item.candidate.requires_edit_before_promotion && item.replacement_summary.is_none() {
+            return Err(MemoryPersistenceError::ReviewItemNeedsEdit {
+                item_id: item_id.clone(),
+            });
+        }
+
+        // Only the reviewer-approved lesson text is written to memory; any
+        // separately-carried `evidence_text` stays with the review item and
+        // audit records, never in the searchable body.
+        let body = item
+            .replacement_summary
+            .clone()
+            .unwrap_or_else(|| item.candidate.summary().to_string());
+        // A supersede decision retires its target: the new memory records the
+        // target in `supersedes`, and the same transaction flips the target to
+        // `Superseded` so retrieval (filtered to `status = 'active'`) stops
+        // serving it.
+        let target = item.supersede_target.clone();
+        // Route the promoted memory to the project or the machine-wide global
+        // store: an explicit `GlobalMemory` suggestion or the conservative
+        // category classifier asks for global, but only when the project opts in
+        // to the `GlobalUser` scope (otherwise it stays project — a safe
+        // fallback, never an error). The store that owns the scope owns the
+        // index, so a global lesson lands in the database every project reads.
+        let wants_global = item.candidate.suggested_destination.is_global()
+            || CandidateDestination::default_for_category(&item.candidate.category).is_global();
+        let scope = if wants_global && self.config.allows_global() {
+            MemoryScope::GlobalUser
+        } else {
+            MemoryScope::Project
+        };
+        let connection = self.connection_for(&scope)?;
+        let mut entry = MemoryEntry {
+            id: MemoryEntryId::new(item.candidate.id.as_str()),
+            scope,
+            body,
+            category: item.candidate.category.clone(),
+            confidence: Confidence::new(item.candidate.confidence.value())?,
+            source_session: Some(item.session_id.clone()),
+            evidence: item.candidate.evidence().to_vec(),
+            tags: vec!["accepted".to_string()],
+            related_files: item.candidate.related_files.clone(),
+            related_entities: item.candidate.related_entities.clone(),
+            created_at: Some(OffsetDateTime::now_utc()),
+            updated_at: None,
+            supersedes: target.iter().cloned().collect(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
+        };
+        self.stamp_origin_env(&mut entry);
+        // The Markdown file is written first; the single transaction that
+        // indexes it and records the audit row is the point of truth. A crash
+        // after the file write leaves an unindexed file that the next
+        // promotion overwrites — never a half-indexed entry.
+        // A lesson named only by idiom inherits the language of the workspace it
+        // was learned in (the project this promotion runs against).
+        let session_language =
+            crate::language::detect_workspace_language(&self.config.project_root);
+        let path = MemoryPathResolver::write_memory_file(&self.config, &entry)?;
+        let tx = connection
+            .unchecked_transaction()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::index_memory_with(&tx, &entry, &path, session_language)?;
+        if let Some(target) = &target {
+            Self::supersede_memory_with(&tx, target)?;
+            Self::write_audit_with(
+                &tx,
+                AuditEventKind::MemorySuperseded,
+                item.reviewer.as_deref().unwrap_or("unknown"),
+                target.as_str(),
+                &serde_json::json!({
+                    "superseded_by": entry.id.to_string(),
+                    "review_item": item.id.to_string(),
+                }),
+            )?;
+        }
+        Self::write_audit_with(
+            &tx,
+            AuditEventKind::MemoryPromoted,
+            item.reviewer.as_deref().unwrap_or("unknown"),
+            entry.id.as_str(),
+            &serde_json::json!({
+                "review_item": item.id.to_string(),
+                "session": item.session_id.to_string(),
+            }),
+        )?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
+        self.embed_memory_if_configured(connection, &entry)?;
+        Ok(entry)
+    }
+
+    /// Flips a memory's index status to `Superseded` so retrieval (which filters
+    /// to `status = 'active'`) stops returning it. The Markdown body and the
+    /// index row are kept — supersession is reversible and provenance survives.
+    fn supersede_memory_with(
+        connection: &Connection,
+        target: &MemoryEntryId,
+    ) -> Result<(), MemoryPersistenceError> {
+        // Lowercase to match the `'active'` literal the index is written with and
+        // the `status = 'active'` retrieval filter.
+        connection
+            .execute(
+                "UPDATE memory_index SET status = 'superseded' WHERE memory_id = ?1",
+                params![target.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Persists an accepted memory entry: the Markdown file plus its search
+    /// index row. Review-queue promotion goes through here; hosts accepting
+    /// memory through their own review surfaces may use it directly.
+    ///
+    /// The index, FTS, and relationship rows commit in one transaction after
+    /// the file write, so the database never sees a partially indexed entry.
+    pub fn persist_memory_entry(
+        &self,
+        entry: &MemoryEntry,
+    ) -> Result<PathBuf, MemoryPersistenceError> {
+        // The Markdown path resolves to the global root for a `GlobalUser` entry
+        // and the project root otherwise; the index transaction goes to the store
+        // that owns the scope, so a global lesson lands in the machine-wide
+        // database that every project reads.
+        let connection = self.connection_for(&entry.scope)?;
+        // Stamp the origin machine on syncable knowledge before it is written.
+        // The caller's entry is left untouched; the persisted copy carries the
+        // fingerprint.
+        let mut entry = entry.clone();
+        self.stamp_origin_env(&mut entry);
+        let entry = &entry;
+        // A directly-persisted (seeded) entry carries no session context; its
+        // language comes from the body alone (the body-wins branch).
+        let path = MemoryPathResolver::write_memory_file(&self.config, entry)?;
+        let tx = connection
+            .unchecked_transaction()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::index_memory_with(&tx, entry, &path, None)?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
+        self.embed_memory_if_configured(connection, entry)?;
+        Ok(path)
+    }
+
+    /// Stamp the origin-machine fingerprint on a memory that will sync, so the
+    /// destination device can tell same-machine from cross-machine knowledge.
+    /// Best-effort and total: machine-local knowledge (which never leaves this
+    /// device) is left unstamped, an already-stamped entry is untouched, and
+    /// capture reads only compile-time constants plus the configured device
+    /// label — it can never block or fail a write.
+    fn stamp_origin_env(&self, entry: &mut MemoryEntry) {
+        if !entry.syncs() || entry.sync_meta.origin_env.is_some() {
+            return;
+        }
+        entry.sync_meta.origin_env = Some(EnvFingerprint::capture(self.config.sync_device_label()));
+    }
+
+    pub fn record_review_item_audit(
+        &self,
+        item: &ReviewQueueItem,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::ReviewDecisionRecorded,
+            item.reviewer.as_deref().unwrap_or("unknown"),
+            item.id.as_str(),
+            &serde_json::json!({
+                "state": format!("{:?}", item.state),
+                "session": item.session_id.to_string(),
+                "action": item.reviewer_action.as_deref().unwrap_or_default(),
+                "merge_target": item.merge_target.as_ref().map(ReviewItemId::as_str),
+            }),
+        )
+    }
+
+    pub fn record_context_export(
+        &self,
+        query: &str,
+        target: &str,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::ContextPackExported,
+            "cli",
+            target,
+            &serde_json::json!({ "query": query, "target": target }),
+        )
+    }
+
+    pub fn record_skill_draft_created(
+        &self,
+        draft: &SkillDraft,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::SkillDraftCreated,
+            "cli",
+            draft.id.as_str(),
+            &serde_json::json!({ "name": draft.name, "disabled": true }),
+        )
+    }
+
+    pub fn record_inference_call(
+        &self,
+        feature: &str,
+        endpoint_kind: &str,
+        model: &str,
+        usage: Option<&TokenUsage>,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(
+            AuditEventKind::InferenceCallCompleted,
+            "localmind",
+            feature,
+            &serde_json::json!({
+                "feature": feature,
+                "endpoint_kind": endpoint_kind,
+                "model": model,
+                "prompt_tokens": usage.and_then(|value| value.prompt_tokens),
+                "completion_tokens": usage.and_then(|value| value.completion_tokens),
+                "total_tokens": usage.and_then(|value| value.total_tokens),
+            }),
+        )
+    }
+
+    pub fn list_memory(&self) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        // Project memory, then global memory when the global store is open, so
+        // `memory list` shows every accepted memory the session can retrieve.
+        let mut records = Self::list_in(&self.connection)?;
+        if let Some(global) = &self.global {
+            records.extend(Self::list_in(&global.connection)?);
+        }
+        Ok(records)
+    }
+
+    fn list_in(connection: &Connection) -> Result<Vec<MemoryRecord>, MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT memory_id, path, scope, category, status, body, hit_count, last_used_at,
+                       stale_candidate, contradicted, language, created_at
+                FROM memory_index
+                WHERE status = 'active'
+                ORDER BY created_at, memory_id
+                "#,
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(MemoryRecord {
+                    memory_id: MemoryEntryId::new(row.get::<_, String>(0)?),
+                    path: PathBuf::from(row.get::<_, String>(1)?),
+                    scope: row.get(2)?,
+                    category: row.get(3)?,
+                    status: row.get(4)?,
+                    body: row.get(5)?,
+                    hit_count: row.get(6)?,
+                    last_used_at: row.get(7)?,
+                    stale_candidate: row.get::<_, i64>(8)? != 0,
+                    contradicted: row.get::<_, i64>(9)? != 0,
+                    language: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(records)
+    }
+
+    pub fn delete_memory(
+        &self,
+        memory_id: &MemoryEntryId,
+        actor: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        // The memory may live in the project store or the machine-wide global
+        // store; resolve which one holds it (project first), along with that
+        // store's connection and root for the containment check.
+        let (connection, root, path) =
+            if let Some(path) = Self::memory_path_in(&self.connection, memory_id)? {
+                (&self.connection, self.config.memory_root(), path)
+            } else if let (Some(global), Some(global_root)) =
+                (&self.global, self.config.global_memory_root())
+            {
+                match Self::memory_path_in(&global.connection, memory_id)? {
+                    Some(path) => (&global.connection, global_root, path),
+                    None => return Ok(false),
+                }
+            } else {
+                return Ok(false);
+            };
+
+        if !path_is_under_root(&root, &path) {
+            return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
+        }
+
+        // The file goes first: a crash between the file removal and the
+        // transaction below leaves a stale index row pointing at a missing
+        // file, and re-running the delete heals it (missing files are
+        // tolerated). The reverse order would leave the body on disk with no
+        // index row left to find it by.
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(MemoryPersistenceError::DeleteMemoryFile {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        }
+
+        // Relationships, FTS, index, and the audit row commit atomically: no
+        // crash point can leave the database referencing half a memory.
+        let tx = connection
+            .unchecked_transaction()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM memory_relationships WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM memory_fts WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM memory_index WHERE memory_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM vector_index WHERE subject_kind = 'memory' AND subject_id = ?1",
+            params![memory_id.as_str()],
+        )
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::write_audit_with(
+            &tx,
+            AuditEventKind::MemoryDeleted,
+            actor,
+            memory_id.as_str(),
+            &serde_json::json!({}),
+        )?;
+        tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(true)
+    }
+
+    pub fn upsert_memory_embedding(
+        &self,
+        memory_id: &MemoryEntryId,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
+        Self::upsert_memory_embedding_with(
+            &self.connection,
+            memory_id,
+            source_fingerprint,
+            model,
+            vector,
+        )
+    }
+
+    /// Embed an ad-hoc query string against the configured embedding endpoint —
+    /// for comparing a not-yet-stored candidate against stored memory vectors
+    /// (semantic dedup). Returns `Ok(None)` when embeddings are not configured
+    /// **or** the endpoint is unreachable, so a semantic feature degrades to the
+    /// lexical contract rather than failing the caller (best-effort, mirroring
+    /// memory embedding at promotion). Callers that need to *say why* a
+    /// semantic feature is degraded use
+    /// [`embed_query_diagnosed`](Self::embed_query_diagnosed) instead.
+    pub fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>, MemoryPersistenceError> {
+        match self.embed_query_diagnosed(text)? {
+            EmbedQueryOutcome::Embedded(vector) => Ok(Some(vector)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Like [`embed_query`](Self::embed_query), but distinguishing *why* no
+    /// vector came back: embeddings not configured (no endpoint/model or the
+    /// embeddings feature disabled) versus a configured endpoint that failed.
+    /// Still best-effort — a failure is a value, never an error, so callers
+    /// keep degrading gracefully while being able to explain the degradation.
+    pub fn embed_query_diagnosed(
+        &self,
+        text: &str,
+    ) -> Result<EmbedQueryOutcome, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(EmbedQueryOutcome::NotConfigured);
+        };
+        match endpoint.embed(std::slice::from_ref(&text.to_string())) {
+            Ok(vectors) => match vectors.into_iter().next().filter(|v| !v.is_empty()) {
+                Some(vector) => Ok(EmbedQueryOutcome::Embedded(vector)),
+                None => Ok(EmbedQueryOutcome::EndpointUnavailable {
+                    error: "embedding endpoint returned no vector".to_string(),
+                }),
+            },
+            Err(error) => Ok(EmbedQueryOutcome::EndpointUnavailable {
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    /// Upsert a memory's embedding on the given connection (project or global),
+    /// so a global memory's vector lands in the global database.
+    fn upsert_memory_embedding_with(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
+        Self::upsert_vector_row(
+            connection,
+            "memory",
+            memory_id.as_str(),
+            source_fingerprint,
+            model,
+            vector,
+        )
+    }
+
+    /// Upsert one row into the shared `vector_index`, keyed by
+    /// `(subject_kind, subject_id)`. The fingerprint short-circuit makes a
+    /// re-embed of unchanged content a no-op (returns `Ok(false)`); a changed
+    /// fingerprint or a new subject writes the vector and returns `Ok(true)`.
+    /// `subject_kind` is `'memory'` for accepted lessons and `'doc'` for
+    /// ingested documentation chunks — both share ranking in
+    /// [`vector_search`](Self::vector_search).
+    fn upsert_vector_row(
+        connection: &Connection,
+        subject_kind: &str,
+        subject_id: &str,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<bool, MemoryPersistenceError> {
+        if vector.is_empty() {
+            return Err(MemoryPersistenceError::InvalidVector {
+                detail: "vector must not be empty".to_string(),
+            });
+        }
+        let existing: Option<(String, String)> = connection
+            .query_row(
+                "SELECT source_fingerprint, model FROM vector_index WHERE subject_kind = ?1 AND subject_id = ?2",
+                params![subject_kind, subject_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        // Skip only when the stored vector is current in *both* respects. The
+        // fingerprint alone was the old test, which made a model change
+        // unrepairable through this path: the body had not changed, so the write
+        // short-circuited and the row kept a vector from the wrong model while
+        // reporting success.
+        if existing
+            .as_ref()
+            .is_some_and(|(stored_fingerprint, stored_model)| {
+                stored_fingerprint == source_fingerprint && stored_model == model
+            })
+        {
+            return Ok(false);
+        }
+
+        Self::write_vector_row(
+            connection,
+            subject_kind,
+            subject_id,
+            source_fingerprint,
+            model,
+            vector,
+        )
+        .map(|()| true)
+    }
+
+    /// Write a vector row unconditionally, replacing whatever is there.
+    ///
+    /// Split out of [`upsert_vector_row`](Self::upsert_vector_row) so a caller
+    /// that has already decided the row needs replacing — a backfill sweep — is
+    /// not silently short-circuited by an up-to-date fingerprint.
+    fn write_vector_row(
+        connection: &Connection,
+        subject_kind: &str,
+        subject_id: &str,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> Result<(), MemoryPersistenceError> {
+        let blob = encode_vector(vector);
+        connection
+            .execute(
+                r#"
+                INSERT INTO vector_index
+                (subject_kind, subject_id, source_fingerprint, model, dimensions, vector_blob, updated_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(subject_kind, subject_id) DO UPDATE SET
+                    source_fingerprint = excluded.source_fingerprint,
+                    model = excluded.model,
+                    dimensions = excluded.dimensions,
+                    vector_blob = excluded.vector_blob,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    subject_kind,
+                    subject_id,
+                    source_fingerprint,
+                    model,
+                    i64::try_from(vector.len()).map_err(|_| MemoryPersistenceError::InvalidVector {
+                        detail: "vector has too many dimensions".to_string(),
+                    })?,
+                    blob,
+                    OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::write_audit_with(
+            connection,
+            AuditEventKind::VectorIndexUpdated,
+            "localmind",
+            subject_id,
+            &serde_json::json!({
+                "subject_kind": subject_kind,
+                "model": model,
+                "dimensions": vector.len(),
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Ingest one documentation chunk: store its text in `doc_chunk` and, when
+    /// `embed` is set and an embedding endpoint is configured and reachable,
+    /// embed the body into `vector_index` under `subject_kind = 'doc'`. The text
+    /// row is written unconditionally (so re-ingest is idempotent and the
+    /// passage is always citable); the vector is a best-effort addendum — a down
+    /// endpoint leaves the chunk searchable only once re-ingested with
+    /// embeddings up. `embed = false` lets a host that suppresses ingest-time
+    /// embedding cost keep that promise here too. Returns whether a vector was
+    /// written.
+    pub fn ingest_doc_chunk(
+        &self,
+        chunk_id: &str,
+        path: &str,
+        ordinal: i64,
+        heading: Option<&str>,
+        body: &str,
+        embed: bool,
+    ) -> Result<bool, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO doc_chunk(chunk_id, path, ordinal, heading, body, updated_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    path = excluded.path,
+                    ordinal = excluded.ordinal,
+                    heading = excluded.heading,
+                    body = excluded.body,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    chunk_id,
+                    path,
+                    ordinal,
+                    heading,
+                    body,
+                    OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+
+        if !embed {
+            return Ok(false);
+        }
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(false);
+        };
+        let vectors = match endpoint.embed(std::slice::from_ref(&body.to_string())) {
+            Ok(vectors) => vectors,
+            // Best-effort: a down endpoint leaves the chunk text stored without a
+            // vector rather than failing the ingest.
+            Err(_) => return Ok(false),
+        };
+        let Some(vector) = vectors.first() else {
+            return Ok(false);
+        };
+        Self::upsert_vector_row(
+            &self.connection,
+            "doc",
+            chunk_id,
+            &content_fingerprint(body),
+            endpoint.model(),
+            vector,
+        )
+    }
+
+    /// Delete every stored chunk (and its vector) for one ingested file — for
+    /// when the file has vanished from its source tree. Returns how many text
+    /// rows were removed.
+    pub fn delete_doc_file(&self, path: &str) -> Result<usize, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                "DELETE FROM vector_index WHERE subject_kind = 'doc'
+                   AND subject_id IN (SELECT chunk_id FROM doc_chunk WHERE path = ?1)",
+                params![path],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute("DELETE FROM doc_chunk WHERE path = ?1", params![path])
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// Delete a file's chunks at or beyond `from_ordinal` (and their vectors) —
+    /// the stale tail left behind when a re-ingested file yields fewer chunks
+    /// than the previous ingest did. Returns how many text rows were removed.
+    pub fn prune_doc_chunks_from(
+        &self,
+        path: &str,
+        from_ordinal: i64,
+    ) -> Result<usize, MemoryPersistenceError> {
+        self.connection
+            .execute(
+                "DELETE FROM vector_index WHERE subject_kind = 'doc'
+                   AND subject_id IN
+                       (SELECT chunk_id FROM doc_chunk WHERE path = ?1 AND ordinal >= ?2)",
+                params![path, from_ordinal],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        self.connection
+            .execute(
+                "DELETE FROM doc_chunk WHERE path = ?1 AND ordinal >= ?2",
+                params![path, from_ordinal],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// Whether an embedding endpoint is configured for this project. Lets a
+    /// caller distinguish "semantic search found nothing" from "semantic search
+    /// cannot run at all" instead of showing both as an empty result.
+    pub fn embeddings_configured(&self) -> Result<bool, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        Ok(capability.embeddings().is_some())
+    }
+
+    /// The configured movement window for hybrid memory reranking, when the
+    /// project opted in and has an embedding endpoint. Keeping this gate on the
+    /// opened store lets the search crate own retrieval without rediscovering a
+    /// second copy of the project configuration at the host boundary.
+    #[must_use]
+    pub fn active_memory_rerank_window(&self) -> Option<usize> {
+        self.config
+            .rerank_active()
+            .then(|| self.config.rerank_window())
+    }
+
+    /// This machine's label for cross-device retrieval ranking.
+    #[must_use]
+    pub fn retrieval_device_label(&self) -> String {
+        self.config.sync_device_label()
+    }
+
+    /// The configured penalty for a memory originating on another machine.
+    #[must_use]
+    pub fn foreign_env_weight(&self) -> f32 {
+        self.config.foreign_env_weight()
+    }
+
+    /// The memory counterpart to [`doc_search_diagnosed`](Self::doc_search_diagnosed):
+    /// a kind-scoped memory vector scan that reports *why* it returned nothing.
+    ///
+    /// The memory relevance path used to collapse every failure into `None`, so
+    /// "no endpoint configured", "endpoint down", "no memory has been embedded
+    /// yet" and "the index was embedded under a different model" were one
+    /// indistinguishable state. They need different answers from a user, and the
+    /// last one is invisible without the model list.
+    ///
+    /// # Errors
+    /// Returns an error only if a store query fails; every endpoint failure is a
+    /// reported status, not an error.
+    pub fn memory_vector_scan_diagnosed(
+        &self,
+        query: &str,
+    ) -> Result<MemoryScanReport, MemoryPersistenceError> {
+        let query_vector = match self.embed_query_diagnosed(query)? {
+            EmbedQueryOutcome::NotConfigured => {
+                return Ok(MemoryScanReport {
+                    status: MemoryScanStatus::EmbeddingsNotConfigured,
+                    scored: Vec::new(),
+                })
+            }
+            EmbedQueryOutcome::EndpointUnavailable { error } => {
+                return Ok(MemoryScanReport {
+                    status: MemoryScanStatus::EmbeddingEndpointUnavailable { error },
+                    scored: Vec::new(),
+                })
+            }
+            EmbedQueryOutcome::Embedded(vector) => vector,
+        };
+        let scan = self.vector_scan_for_kind(&query_vector, "memory")?;
+        if scan.candidates == 0 {
+            return Ok(MemoryScanReport {
+                status: MemoryScanStatus::NoMemoryVectors,
+                scored: Vec::new(),
+            });
+        }
+        if scan.scored.is_empty() {
+            // Every stored memory vector was skipped as unreadable against this
+            // query vector: the index was embedded under a different model or
+            // dimension count than the active embedding model produces.
+            return Ok(MemoryScanReport {
+                status: MemoryScanStatus::IndexMismatch {
+                    indexed_models: scan.models,
+                },
+                scored: Vec::new(),
+            });
+        }
+        Ok(MemoryScanReport {
+            status: MemoryScanStatus::Scanned,
+            scored: scan.scored,
+        })
+    }
+
+    /// This store's own connection, for in-crate passes that query it directly.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The machine-wide global store's connection, when one is open.
+    pub(crate) fn global_connection(&self) -> Option<&Connection> {
+        self.global.as_ref().map(|global| &global.connection)
+    }
+
+    /// The embedding model the project is configured to use.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::InvalidVector`] when no embedding
+    /// endpoint is configured: a sweep set is defined *relative to* the active
+    /// model, so there is no meaningful answer without one.
+    pub(crate) fn active_embedding_model(&self) -> Result<String, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        capability
+            .embeddings()
+            .map(|endpoint| endpoint.model().to_string())
+            .ok_or_else(|| MemoryPersistenceError::InvalidVector {
+                detail: "no embedding model is configured".to_string(),
+            })
+    }
+
+    /// Embed `body` against the configured endpoint and store the vector under
+    /// `subject_kind`/`subject_id`, bypassing the fingerprint short-circuit.
+    ///
+    /// # Errors
+    /// Returns an error if no endpoint is configured, the embed call fails, or
+    /// the vector cannot be written.
+    pub(crate) fn reembed_subject(
+        &self,
+        connection: &Connection,
+        subject_kind: &str,
+        subject_id: &str,
+        body: &str,
+    ) -> Result<(), MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let endpoint =
+            capability
+                .embeddings()
+                .ok_or_else(|| MemoryPersistenceError::InvalidVector {
+                    detail: "no embedding endpoint is configured".to_string(),
+                })?;
+        let vectors = endpoint.embed(std::slice::from_ref(&body.to_string()))?;
+        let Some(vector) = vectors.first() else {
+            return Err(MemoryPersistenceError::InvalidVector {
+                detail: "embedding endpoint returned no vectors".to_string(),
+            });
+        };
+        // Audit the call the same way promotion does. A repair that leaves no
+        // trace is invisible to exactly the audit trail that was the only witness
+        // to the outage it is repairing.
+        Self::write_audit_with(
+            connection,
+            AuditEventKind::InferenceCallCompleted,
+            "localmind",
+            "embeddings",
+            &serde_json::json!({
+                "feature": "embeddings",
+                "endpoint_kind": "embedding",
+                "model": endpoint.model(),
+                "outcome": "backfilled",
+                "subject_kind": subject_kind,
+            }),
+        )?;
+        Self::write_vector_row(
+            connection,
+            subject_kind,
+            subject_id,
+            &content_fingerprint(body),
+            endpoint.model(),
+            vector,
+        )
+    }
+
+    /// What the embedding endpoint can actually do, probed rather than assumed.
+    ///
+    /// Distinguishes "no endpoint configured" from "configured but not
+    /// answering" — the second is the state that leaves every semantic path
+    /// degraded while the store itself stays perfectly healthy, and it is the one
+    /// a bare configured/not-configured flag cannot express. Best-effort and
+    /// total: a probe failure is a reported capability state, never an error.
+    #[must_use]
+    pub fn embedding_capability(&self) -> crate::EmbeddingCapability {
+        use crate::EmbeddingCapability;
+        let Ok(capability) =
+            InferenceCapability::from_settings(self.config.config.inference.as_ref())
+        else {
+            return EmbeddingCapability::NotConfigured;
+        };
+        let Some(endpoint) = capability.embeddings() else {
+            return EmbeddingCapability::NotConfigured;
+        };
+        let url = endpoint.base_url().to_string();
+        // The cheapest call that proves the endpoint answers in the shape the
+        // rest of the stack needs: a real embed of a trivial input.
+        match endpoint.embed(std::slice::from_ref(&"probe".to_string())) {
+            Ok(vectors) if !vectors.is_empty() => EmbeddingCapability::Healthy { endpoint: url },
+            Ok(_) => EmbeddingCapability::Unreachable {
+                endpoint: url,
+                error: "the endpoint answered with no vectors".to_string(),
+            },
+            Err(error) => EmbeddingCapability::Unreachable {
+                endpoint: url,
+                error: error.to_string(),
+            },
+        }
+    }
+
+    /// Semantic search over ingested documentation chunks. Embeds the query,
+    /// ranks it against the stored `'doc'` vectors, and joins their passage
+    /// text. Returns an empty result when embeddings are not configured or the
+    /// endpoint is unreachable (semantic doc search needs a query vector) —
+    /// callers keep working, just without doc hits. Callers that need to tell
+    /// the user *why* a search came back empty use
+    /// [`doc_search_diagnosed`](Self::doc_search_diagnosed).
+    pub fn doc_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DocSearchResult>, MemoryPersistenceError> {
+        Ok(self.doc_search_diagnosed(query, limit)?.results)
+    }
+
+    /// [`doc_search`](Self::doc_search) with the capability state made
+    /// explicit, so an empty result is distinguishable across: no ingested
+    /// docs, embeddings not configured, endpoint unreachable, doc passages
+    /// present but unvectored, an index embedded under a different
+    /// model/dimensions than the active query model, and a valid search that
+    /// simply matched nothing above the relevance floor. Diagnostics never
+    /// escalate a degraded capability into an error — the report is a value.
+    pub fn doc_search_diagnosed(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<DocSearchReport, MemoryPersistenceError> {
+        let empty = |status: DocSearchStatus| DocSearchReport {
+            status,
+            results: Vec::new(),
+        };
+        if self.doc_chunk_count()? == 0 {
+            return Ok(empty(DocSearchStatus::NoDocChunks));
+        }
+        let query_vector = match self.embed_query_diagnosed(query)? {
+            EmbedQueryOutcome::NotConfigured => {
+                return Ok(empty(DocSearchStatus::EmbeddingsNotConfigured));
+            }
+            EmbedQueryOutcome::EndpointUnavailable { error } => {
+                return Ok(empty(DocSearchStatus::EmbeddingEndpointUnavailable {
+                    error,
+                }));
+            }
+            EmbedQueryOutcome::Embedded(vector) => vector,
+        };
+        // Filter to 'doc' vectors *inside* the ranked scan — a shared top-k over
+        // memory + doc subjects would let high-ranking memory vectors consume
+        // the window and hide relevant doc hits.
+        let scan = self.vector_scan_kind(&query_vector, Some("doc"))?;
+        if scan.candidates == 0 {
+            return Ok(empty(DocSearchStatus::NoDocVectors));
+        }
+        if scan.scored.is_empty() {
+            // Every stored doc vector was skipped as unreadable against this
+            // query vector: the index was embedded under a different model or
+            // dimension count than the active embedding model produces.
+            return Ok(empty(DocSearchStatus::IndexMismatch {
+                indexed_models: scan.models,
+                query_dimensions: query_vector.len(),
+            }));
+        }
+        let min_cosine = self.config.config.retrieval.doc_search_min_cosine;
+        let mut results = Vec::new();
+        for hit in scan
+            .scored
+            .into_iter()
+            .filter(|hit| hit.score >= min_cosine)
+        {
+            let row = self
+                .connection
+                .query_row(
+                    "SELECT path, ordinal, heading, body FROM doc_chunk WHERE chunk_id = ?1",
+                    params![hit.subject_id],
+                    |row| {
+                        Ok(DocSearchResult {
+                            path: row.get(0)?,
+                            ordinal: row.get(1)?,
+                            heading: row.get(2)?,
+                            body: row.get(3)?,
+                            score: hit.score,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            if let Some(result) = row {
+                results.push(result);
+            }
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(DocSearchReport {
+            status: DocSearchStatus::Searched,
+            results,
+        })
+    }
+
+    /// How many ingested documentation chunks carry a stored vector — the
+    /// "vectored" half of the docs status/doctor count (project store; doc
+    /// chunks are per-project).
+    pub fn doc_vector_count(&self) -> Result<i64, MemoryPersistenceError> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM vector_index WHERE subject_kind = 'doc'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// How much of the accepted memory this store holds is actually embedded,
+    /// per scope, plus vectors left behind by rows that are no longer active.
+    ///
+    /// The counterpart to [`doc_chunk_count`](Self::doc_chunk_count) /
+    /// [`doc_vector_count`](Self::doc_vector_count), which the doc side has always
+    /// had and the memory side never did — so "most accepted memory carries no
+    /// vector" was not a state any surface could express, let alone report.
+    ///
+    /// # Errors
+    /// Returns an error if a store query fails.
+    pub fn memory_vector_coverage(&self) -> Result<MemoryVectorCoverage, MemoryPersistenceError> {
+        let mut coverage = Self::memory_vector_coverage_in(&self.connection)?;
+        if let Some(global) = &self.global {
+            let global = Self::memory_vector_coverage_in(&global.connection)?;
+            coverage.global_active = global.project_active + global.global_active;
+            coverage.global_vectorized = global.project_vectorized + global.global_vectorized;
+            coverage.stale += global.stale;
+        }
+        Ok(coverage)
+    }
+
+    fn memory_vector_coverage_in(
+        connection: &Connection,
+    ) -> Result<MemoryVectorCoverage, MemoryPersistenceError> {
+        // Count `active` rows on both sides. `total - vectors` looks equivalent and
+        // is not: a superseded row whose vector was never pruned cancels a missing
+        // one, so the two errors hide each other.
+        let counts = |scope_is_global: bool| -> Result<(i64, i64), MemoryPersistenceError> {
+            let predicate = if scope_is_global {
+                "scope = 'GlobalUser'"
+            } else {
+                "scope <> 'GlobalUser'"
+            };
+            let active: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM memory_index WHERE status = 'active' AND {predicate}"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            let vectorized: i64 = connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM memory_index m WHERE m.status = 'active' AND {predicate}                          AND EXISTS (SELECT 1 FROM vector_index v                          WHERE v.subject_kind = 'memory' AND v.subject_id = m.memory_id)"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            Ok((active, vectorized))
+        };
+        let (project_active, project_vectorized) = counts(false)?;
+        let (global_active, global_vectorized) = counts(true)?;
+        let stale: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM vector_index v WHERE v.subject_kind = 'memory'                  AND NOT EXISTS (SELECT 1 FROM memory_index m                  WHERE m.memory_id = v.subject_id AND m.status = 'active')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(MemoryVectorCoverage {
+            project_active,
+            project_vectorized,
+            global_active,
+            global_vectorized,
+            stale,
+        })
+    }
+
+    /// Number of ingested documentation chunks (text rows), independent of how
+    /// many carry a vector.
+    pub fn doc_chunk_count(&self) -> Result<i64, MemoryPersistenceError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM doc_chunk", [], |row| row.get(0))
+            .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// Every ingested documentation file with its chunk count, path-ordered —
+    /// for browsing what has been ingested without a search query.
+    pub fn doc_files(&self) -> Result<Vec<(String, i64)>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path, COUNT(*) FROM doc_chunk GROUP BY path ORDER BY path")
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
+    /// Every chunk of one ingested documentation file, in order — for reading a
+    /// file's passages after picking it from the browser.
+    pub fn doc_chunks_for(
+        &self,
+        path: &str,
+    ) -> Result<Vec<(i64, Option<String>, String)>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT ordinal, heading, body FROM doc_chunk WHERE path = ?1 ORDER BY ordinal",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map(params![path], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
+    /// Ranked cosine scan across **every** `subject_kind`, truncated to `limit`.
+    ///
+    /// **Starvation hazard.** The window is shared, so whichever kind dominates
+    /// the index consumes it: filtering the result by kind afterwards is not the
+    /// same as scanning that kind, and yields far fewer rows than the caller
+    /// expects once the index is lopsided. Use
+    /// [`vector_scan_for_kind`](Self::vector_scan_for_kind) when the caller
+    /// wants one kind.
+    ///
+    /// # Errors
+    /// Returns an error if a store query fails.
+    pub fn vector_search(
+        &self,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchResult>, MemoryPersistenceError> {
+        if query_vector.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Merge project + global vectors before ranking — the global
+        // `vector_index` holds the vectors of `GlobalUser`-scoped lessons
+        // (cross-project tooling/debugging/process knowledge), so a project-only
+        // scan would make the semantic dedup and retrieval rungs blind to exactly
+        // the lessons that accumulate machine-wide. Mirrors `search_lang`'s
+        // project+global merge with **project precedence**: project rows lead,
+        // then global rows whose `(subject_kind, subject_id)` is not already
+        // present are appended, so on the (practically impossible) cross-store id
+        // collision the project row wins. Ranking and truncation then run over the
+        // combined set.
+        let mut scored = Self::vector_search_in(&self.connection, query_vector, None)?;
+        if let Some(global) = &self.global {
+            let seen: std::collections::HashSet<(String, String)> = scored
+                .iter()
+                .map(|result| (result.subject_kind.clone(), result.subject_id.clone()))
+                .collect();
+            for result in Self::vector_search_in(&global.connection, query_vector, None)? {
+                if !seen.contains(&(result.subject_kind.clone(), result.subject_id.clone())) {
+                    scored.push(result);
+                }
+            }
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Ranked cosine scan restricted to one `subject_kind` **inside** the scan
+    /// (never a shared top-k filtered afterwards), with the diagnostics the
+    /// capability-state reporting needs: how many candidate rows the index
+    /// holds for the kind and which models they were embedded under. Sorted
+    /// best-first, untruncated — callers apply their own floor and limit.
+    /// Ranked cosine scan over one `subject_kind`, filtered **inside** the scan.
+    ///
+    /// Prefer this over [`vector_search`](Self::vector_search) whenever the
+    /// caller wants one kind: a shared top-k over mixed kinds lets whichever
+    /// kind dominates the index consume the window, so the caller's kind is
+    /// crowded out before it can be filtered for.
+    ///
+    /// # Errors
+    /// Returns an error if a store query fails.
+    pub fn vector_scan_for_kind(
+        &self,
+        query_vector: &[f32],
+        kind: &str,
+    ) -> Result<VectorKindScan, MemoryPersistenceError> {
+        self.vector_scan_kind(query_vector, Some(kind))
+    }
+
+    fn vector_scan_kind(
+        &self,
+        query_vector: &[f32],
+        kind: Option<&str>,
+    ) -> Result<VectorKindScan, MemoryPersistenceError> {
+        let mut scored = Self::vector_search_in(&self.connection, query_vector, kind)?;
+        let mut candidates = Self::vector_row_count(&self.connection, kind)?;
+        let mut models = Self::vector_models(&self.connection, kind)?;
+        if let Some(global) = &self.global {
+            let seen: std::collections::HashSet<(String, String)> = scored
+                .iter()
+                .map(|result| (result.subject_kind.clone(), result.subject_id.clone()))
+                .collect();
+            for result in Self::vector_search_in(&global.connection, query_vector, kind)? {
+                if !seen.contains(&(result.subject_kind.clone(), result.subject_id.clone())) {
+                    scored.push(result);
+                }
+            }
+            candidates += Self::vector_row_count(&global.connection, kind)?;
+            for model in Self::vector_models(&global.connection, kind)? {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
+        Ok(VectorKindScan {
+            scored,
+            candidates,
+            models,
+        })
+    }
+
+    /// How many vector rows one connection holds, optionally per kind.
+    fn vector_row_count(
+        connection: &Connection,
+        kind: Option<&str>,
+    ) -> Result<i64, MemoryPersistenceError> {
+        match kind {
+            Some(kind) => connection.query_row(
+                "SELECT COUNT(*) FROM vector_index WHERE subject_kind = ?1",
+                params![kind],
+                |row| row.get(0),
+            ),
+            None => connection.query_row("SELECT COUNT(*) FROM vector_index", [], |row| row.get(0)),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)
+    }
+
+    /// The distinct embedding models the stored vectors were written under,
+    /// optionally per kind — for the index-mismatch diagnosis.
+    fn vector_models(
+        connection: &Connection,
+        kind: Option<&str>,
+    ) -> Result<Vec<String>, MemoryPersistenceError> {
+        let mut statement = match kind {
+            Some(_) => connection.prepare(
+                "SELECT DISTINCT model FROM vector_index WHERE subject_kind = ?1 ORDER BY model",
+            ),
+            None => connection.prepare("SELECT DISTINCT model FROM vector_index ORDER BY model"),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = match kind {
+            Some(kind) => statement.query_map(params![kind], map_row),
+            None => statement.query_map([], map_row),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut models = Vec::new();
+        for row in rows {
+            models.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(models)
+    }
+
+    /// Score every stored vector on one connection (project or global) by cosine
+    /// against `query_vector`, skipping rows whose recorded dimensions or blob
+    /// length do not match the query. When `kind` is `Some`, only that
+    /// `subject_kind` competes — the filter runs inside the scan, before any
+    /// ranking or truncation. Returns the unranked, untruncated scores;
+    /// [`vector_search`](Self::vector_search) merges project + global results and
+    /// applies the ranking and limit.
+    fn vector_search_in(
+        connection: &Connection,
+        query_vector: &[f32],
+        kind: Option<&str>,
+    ) -> Result<Vec<VectorSearchResult>, MemoryPersistenceError> {
+        let kind_clause = if kind.is_some() {
+            " WHERE subject_kind = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT subject_kind, subject_id, dimensions, vector_blob FROM vector_index{kind_clause} ORDER BY subject_kind, subject_id",
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        };
+        let rows = match kind {
+            Some(kind) => statement.query_map(params![kind], map_row),
+            None => statement.query_map([], map_row),
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (subject_kind, subject_id, dimensions, blob) =
+                row.map_err(MemoryPersistenceError::Sqlite)?;
+            let vector = decode_vector(&blob)?;
+            if usize::try_from(dimensions).ok() != Some(vector.len())
+                || vector.len() != query_vector.len()
+            {
+                continue;
+            }
+            scored.push(VectorSearchResult {
+                subject_kind,
+                subject_id,
+                score: cosine_similarity(query_vector, &vector),
+            });
+        }
+        Ok(scored)
+    }
+
+    /// Searches active memory through the FTS5 index (`memory_fts MATCH` with
+    /// bm25 ranking). Whitespace-separated query terms are OR-ed as quoted
+    /// prefix phrases, so FTS5 operators in user input are inert text, not
+    /// syntax. Higher `score` is a better match.
+    pub fn search(&self, query: &str) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
+        self.search_lang(query, None)
+    }
+
+    /// Like [`search`](Self::search) but restricting matches to a programming
+    /// language: when `language` is `Some`, a memory tagged with a *different*
+    /// language is excluded, while a `NULL`-tagged (general / cross-cutting)
+    /// memory always remains eligible. `None` applies no language filter. The
+    /// filter runs inside the FTS query so retrieval returns rows that are
+    /// already language-relevant rather than dropping them after ranking.
+    /// [`search_lang`](Self::search_lang) with an explicit coverage gate.
+    ///
+    /// **Evaluation-only**, and disclosed as such: no production caller passes
+    /// anything but [`CoverageGate::shipped`]. It exists so the gate can be
+    /// measured against the same corpus and the same queries with it relaxed.
+    ///
+    /// # Errors
+    /// As [`search_lang`](Self::search_lang).
+    pub fn search_lang_gated(
+        &self,
+        query: &str,
+        language: Option<&str>,
+        gate: CoverageGate,
+    ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
+        let project = Self::search_in_gated(&self.connection, query, language, gate)?;
+        let global = match &self.global {
+            Some(global) => Self::search_in_gated(&global.connection, query, language, gate)?,
+            None => Vec::new(),
+        };
+        Ok(Self::merge_by_relevance(project, global))
+    }
+
+    pub fn search_lang(
+        &self,
+        query: &str,
+        language: Option<&str>,
+    ) -> Result<Vec<MemorySearchResult>, MemoryPersistenceError> {
+        // Merge project + global results with **project precedence**: project
+        // matches lead, then global matches that are not already present (deduped
+        // by memory id and by full body — the snippet is a match-centred window,
+        // so two distinct memories can share one, and a body copy must dedup
+        // regardless of where its window landed), so a project lesson always
+        // overrides a global one on conflict while a global lesson still
+        // surfaces when no project lesson applies. Provenance survives in each
+        // result's `path` (a global path lives under the user-home store).
+        self.search_lang_gated(query, language, CoverageGate::shipped())
+    }
+
+    /// Run the FTS5 memory search against one connection (project or global).
+    /// When `language` is `Some`, off-language memories are excluded in the query
+    /// (`NULL`-tagged memories always pass).
+    ///
+    /// Each hit's snippet is a **match-centred passage** (FTS5 `snippet()` over
+    /// the body column), so the text shown for a hit contains the matched terms
+    /// even when they sit thousands of characters into the memory — the head of
+    /// a large body is often boilerplate, not the lesson. Multi-term queries
+    /// with three or more significant terms additionally require at least two of
+    /// them to appear in the body, so one incidental token cannot make a large
+    /// unrelated memory eligible; two-term queries keep single-term recall (the
+    /// weaker hit still ranks below full matches).
+
+    /// Merge project and global keyword hits by **relevance**, with the project
+    /// store winning duplicates.
+    ///
+    /// This used to append every global hit after every project hit. Combined
+    /// with the caller's cap of five, that made a global memory unreachable
+    /// whenever five project memories matched the query *at all* — however much
+    /// better the global one was. Measured on a real store: five of six queries
+    /// whose answer lives only in the global store returned it **never**, while
+    /// asking the same identifier on its own returned it at rank one.
+    ///
+    /// Project **precedence** survives where it means something — a project
+    /// memory still wins a duplicate, by id or by identical body, so a project
+    /// lesson overrides a global one saying the same thing. What is dropped is
+    /// precedence as *absolute ordering*, which applied even with no conflict to
+    /// resolve.
+    ///
+    /// Scores are normalised **relative to each store's own best hit**. Raw bm25
+    /// is not comparable across two indexes — it is computed against different
+    /// corpus statistics — so comparing the numbers directly would favour
+    /// whichever store happened to hold the rarer terms.
+    ///
+    /// The sort is **stable**, and that is load-bearing: `score` is a rounded
+    /// bm25, so rows the index ranked apart can round together, and re-sorting
+    /// them by a key of our own would discard an ordering the index had already
+    /// got right. Project rows are inserted first, so a tie keeps project ahead
+    /// of global and keeps each store's own rank order within itself.
+    fn merge_by_relevance(
+        project: Vec<RankedMemoryRow>,
+        global: Vec<RankedMemoryRow>,
+    ) -> Vec<MemorySearchResult> {
+        let project_ids: std::collections::HashSet<String> = project
+            .iter()
+            .map(|row| row.result.memory_id.as_str().to_string())
+            .collect();
+        let project_bodies: std::collections::HashSet<String> =
+            project.iter().map(|row| row.body.clone()).collect();
+
+        #[allow(clippy::cast_precision_loss)]
+        let best = |rows: &[RankedMemoryRow]| -> f64 {
+            rows.iter()
+                .map(|row| row.result.score as f64)
+                .fold(0.0_f64, f64::max)
+                .max(1.0)
+        };
+        let project_best = best(&project);
+        let global_best = best(&global);
+
+        #[allow(clippy::cast_precision_loss)]
+        let mut merged: Vec<(f64, MemorySearchResult)> = project
+            .into_iter()
+            .map(|row| (row.result.score as f64 / project_best, row.result))
+            .collect();
+        for row in global {
+            if project_ids.contains(row.result.memory_id.as_str())
+                || project_bodies.contains(&row.body)
+            {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let relative = row.result.score as f64 / global_best;
+            merged.push((relative, row.result));
+        }
+        merged.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        merged.into_iter().map(|(_, result)| result).collect()
+    }
+
+    /// [`search_in`](Self::search_in) with the term-coverage gate supplied rather
+    /// than hardcoded.
+    ///
+    /// Exists so the gate's *benefit* can be measured, not only its cost. It is
+    /// the only way to run the same corpus and the same queries with the gate
+    /// relaxed, which is what deciding whether to keep it requires.
+    fn search_in_gated(
+        connection: &Connection,
+        query: &str,
+        language: Option<&str>,
+        gate: CoverageGate,
+    ) -> Result<Vec<RankedMemoryRow>, MemoryPersistenceError> {
+        let terms = significant_terms(query);
+        let Some(match_expression) = fts_match_expression(&terms) else {
+            return Ok(Vec::new());
+        };
+        // The query's most discriminating term, if the gate is going to apply.
+        //
+        // The gate counts terms equally, which is what makes a question's own
+        // scaffolding outvote its subject: *what should I know about
+        // `process_dir`* has three significant terms, and the memory that
+        // actually defines `process_dir` matches exactly one of them while an
+        // unrelated memory containing *know* and *about* matches two.
+        //
+        // Rather than count, ask which term carries the query's specificity. A
+        // body containing the **rarest** term survives the gate on that alone —
+        // it is not an incidental hit, whatever the count says. It still has to
+        // win on rank afterwards, and bm25 already favours a rare-term match, so
+        // this admits a candidate rather than promoting one.
+        let rarest = if terms.len() >= gate.min_terms {
+            rarest_term(connection, &terms)
+        } else {
+            None
+        };
+        // A single statement string keeps the prepared shape stable; the language
+        // clause is appended only when filtering so the unfiltered path is byte
+        // for byte what it was before. The snippet column asks FTS5 for a
+        // match-centred window over the body (column 1); 32 tokens lands near
+        // the old fixed window's length while always containing a match.
+        let language_clause = if language.is_some() {
+            " AND (m.language = ?2 OR m.language IS NULL)"
+        } else {
+            ""
+        };
+        let statement_sql = format!(
+            r#"
+                SELECT m.memory_id, m.path, m.body, m.created_at, m.stale_candidate,
+                       m.epistemic_status, m.contradicted, m.category, m.hit_count,
+                       m.origin_device, bm25(memory_fts) AS rank,
+                       snippet(memory_fts, 1, '', '', {SNIPPET_ELLIPSIS}, {SNIPPET_TOKENS}) AS passage
+                FROM memory_fts
+                JOIN memory_index m ON m.memory_id = memory_fts.memory_id
+                WHERE memory_fts MATCH ?1 AND m.status = 'active'{language_clause}
+                ORDER BY rank, m.memory_id
+                "#,
+        );
+        let mut statement = connection
+            .prepare(&statement_sql)
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)? != 0,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, f64>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        };
+        let rows = if let Some(language) = language {
+            statement.query_map(params![match_expression, language], map_row)
+        } else {
+            statement.query_map(params![match_expression], map_row)
+        }
+        .map_err(MemoryPersistenceError::Sqlite)?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (
+                memory_id,
+                path,
+                body,
+                created_at,
+                stale_candidate,
+                epistemic,
+                contradicted,
+                category,
+                hit_count,
+                origin_device,
+                rank,
+                passage,
+            ) = row.map_err(MemoryPersistenceError::Sqlite)?;
+            // Does this body contain the query's subject — its rarest term?
+            let subject_matched = rarest
+                .as_ref()
+                .is_some_and(|term| matched_terms(&body, std::slice::from_ref(term)) > 0);
+            // Term-coverage gate: with three or more significant terms, a body
+            // matching only one of them is an incidental hit, not an answer —
+            // unless that one is the subject, which is the whole question.
+            if terms.len() >= gate.min_terms
+                && matched_terms(&body, &terms) < gate.min_matched
+                && !subject_matched
+            {
+                continue;
+            }
+            // bm25 returns a more-negative value for better matches; expose a
+            // positive bigger-is-better integer to keep the result contract.
+            #[allow(clippy::cast_possible_truncation)] // bounded: bm25 magnitudes are small
+            let score = (-rank * 100.0).round() as i64;
+            results.push(RankedMemoryRow {
+                result: MemorySearchResult {
+                    memory_id: MemoryEntryId::new(memory_id),
+                    path: PathBuf::from(path),
+                    score: score.max(1),
+                    snippet: passage,
+                    subject_matched,
+                    category,
+                    created_at,
+                    stale_candidate,
+                    epistemic_status: EpistemicStatus::from_token(&epistemic),
+                    contradicted,
+                    hit_count,
+                    origin_device,
+                },
+                body,
+            });
+        }
+        Ok(results)
+    }
+
+    /// The provenance for a memory — source session, confidence, epistemic
+    /// status, staleness, and the memories it contradicts — or `None` when the
+    /// memory id is unknown. Answers "why do you think that?".
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn provenance(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Option<MemoryProvenance>, MemoryPersistenceError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT source_session, status, epistemic_status, contradicted, confidence, \
+                 stale_candidate, origin_device FROM memory_index WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, i64>(5)? != 0,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let Some((
+            source_session,
+            status,
+            epistemic,
+            _contradicted,
+            confidence,
+            stale_candidate,
+            origin_device,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT target FROM memory_relationships \
+                 WHERE memory_id = ?1 AND relation_kind = 'contradicts' ORDER BY target",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let targets = statement
+            .query_map(params![memory_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut contradicts = Vec::new();
+        for target in targets {
+            contradicts.push(MemoryEntryId::new(
+                target.map_err(MemoryPersistenceError::Sqlite)?,
+            ));
+        }
+
+        Ok(Some(MemoryProvenance {
+            memory_id: memory_id.clone(),
+            source_session,
+            #[allow(clippy::cast_possible_truncation)]
+            confidence: confidence as f32,
+            epistemic_status: EpistemicStatus::from_token(&epistemic),
+            status,
+            stale_candidate,
+            contradicts,
+            origin_device,
+        }))
+    }
+
+    /// Flag an active memory as a change-aware staleness candidate: the code it
+    /// was anchored to changed, so it should be reviewed. The memory stays active
+    /// and retrievable — this only sets the flag (and audits it). Returns whether
+    /// an active memory matched.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    pub fn mark_stale_candidate(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<bool, MemoryPersistenceError> {
+        self.flag_for_review(memory_id, "anchored code changed")
+    }
+
+    /// Flag an active memory for review with a caller-supplied reason, without
+    /// deleting it — the route-to-review path shared by change-aware invalidation
+    /// (`mark_stale_candidate`) and outcome-aware down-weighting (a lesson that did
+    /// not improve eval outcomes). The memory stays active and retrievable; this
+    /// only sets the staleness flag and audits the reason. Returns whether an
+    /// active memory matched.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    pub fn flag_for_review(
+        &self,
+        memory_id: &MemoryEntryId,
+        reason: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        // Spans the project **and** global stores, matching
+        // `clear_stale_candidate` and `list_stale_candidates`. Before this it
+        // reached only the project store, so the freshness pass could flag a
+        // global lesson through the connection-scoped path while no public API
+        // could flag or unflag one — an asymmetry that made a flag effectively
+        // one-way for every caller outside this module.
+        if Self::flag_for_review_in(&self.connection, memory_id, reason)? {
+            return Ok(true);
+        }
+        if let Some(global) = &self.global {
+            return Self::flag_for_review_in(&global.connection, memory_id, reason);
+        }
+        Ok(false)
+    }
+
+    /// Flag an active memory for review on a specific store connection (project
+    /// or global), without deleting it — the connection-scoped core shared by
+    /// [`flag_for_review`](Self::flag_for_review) and the freshness pass, which
+    /// must reach the **global** store where the non-code-anchored lessons live.
+    /// Idempotent: a memory already flagged is a no-op (and not re-audited).
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update or audit fails.
+    fn flag_for_review_in(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+        reason: &str,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let changed = connection
+            .execute(
+                "UPDATE memory_index SET stale_candidate = 1 \
+                 WHERE memory_id = ?1 AND status = 'active' AND stale_candidate = 0",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        if changed > 0 {
+            Self::write_audit_with(
+                connection,
+                AuditEventKind::MemoryFlaggedStale,
+                "localmind",
+                memory_id.as_str(),
+                &serde_json::json!({ "reason": reason }),
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    /// Clear a memory's staleness flag (e.g. a reviewer confirmed it still holds).
+    /// Returns whether a row changed.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the update fails.
+    pub fn clear_stale_candidate(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<bool, MemoryPersistenceError> {
+        // Span the project **and** global stores, mirroring `list_stale_candidates`
+        // and the flagging path — the freshness pass flags global lessons too, so
+        // a clear that only reached the project store could not undo most of what
+        // a pass had done. Writing an audit row on the way, because a flag being
+        // lifted is a memory-state change and the audit is what makes the
+        // lifecycle reviewable after the fact.
+        if Self::clear_stale_candidate_in(&self.connection, memory_id)? {
+            return Ok(true);
+        }
+        if let Some(global) = &self.global {
+            return Self::clear_stale_candidate_in(&global.connection, memory_id);
+        }
+        Ok(false)
+    }
+
+    fn clear_stale_candidate_in(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+    ) -> Result<bool, MemoryPersistenceError> {
+        let changed = connection
+            .execute(
+                "UPDATE memory_index SET stale_candidate = 0                  WHERE memory_id = ?1 AND stale_candidate = 1",
+                params![memory_id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        if changed > 0 {
+            Self::write_audit_with(
+                connection,
+                AuditEventKind::MemoryFlagCleared,
+                "localmind",
+                memory_id.as_str(),
+                &serde_json::json!({ "reason": "reviewer kept the memory" }),
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    /// The active memories currently flagged as staleness candidates — the review
+    /// list a reviewer or the inspector pulls.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when the query fails.
+    pub fn list_stale_candidates(&self) -> Result<Vec<MemoryEntryId>, MemoryPersistenceError> {
+        // Span the project **and** global stores: the freshness pass flags the
+        // non-code-anchored global lessons too, so the review list must surface
+        // them (mirrors `list_memory`).
+        let mut ids = Self::list_stale_candidates_in(&self.connection)?;
+        if let Some(global) = &self.global {
+            ids.extend(Self::list_stale_candidates_in(&global.connection)?);
+        }
+        Ok(ids)
+    }
+
+    fn list_stale_candidates_in(
+        connection: &Connection,
+    ) -> Result<Vec<MemoryEntryId>, MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 1 ORDER BY memory_id",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(MemoryEntryId::new(
+                row.map_err(MemoryPersistenceError::Sqlite)?,
+            ));
+        }
+        Ok(ids)
+    }
+
+    /// Record a usage hit for each of `memory_ids`: bump `hit_count` by one and
+    /// stamp `last_used_at`, across the project **and** global stores (a memory's
+    /// dead-weight signal is only meaningful where the memory lives, and the
+    /// global store holds the non-code-anchored lessons). Driven from the
+    /// post-turn `memories_used` audit, never the retrieval read path.
+    ///
+    /// Idempotent-per-call: a distinct id is bumped at most once per call (the
+    /// ids are deduped first), so one turn's injection counts as one hit. Ids
+    /// that match no active row — the synthetic repository-primer id, ingest
+    /// chunk ids, an unknown id — are silently ignored. Returns the number of
+    /// memory rows updated.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when an update fails.
+    pub fn record_memory_usage(
+        &self,
+        memory_ids: &[MemoryEntryId],
+    ) -> Result<usize, MemoryPersistenceError> {
+        let distinct: std::collections::BTreeSet<&str> =
+            memory_ids.iter().map(MemoryEntryId::as_str).collect();
+        if distinct.is_empty() {
+            return Ok(0);
+        }
+        let now = OffsetDateTime::now_utc().to_string();
+        let mut updated = Self::record_memory_usage_in(&self.connection, &distinct, &now)?;
+        if let Some(global) = &self.global {
+            updated += Self::record_memory_usage_in(&global.connection, &distinct, &now)?;
+        }
+        Ok(updated)
+    }
+
+    /// Bump usage for a set of ids on one connection (project or global). A
+    /// non-matching id is a no-op, so the same id set is safe to run against both
+    /// stores.
+    fn record_memory_usage_in(
+        connection: &Connection,
+        memory_ids: &std::collections::BTreeSet<&str>,
+        now: &str,
+    ) -> Result<usize, MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "UPDATE memory_index SET hit_count = hit_count + 1, last_used_at = ?2 \
+                 WHERE memory_id = ?1 AND status = 'active'",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut updated = 0;
+        for id in memory_ids {
+            updated += statement
+                .execute(params![id, now])
+                .map_err(MemoryPersistenceError::Sqlite)?;
+        }
+        Ok(updated)
+    }
+
+    /// Run the deterministic, offline freshness pass over accepted memory:
+    /// select review candidates by age, never-retrieved-after-grace, and
+    /// version-sensitivity, and (unless `dry_run`) route each via the existing
+    /// route-to-review flag. `scope` chooses the project store, the global store,
+    /// or both (the default) — the non-code-anchored lessons the change-aware flag
+    /// misses live in the global store. Never deletes and never re-ranks; a
+    /// per-run cap keeps a pass from flooding review (the most-actionable reasons
+    /// survive it). `now` is
+    /// injected so the pass is deterministic in tests. An already-flagged memory
+    /// is skipped, so re-running the pass is idempotent.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn freshness_pass(
+        &self,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        scope: crate::freshness::FreshnessScope,
+        dry_run: bool,
+    ) -> Result<crate::freshness::FreshnessReport, MemoryPersistenceError> {
+        self.freshness_pass_at(thresholds, scope, dry_run, OffsetDateTime::now_utc())
+    }
+
+    /// [`freshness_pass`](Self::freshness_pass) with an injected clock, so the
+    /// pass is deterministic in tests. Production callers use `freshness_pass`.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn freshness_pass_at(
+        &self,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        scope: crate::freshness::FreshnessScope,
+        dry_run: bool,
+        now: OffsetDateTime,
+    ) -> Result<crate::freshness::FreshnessReport, MemoryPersistenceError> {
+        use crate::freshness::{FreshnessFlag, FreshnessReason};
+
+        let mut scanned = 0usize;
+        // (is_global, flag) so a flagged candidate is acted on its owning store.
+        let mut candidates: Vec<(bool, FreshnessFlag)> = Vec::new();
+        if scope.includes_project() {
+            Self::collect_freshness(
+                &self.connection,
+                false,
+                thresholds,
+                now,
+                &mut scanned,
+                &mut candidates,
+            )?;
+        }
+        if scope.includes_global() {
+            if let Some(global) = &self.global {
+                Self::collect_freshness(
+                    &global.connection,
+                    true,
+                    thresholds,
+                    now,
+                    &mut scanned,
+                    &mut candidates,
+                )?;
+            }
+        }
+
+        let mut report = crate::freshness::FreshnessReport {
+            scanned,
+            dry_run,
+            ..Default::default()
+        };
+        // Per-reason counts over every match, before the cap.
+        for (_, flag) in &candidates {
+            match flag.reason {
+                FreshnessReason::LowQuality => report.low_quality += 1,
+                FreshnessReason::VersionSensitive => report.version_sensitive += 1,
+                FreshnessReason::Unused => report.unused += 1,
+                FreshnessReason::Age => report.age += 1,
+            }
+        }
+        // Most-actionable first, then bound to the per-run cap.
+        candidates.sort_by(|a, b| crate::freshness::cap_order(&a.1, &b.1));
+        report.capped = candidates.len() > thresholds.max_flags;
+        candidates.truncate(thresholds.max_flags);
+
+        if !dry_run {
+            for (is_global, flag) in &candidates {
+                let connection = if *is_global {
+                    match &self.global {
+                        Some(global) => &global.connection,
+                        // A global candidate with no global store cannot occur
+                        // (it was read from one), but stay total rather than panic.
+                        None => continue,
+                    }
+                } else {
+                    &self.connection
+                };
+                Self::flag_for_review_in(
+                    connection,
+                    &MemoryEntryId::new(flag.memory_id.clone()),
+                    flag.reason.audit_reason(),
+                )?;
+            }
+        }
+        report.flagged = candidates.into_iter().map(|(_, flag)| flag).collect();
+        Ok(report)
+    }
+
+    /// Examine one store's active, not-already-flagged memory and append the
+    /// freshness candidates it yields. Pure selection — no writes here.
+    fn collect_freshness(
+        connection: &Connection,
+        is_global: bool,
+        thresholds: &crate::freshness::FreshnessThresholds,
+        now: OffsetDateTime,
+        scanned: &mut usize,
+        candidates: &mut Vec<(bool, crate::freshness::FreshnessFlag)>,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id, created_at, hit_count, body, category FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 0",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        for row in rows {
+            let (memory_id, created_at, hit_count, body, category) =
+                row.map_err(MemoryPersistenceError::Sqlite)?;
+            *scanned += 1;
+            // The stored category is the `{:?}` form; parse it back so the
+            // quality classifier can apply its category gate.
+            let category = crate::markdown::parse_category(&category);
+            if let Some(reason) = crate::freshness::classify(
+                &category,
+                &created_at,
+                hit_count,
+                &body,
+                now,
+                thresholds,
+            ) {
+                candidates.push((
+                    is_global,
+                    crate::freshness::FreshnessFlag { memory_id, reason },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the opt-in source re-validation pass with a caller-supplied verdict
+    /// source: sample version-sensitive accepted lessons (across the project and
+    /// global stores), ask the source whether each still holds, and (unless
+    /// `dry_run`) route a "no longer true" verdict to the existing review gate.
+    /// Never deletes; an `Unknown` verdict never flags. The source is
+    /// abstracted so this is fully offline-testable with a fixture — the
+    /// live model path is [`revalidate_with_model`](Self::revalidate_with_model).
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError::Sqlite`] when a query, update, or audit
+    /// fails.
+    pub fn revalidate_sources(
+        &self,
+        config: &RevalidationConfig,
+        source: &dyn VerdictSource,
+        dry_run: bool,
+    ) -> Result<RevalidationReport, MemoryPersistenceError> {
+        // (is_global, id, body) so a flagged candidate is acted on its store.
+        let mut candidates: Vec<(bool, String, String)> = Vec::new();
+        Self::collect_revalidation_candidates(&self.connection, false, &mut candidates)?;
+        if let Some(global) = &self.global {
+            Self::collect_revalidation_candidates(&global.connection, true, &mut candidates)?;
+        }
+        // Deterministic order, then bound the sample (a cap on egress + churn).
+        candidates.sort_by(|a, b| a.1.cmp(&b.1));
+        candidates.truncate(config.sample_size);
+
+        let mut report = RevalidationReport {
+            dry_run,
+            ..Default::default()
+        };
+        for (is_global, id, body) in &candidates {
+            report.sampled += 1;
+            match source.judge(body) {
+                RevalidationVerdict::NoLongerTrue => {
+                    report.no_longer_true += 1;
+                    if !dry_run {
+                        let connection = if *is_global {
+                            match &self.global {
+                                Some(global) => &global.connection,
+                                None => continue,
+                            }
+                        } else {
+                            &self.connection
+                        };
+                        Self::flag_for_review_in(
+                            connection,
+                            &MemoryEntryId::new(id.clone()),
+                            "source re-validation: reported no longer current",
+                        )?;
+                    }
+                    report.flagged.push(id.clone());
+                }
+                RevalidationVerdict::StillCurrent => report.still_current += 1,
+                RevalidationVerdict::Unknown => report.unknown += 1,
+            }
+        }
+        Ok(report)
+    }
+
+    /// [`revalidate_sources`](Self::revalidate_sources) driven by the configured
+    /// chat model. **Opt-in, network-touching**: the caller invokes it
+    /// explicitly. Returns `Ok(None)` when no chat endpoint is configured (so the
+    /// feature degrades to "not available" rather than erroring), mirroring the
+    /// best-effort embedding path. The live run is opportunistic.
+    ///
+    /// # Errors
+    /// Returns [`MemoryPersistenceError`] when inference settings are malformed or
+    /// a store write fails.
+    pub fn revalidate_with_model(
+        &self,
+        config: &RevalidationConfig,
+        dry_run: bool,
+    ) -> Result<Option<RevalidationReport>, MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(chat) = capability.chat() else {
+            return Ok(None);
+        };
+        let source = ModelVerdictSource { chat };
+        Ok(Some(self.revalidate_sources(config, &source, dry_run)?))
+    }
+
+    /// Append the version-sensitive, not-already-flagged candidates from one store.
+    fn collect_revalidation_candidates(
+        connection: &Connection,
+        is_global: bool,
+        out: &mut Vec<(bool, String, String)>,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id, body FROM memory_index \
+                 WHERE status = 'active' AND stale_candidate = 0",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        for row in rows {
+            let (memory_id, body) = row.map_err(MemoryPersistenceError::Sqlite)?;
+            if is_revalidation_candidate(&body) {
+                out.push((is_global, memory_id, body));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn audit_records(&self) -> Result<Vec<AuditRecord>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, kind, actor, subject, metadata_json, happened_at FROM audit_events ORDER BY id",
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(AuditRecord {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    actor: row.get(2)?,
+                    subject: row.get(3)?,
+                    metadata_json: row.get(4)?,
+                    happened_at: row.get(5)?,
+                })
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(records)
+    }
+
+    pub fn relationships_for(
+        &self,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Vec<(String, String)>, MemoryPersistenceError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT relation_kind, target
+                FROM memory_relationships
+                WHERE memory_id = ?1
+                ORDER BY relation_kind, target
+                "#,
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let rows = statement
+            .query_map(params![memory_id.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut relationships = Vec::new();
+        for row in rows {
+            relationships.push(row.map_err(MemoryPersistenceError::Sqlite)?);
+        }
+        Ok(relationships)
+    }
+
+    /// The on-disk path of an active memory in the given store, or `None` when the
+    /// id is unknown there — used to locate a memory across the project and global
+    /// stores before deleting it.
+    fn memory_path_in(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Option<PathBuf>, MemoryPersistenceError> {
+        let mut statement = connection
+            .prepare("SELECT path FROM memory_index WHERE memory_id = ?1 AND status = 'active'")
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        match statement.query_row(params![memory_id.as_str()], |row| {
+            Ok(PathBuf::from(row.get::<_, String>(0)?))
+        }) {
+            Ok(path) => Ok(Some(path)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(MemoryPersistenceError::Sqlite(error)),
+        }
+    }
+
+    /// Writes the index, FTS, and relationship rows for `entry` on the given
+    /// connection. Callers run this inside a transaction so the rows appear
+    /// atomically.
+    fn index_memory_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+        path: &Path,
+        session_language: Option<&str>,
+    ) -> Result<(), MemoryPersistenceError> {
+        let epistemic_status = EpistemicStatus::from_category(&entry.category);
+        // The single language this lesson is about (or NULL for a general /
+        // cross-cutting one), resolved once here: the body wins when it names a
+        // language, else a language-bound category inherits the session's, so a
+        // lesson named only by idiom is still tagged and filtered in retrieval.
+        let language = crate::language::resolve_memory_language(
+            &entry.category,
+            entry.body.as_str(),
+            session_language,
+        );
+        connection
+            .execute(
+                r#"
+                INSERT INTO memory_index
+                (memory_id, path, scope, category, body, source_session, status, created_at,
+                 epistemic_status, confidence, language, origin_device)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11)
+                ON CONFLICT(memory_id) DO UPDATE SET
+                    path = excluded.path,
+                    scope = excluded.scope,
+                    category = excluded.category,
+                    body = excluded.body,
+                    source_session = excluded.source_session,
+                    status = excluded.status,
+                    epistemic_status = excluded.epistemic_status,
+                    confidence = excluded.confidence,
+                    language = excluded.language,
+                    origin_device = excluded.origin_device,
+                    -- Re-promoting a memory refreshes it, clearing any prior
+                    -- change-aware staleness flag.
+                    stale_candidate = 0
+                "#,
+                params![
+                    entry.id.as_str(),
+                    path.to_string_lossy().to_string(),
+                    format!("{:?}", entry.scope),
+                    format!("{:?}", entry.category),
+                    entry.body.as_str(),
+                    entry
+                        .source_session
+                        .as_ref()
+                        .map(|id| id.as_str().to_string()),
+                    OffsetDateTime::now_utc().to_string(),
+                    epistemic_status.as_str(),
+                    entry.confidence.value(),
+                    language,
+                    entry
+                        .sync_meta
+                        .origin_env
+                        .as_ref()
+                        .map(|env| env.device_label.clone())
+                        .filter(|label| !label.is_empty()),
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        connection
+            .execute(
+                "DELETE FROM memory_fts WHERE memory_id = ?1",
+                params![entry.id.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        connection
+            .execute(
+                "INSERT INTO memory_fts(memory_id, body) VALUES(?1, ?2)",
+                params![entry.id.as_str(), entry.body.as_str()],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Self::record_relationships_with(connection, entry)?;
+        Self::record_contradictions_with(connection, entry)?;
+        Ok(())
+    }
+
+    /// Record `contradicts` relationships for a freshly-indexed memory: the
+    /// entry's explicitly-declared contradictions, plus a deterministic
+    /// auto-detection — an active memory that shares a topic (`related_entities`)
+    /// but takes the opposite recommendation polarity (one prohibits what the
+    /// other endorses). Each contradiction is stored both ways and flags both
+    /// memories `contradicted`, so retrieval can surface the conflict. Nothing is
+    /// removed — a contradiction is a *signal*, not a deletion (D-LM-0008).
+    fn record_contradictions_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        let mut targets: std::collections::BTreeSet<String> = entry
+            .contradicts
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+
+        if !entry.related_entities.is_empty() {
+            let entry_prohibits = body_prohibits(&entry.body);
+            let placeholders = std::iter::repeat_n("?", entry.related_entities.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT DISTINCT r.memory_id, m.body FROM memory_relationships r \
+                 JOIN memory_index m ON m.memory_id = r.memory_id \
+                 WHERE r.relation_kind = 'entity' AND r.target IN ({placeholders}) \
+                 AND m.status = 'active' AND m.memory_id != ?{self_param}",
+                self_param = entry.related_entities.len() + 1
+            );
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            let mut bound: Vec<String> = entry.related_entities.clone();
+            bound.push(entry.id.as_str().to_string());
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(bound), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(MemoryPersistenceError::Sqlite)?;
+            for row in rows {
+                let (other_id, other_body) = row.map_err(MemoryPersistenceError::Sqlite)?;
+                if body_prohibits(&other_body) != entry_prohibits {
+                    targets.insert(other_id);
+                }
+            }
+        }
+
+        for target in targets {
+            // Store the relationship both directions, idempotently.
+            for (memory_id, other) in [
+                (entry.id.as_str(), target.as_str()),
+                (target.as_str(), entry.id.as_str()),
+            ] {
+                connection
+                    .execute(
+                        "INSERT OR IGNORE INTO memory_relationships(memory_id, relation_kind, target) \
+                         VALUES(?1, 'contradicts', ?2)",
+                        params![memory_id, other],
+                    )
+                    .map_err(MemoryPersistenceError::Sqlite)?;
+            }
+            // Flag both memories so retrieval surfaces the conflict.
+            connection
+                .execute(
+                    "UPDATE memory_index SET contradicted = 1 \
+                     WHERE memory_id IN (?1, ?2) AND status = 'active'",
+                    params![entry.id.as_str(), target],
+                )
+                .map_err(MemoryPersistenceError::Sqlite)?;
+        }
+        Ok(())
+    }
+
+    fn record_relationships_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        Self::relationship_with(
+            connection,
+            entry,
+            "category",
+            &format!("{:?}", entry.category),
+        )?;
+        if let Some(session_id) = &entry.source_session {
+            Self::relationship_with(connection, entry, "session", session_id.as_str())?;
+        }
+        for file in &entry.related_files {
+            Self::relationship_with(connection, entry, "file", file)?;
+        }
+        for entity in &entry.related_entities {
+            Self::relationship_with(connection, entry, "entity", entity)?;
+        }
+        Ok(())
+    }
+
+    fn relationship_with(
+        connection: &Connection,
+        entry: &MemoryEntry,
+        kind: &str,
+        target: &str,
+    ) -> Result<(), MemoryPersistenceError> {
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO memory_relationships(memory_id, relation_kind, target) VALUES(?1, ?2, ?3)",
+                params![entry.id.as_str(), kind, target],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(())
+    }
+
+    fn write_audit(
+        &self,
+        kind: AuditEventKind,
+        actor: &str,
+        subject: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryPersistenceError> {
+        Self::write_audit_with(&self.connection, kind, actor, subject, metadata)
+    }
+
+    fn embed_memory_if_configured(
+        &self,
+        connection: &Connection,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        let capability = InferenceCapability::from_settings(self.config.config.inference.as_ref())?;
+        let Some(endpoint) = capability.embeddings() else {
+            return Ok(());
+        };
+        // Embedding is a best-effort addendum to an already-committed memory: the
+        // Markdown file and the index row are durable before we get here, so a
+        // down/slow embedding endpoint (or a transient vector-store write) must
+        // never fail the promotion or the caller's turn. On any failure, record a
+        // skip in the audit trail and fall back to the lexical contract — the
+        // memory is still retrievable, just without a vector until re-embedded.
+        if let Err(error) = Self::embed_and_store_memory(connection, endpoint, entry) {
+            let _ = Self::write_audit_with(
+                connection,
+                AuditEventKind::InferenceCallFailed,
+                "localmind",
+                "embeddings",
+                &serde_json::json!({
+                    "feature": "embeddings",
+                    "endpoint_kind": "embedding",
+                    "model": endpoint.model(),
+                    "outcome": "skipped",
+                    "error": error.to_string(),
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    /// Embed `entry`'s body against `endpoint` and upsert the vector into
+    /// `vector_index` (with the inference audit), on the connection that owns the
+    /// memory's scope. Returns `Err` on an endpoint/vector-store failure; the
+    /// caller decides whether that is fatal — for promotion it is **not** (see
+    /// [`embed_memory_if_configured`](Self::embed_memory_if_configured)).
+    fn embed_and_store_memory(
+        connection: &Connection,
+        endpoint: &localmind_inference::EmbeddingEndpoint,
+        entry: &MemoryEntry,
+    ) -> Result<(), MemoryPersistenceError> {
+        let vectors = endpoint.embed(std::slice::from_ref(&entry.body))?;
+        let Some(vector) = vectors.first() else {
+            return Err(MemoryPersistenceError::InvalidVector {
+                detail: "embedding endpoint returned no vectors".to_string(),
+            });
+        };
+        // The inference audit and the vector both land in the same store that owns
+        // the memory (global vs project), so a global memory's vector is in the
+        // global database where global retrieval can find it.
+        Self::write_audit_with(
+            connection,
+            AuditEventKind::InferenceCallCompleted,
+            "localmind",
+            "embeddings",
+            &serde_json::json!({
+                "feature": "embeddings",
+                "endpoint_kind": "embedding",
+                "model": endpoint.model(),
+            }),
+        )?;
+        Self::upsert_memory_embedding_with(
+            connection,
+            &entry.id,
+            &content_fingerprint(entry.body.as_str()),
+            endpoint.model(),
+            vector,
+        )?;
+        Ok(())
+    }
+
+    pub fn record_custom_audit(
+        &self,
+        kind: AuditEventKind,
+        actor: &str,
+        subject: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryPersistenceError> {
+        self.write_audit(kind, actor, subject, metadata)
+    }
+
+    /// Inserts one audit row on the given connection. Metadata is a
+    /// `serde_json::Value` so callers cannot hand-build malformed JSON.
+    fn write_audit_with(
+        connection: &Connection,
+        kind: AuditEventKind,
+        actor: &str,
+        subject: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryPersistenceError> {
+        connection
+            .execute(
+                "INSERT INTO audit_events(kind, actor, subject, metadata_json, happened_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![
+                    format!("{kind:?}"),
+                    actor,
+                    subject,
+                    metadata.to_string(),
+                    OffsetDateTime::now_utc().to_string()
+                ],
+            )
+            .map_err(MemoryPersistenceError::Sqlite)?;
+        Ok(())
+    }
+}
+
+/// A [`VerdictSource`] backed by the configured chat model. Best-effort: a chat
+/// error yields [`RevalidationVerdict::Unknown`] (never a flag), so a down or
+/// flaky endpoint cannot manufacture review noise.
+struct ModelVerdictSource<'a> {
+    chat: &'a ChatEndpoint,
+}
+
+impl VerdictSource for ModelVerdictSource<'_> {
+    fn judge(&self, body: &str) -> RevalidationVerdict {
+        let messages = [ChatMessage::system(VERDICT_PROMPT), ChatMessage::user(body)];
+        match self.chat.complete(&messages) {
+            Ok(completion) => parse_verdict(&completion.content),
+            Err(_) => RevalidationVerdict::Unknown,
+        }
+    }
+}
+
+/// FTS5 `snippet()` window size in tokens — lands near the length of the old
+/// fixed 160-character head window while always containing a matched term.
+const SNIPPET_TOKENS: usize = 32;
+/// Ellipsis FTS5 inserts where the snippet window cut the body (SQL literal).
+const SNIPPET_ELLIPSIS: &str = "'…'";
+/// Query terms at or above this count engage the term-coverage gate: at least
+/// two of them must appear in a body for the hit to survive. Two-term queries
+/// deliberately keep single-term recall — the partial hit ranks below full
+/// matches and a caller-side limit truncates the tail.
+const MIN_TERMS_FOR_COVERAGE: usize = 3;
+
+/// The term-coverage gate: with `min_terms` or more significant terms in the
+/// query, a body matching fewer than `min_matched` of them is dropped as an
+/// incidental hit.
+///
+/// A parameter rather than a constant so the gate's **benefit** can be measured
+/// and not only its cost. Measuring what a guard costs is easy — its failures are
+/// visible; measuring what it buys needs the same corpus run with it relaxed, and
+/// that is not possible while the threshold is baked in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoverageGate {
+    /// Query-term count at which the gate becomes active.
+    pub min_terms: usize,
+    /// Matched terms a body needs to survive it.
+    pub min_matched: usize,
+}
+
+impl CoverageGate {
+    /// The shipped thresholds. Every production path uses these.
+    #[must_use]
+    pub const fn shipped() -> Self {
+        Self {
+            min_terms: MIN_TERMS_FOR_COVERAGE,
+            min_matched: 2,
+        }
+    }
+
+    /// A gate that never fires — every keyword match survives.
+    ///
+    /// Evaluation-only: it exists to answer "what does the gate exclude, and was
+    /// any of it worth excluding", which cannot be asked from inside the shipped
+    /// path.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            min_terms: usize::MAX,
+            min_matched: 0,
+        }
+    }
+}
+/// Terms shorter than this are matched exactly, never as prefixes — a short
+/// common fragment (`for*`, `git*`) would otherwise fan out across unrelated
+/// vocabulary and make junk memories eligible.
+const MIN_PREFIX_CHARS: usize = 4;
+
+/// Query words carrying no retrieval signal: matching one of these makes
+/// almost every English-prose memory eligible, so they are dropped before the
+/// MATCH expression is built. Deliberately small and technical-text-safe.
+const QUERY_STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "by", "can", "could", "did", "do", "does",
+    "for", "from", "how", "i", "in", "into", "is", "it", "its", "not", "of", "on", "or", "our",
+    "should", "that", "the", "these", "this", "those", "to", "was", "we", "were", "what", "when",
+    "where", "which", "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// One `search_in` hit with its full body retained for merge-time dedup and
+/// the term-coverage gate; the body never leaves this module.
+struct RankedMemoryRow {
+    result: MemorySearchResult,
+    body: String,
+}
+
+/// Normalize free-text query input into significant search terms: split on
+/// whitespace, trim non-alphanumeric edges (so `-search` or `(search` read as
+/// `search` while interior hyphens like `operator-safe` survive), and drop
+/// stopwords. Returns an empty list for a query with no signal — the caller
+/// returns no results rather than matching everything.
+fn significant_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|term| !term.is_empty())
+        .filter(|term| !QUERY_STOPWORDS.contains(&term.to_ascii_lowercase().as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The query term matching the fewest documents in this store.
+///
+/// Document frequency, asked of the index rather than guessed from word shape. A
+/// stopword list would be the conventional fix and it does not travel: `use`,
+/// `type`, `match` and `test` are ordinary English and load-bearing in a
+/// technical corpus, so a list built from intuition eats meaning. Rarity is a
+/// property of *this* store and needs no such judgement.
+///
+/// `None` when nothing can be counted — an unparseable term, or a store that
+/// refuses the query. The caller then falls back to the plain count, which is the
+/// behaviour this replaces and the safe direction.
+fn rarest_term(connection: &Connection, terms: &[String]) -> Option<String> {
+    let mut best: Option<(u64, String)> = None;
+    for term in terms {
+        let expression = fts_match_expression(std::slice::from_ref(term))?;
+        let count: Option<u64> = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_fts f JOIN memory_index m \
+                 ON m.memory_id = f.memory_id \
+                 WHERE memory_fts MATCH ?1 AND m.status = 'active'",
+                params![expression],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(count) = count else { continue };
+        if best.as_ref().is_none_or(|(seen, _)| count < *seen) {
+            best = Some((count, term.clone()));
+        }
+    }
+    best.map(|(_, term)| term)
+}
+
+/// How many of the query's significant terms appear in the body, counted the way
+/// the FTS `MATCH` expression counted them.
+///
+/// Tokens, not substrings. The previous rule was a case-insensitive `contains`,
+/// which credited a term appearing only *inside* a longer word — `changed`
+/// matching *unchanged*, `come` matching *outcome*. Measured on a real store that
+/// inflated coverage for 69 body/query pairs, and it does so most awkwardly on
+/// queries with no correct answer at all, where it lets an irrelevant body clear
+/// the gate.
+///
+/// Both sides are split with [`fts_tokens`], so a term is present when every
+/// token FTS5 would split it into is present. That is what keeps this in step
+/// with the query that produced the row rather than stricter than it.
+fn matched_terms(body: &str, terms: &[String]) -> usize {
+    let tokens = fts_tokens(body);
+    terms
+        .iter()
+        .filter(|term| {
+            let parts = fts_tokens(term);
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    // Prefix only where `fts_match_expression` applied one, so
+                    // coverage agrees with matching in both directions.
+                    let prefixed = part.chars().count() >= MIN_PREFIX_CHARS;
+                    tokens
+                        .iter()
+                        .any(|token| token == part || (prefixed && token.starts_with(part)))
+                })
+        })
+        .count()
+}
+
+/// Split text the way FTS5's default `unicode61` tokenizer does: on any
+/// non-alphanumeric character, **including underscore**.
+///
+/// The underscore is the point. `row_groups` is one word to a naive splitter and
+/// **two tokens** to the index, so a coverage rule that keeps underscores
+/// disagrees with the MATCH expression that produced the row. A golden fixture
+/// caught exactly that: the query `parquet row groups assertion` matches
+/// `row_groups` through the tokenizer, and a stricter-looking rule that did not
+/// split on `_` lost a hit the query genuinely made.
+///
+/// Splitting a *term* the same way is what lets `process_dir` behave as the
+/// phrase `process dir` — which is what the MATCH expression asks for.
+/// Adjacency is not checked, leaving this slightly **looser** than the phrase
+/// match, which is the safe direction: coverage stricter than the query would
+/// drop rows the query really did match.
+fn fts_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// Turns significant query terms into an FTS5 MATCH expression: each term
+/// becomes a quoted phrase, prefix-extended (`"term"*`) only when the term is
+/// long enough that the prefix stays selective, all OR-ed together. Quoting
+/// neutralizes FTS5 query syntax (`OR`, `-`, `NEAR`, parentheses) in user
+/// input; embedded double quotes are doubled per FTS5 string rules. Returns
+/// `None` when no significant terms remain (empty or all-stopword query).
+fn fts_match_expression(terms: &[String]) -> Option<String> {
+    let clauses: Vec<String> = terms
+        .iter()
+        .map(|term| {
+            let quoted = term.replace('"', "\"\"");
+            if term.chars().count() >= MIN_PREFIX_CHARS {
+                format!("\"{quoted}\"*")
+            } else {
+                format!("\"{quoted}\"")
+            }
+        })
+        .collect();
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(clauses.join(" OR "))
+}
+
+/// Whether a memory body recommends *against* something — a prohibition. Used to
+/// detect contradictions: two memories about the same topic with opposite
+/// polarity (one prohibits what the other endorses) conflict.
+fn body_prohibits(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    [
+        "do not",
+        "don't",
+        "never ",
+        "avoid ",
+        "stop ",
+        "no longer",
+        "instead of",
+        "must not",
+        "should not",
+        "shouldn't",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn path_is_under_root(root: &Path, path: &Path) -> bool {
+    let root = canonicalize_lenient(root);
+    let path = canonicalize_lenient(path);
+    path.starts_with(root)
+}
+
+/// Canonicalizes a path that may no longer exist: a deleted memory file must
+/// still compare correctly against its canonicalized root (on Windows,
+/// `canonicalize` adds a `\\?\` prefix that a raw fallback path lacks), so
+/// fall back to canonicalizing the parent and re-joining the file name.
+fn canonicalize_lenient(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(parent) = fs::canonicalize(parent) {
+            return parent.join(name);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
+fn decode_vector(blob: &[u8]) -> Result<Vec<f32>, MemoryPersistenceError> {
+    let chunks = blob.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(MemoryPersistenceError::InvalidVector {
+            detail: "vector blob length is not divisible by four".to_string(),
+        });
+    }
+    Ok(chunks
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (left, right) in left.iter().zip(right) {
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    dot / (left_norm.sqrt() * right_norm.sqrt())
+}
+
+#[derive(Debug, Error)]
+pub enum MemoryPersistenceError {
+    #[error(transparent)]
+    Config(#[from] StoreConfigError),
+    #[error(transparent)]
+    ReviewQueue(#[from] ReviewQueueError),
+    #[error(transparent)]
+    MemoryPath(#[from] crate::MemoryPathError),
+    #[error(transparent)]
+    Contract(#[from] localmind_core::ContractError),
+    #[error(transparent)]
+    Inference(#[from] InferenceError),
+    #[error("failed to create LocalMind state directory {path:?}: {source}")]
+    CreateStateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to open LocalMind database {path:?}: {source}")]
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    #[error("indexed memory path escapes LocalMind memory root: {path:?}")]
+    UnsafeIndexedMemoryPath { path: PathBuf },
+    #[error("global-scope memory requires the project to allow the GlobalUser scope")]
+    GlobalScopeDisabled,
+    #[error("failed to delete LocalMind memory file {path:?}: {source}")]
+    DeleteMemoryFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("review item does not exist: {item_id}")]
+    MissingReviewItem { item_id: ReviewItemId },
+    #[error("review item {item_id} is not accepted or edited: {state}")]
+    ReviewItemNotAccepted {
+        item_id: ReviewItemId,
+        state: String,
+    },
+    #[error(
+        "review item {item_id} is a source excerpt, not a standalone lesson — edit it into a \
+         reusable statement (Save edit) before promoting"
+    )]
+    ReviewItemNeedsEdit { item_id: ReviewItemId },
+    #[error(transparent)]
+    Schema(#[from] crate::schema::SchemaError),
+    #[error("invalid vector index data: {detail}")]
+    InvalidVector { detail: String },
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}

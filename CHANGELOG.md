@@ -1,0 +1,866 @@
+# Changelog
+
+Notable changes, newest first. Contract-relevant entries reference
+`docs/on-disk-contract.md`.
+
+## Unreleased
+
+## v5.0.0 - 2026-08-30
+
+- Began a new public Git history under PolyForm Noncommercial 1.0.0. Versions
+  through v4.0.0 remain available to existing recipients under their original
+  MIT grants; commercial use of v5+ requires a separate written license.
+
+## v4.0.0 - 2026-08-29
+
+Coordinated LocalX release.
+
+- **Embedding-capable LocalMind commands now share LocalPilot's exact server
+  lifetime without learning how to control LocalBox** (D-LM-0041). A neutral,
+  locked registry binds ownership to the normalized configured endpoint and
+  live server PID; unique RAII leases cover ingest, promotion, review-mode,
+  insights, MCP, and UI lifetimes. Reachable user-managed endpoints remain
+  usable and unclaimed. Stale/mismatched/legacy state is never trusted by
+  LocalMind, and last release enters an atomic `stopping` phase before the owner
+  tears down. `backfill` now fails before pending work when embeddings are not
+  configured or reachable and names `localbox embed-serve`; best-effort paths
+  explicitly retain their lexical/no-vector fallback.
+
+- Concurrent store opens now serialize schema upgrades with an immediate write
+  transaction and re-check `PRAGMA user_version` under that lock. The common
+  already-current open remains lock-free, while two processes starting on an
+  older schema now wait and converge instead of replaying non-idempotent
+  `ALTER TABLE` steps or surfacing `SQLITE_BUSY_SNAPSHOT` (LocalHub#149).
+
+- Removed the unused file-reading `ReviewQueue::enqueue_session_candidates`
+  wrapper and its private-to-that-path errors. Candidate ingestion continues
+  through the live in-memory `enqueue_candidates` deduplication boundary.
+
+- Removed the unused bulk `MemoryPersistence::record_review_audit` wrapper.
+  Review decisions continue to use the item-level audit path, so runtime audit
+  behavior and the on-disk contract are unchanged.
+
+- Removed the unused `localmind-store::StoreRecordSet` tuple alias. Its
+  component types remain available from `localmind-core`; no runtime or storage
+  behavior changed.
+
+- **A staleness flag can now be lifted, and both flagging and clearing reach the
+  global store.** `clear_stale_candidate` existed with **no caller anywhere** and
+  touched only the project store, while the freshness pass flags both — so a pass
+  could flag scores of global lessons and nothing shipped could undo it.
+
+  That mattered more than a missing convenience: a flagged memory is **excluded
+  from the queryless context primer**, so a false positive silently stopped being
+  offered as background context, with no supported way to restore it. Keyword
+  search was unaffected throughout, which is exactly why the gap was easy to miss.
+
+  `flag_for_review` had the same project-only limitation, so the public API could
+  neither flag nor unflag a global memory. Both now span project and global,
+  matching `list_stale_candidates`. Clearing is audited (`MemoryFlagCleared`), so
+  the lifecycle reads in both directions — a flag lifted with no trace is
+  indistinguishable from one never set.
+
+- **`local_only` now constrains inference egress, not only storage scope**
+  (D-LM-0034). A configuration reading `local_only = true` previously accepted
+  an inference or embedding endpoint on any reachable host and sent text there.
+  Endpoints are now restricted to literal loopback destinations — `localhost`,
+  the `.localhost` TLD, `127.0.0.0/8`, `::1` — checked **at the request**
+  rather than only at configuration load, since a check that runs once can be
+  stale by the time the request is made.
+
+  **Breaking, deliberately:** inference pointed at another machine (a LAN model
+  server, a hostname alias for this machine, a tunnelled remote) is refused,
+  with an error naming the host and what to do instead. Such a configuration
+  was already outside what `local_only` claimed; it was silent about it. No
+  name resolution is performed, so a hostname that would resolve to loopback is
+  refused too — the check and the connection are separate lookups, and trusting
+  the first to predict the second is the DNS-rebinding hole.
+
+- **D-LM-0026 amended: the reference host does not consume `rerank_scored`.** It
+  exercised that decision's own "host consumption is a host decision" clause and
+  fuses by Reciprocal Rank Fusion instead, which ranks on position rather than
+  reordering a blend by precomputed cosines. `rerank_scored` is now explicitly
+  disclosed as library-only — deliberately built, contract intact, no production
+  caller — rather than leaving a reader to infer one from the decision text.
+
+- **`localmind sessions` reports the session inventory and what a retention bound
+  would remove.** Session transcripts have been kept forever and nothing ever
+  pruned them; whether that should change is a judgement about privacy against
+  usefulness, and it is far easier to make while looking at the real list. With no
+  bound it shows the inventory and its tails; with `--keep-newest`, `--within-days`
+  or `--total-mb` it shows what each would catch, so the bounds can be compared
+  before one is chosen. **It never deletes.** Age comes from filesystem mtime,
+  because session metadata carries no timestamp — an approximation the command
+  states rather than hides.
+
+- **`localmind backfill` re-embeds rows whose vector is missing or out of date.**
+  Embedding happened once, at promotion or ingest, and was never retried — a
+  comment promising the row was "retrievable, just without a vector until
+  re-embedded" described a repair that did not exist, so the first endpoint
+  outage was permanent. The sweep set is a **query**, not a cursor: absent, or
+  the body changed since embedding, or embedded under a different model. That
+  makes it idempotent, resumable after an interruption, and correct across edits
+  and model changes with no progress state to corrupt. `--dry-run` reports the
+  set and its reasons; `--prune-stale` removes vectors whose memory is no longer
+  active; a refused row is counted and the sweep continues, so a partial repair
+  is never reported as a whole one.
+- **A model change is now actually repairable.** `upsert_vector_row`
+  short-circuited on the content fingerprint alone and never compared the model,
+  so re-embedding an unchanged body under a new model silently did nothing while
+  reporting success. The skip now requires both to match.
+
+- **Embedding capability is probed and reported, not assumed.** `status` and the
+  MCP `memory_status` tool now distinguish *not configured*, *configured but
+  unreachable*, and *healthy*, naming the endpoint. A degraded endpoint does not
+  flip store readiness — the lexical paths are unaffected. Chat and embedding
+  endpoints are reported on separate lines: an embedding-only configuration used
+  to render as "configured (chat endpoint set)", inventing a chat endpoint the
+  user had never set.
+- **Memory-vector coverage is now expressible.** The counterpart to the doc-side
+  counts: active accepted memory per scope, how much of it carries an embedding,
+  and vectors left behind by rows that are no longer active. Counted over active
+  rows on both sides — `total - vectors` is wrong when an unpruned vector from a
+  superseded row cancels a missing one. Without these counts, "most accepted
+  memory carries no vector" was not a state any surface could report.
+- **`memory_vector_scan_diagnosed`** gives the memory path the diagnosis
+  `doc_search` already had: embeddings not configured, endpoint unavailable, no
+  memory vectors, an index embedded under another model, or a scan that ran.
+
+- **Kind-scoped vector scanning is now public API.** `vector_scan_for_kind`
+  filters by `subject_kind` *inside* the ranked scan and reports the diagnostics
+  a caller needs to explain an empty result — how many candidate rows the kind
+  holds, and which models they were embedded under. `doc_search` already scanned
+  this way; nothing else could. The unfiltered `vector_search` keeps its callers
+  and gains a doc comment naming the hazard: a shared top-k is consumed by
+  whichever kind dominates the index, so filtering the result by kind afterwards
+  is not the same as scanning that kind. On a store holding 8,079 doc vectors
+  against 200 memory vectors, that difference is most of the memory candidates.
+
+## v3.3.2 - 2026-08-20
+
+Coordinated LocalX release.
+
+## v3.3.1 - 2026-08-20
+
+Coordinated LocalX release.
+
+## v3.3.0 - 2026-08-19
+
+Coordinated LocalX release.
+
+- Queryless **project primer**: `localmind context primer` (and the read-only
+  `memory_primer` MCP tool) return the most salient accepted memory for a project
+  with **no query** — a session-start recall baseline. Ranking uses the lesson
+  **category** as the semantic prior (a project decision is never outranked by a
+  popular note), with a bounded usage bucket and recency as small tie-breaks;
+  `stale`/`contradicted` rows are excluded and project memory is preferred over
+  global. Bounded (default 12, hard max 20, ~12 KiB). Read-only — records no
+  audit event.
+
+## v3.2.0 - 2026-08-18
+
+Coordinated LocalX release.
+
+- Import existing agent knowledge into the review queue: `localmind import-memory
+  <dir>` reads a directory of Claude Code memory files (front-matter Markdown),
+  and `localmind import-lessons <path>` reads `lessons.md` bullet lists (a file
+  or a directory tree). Both enqueue **pending** candidates only (never
+  auto-accepted, D-LM-0016), redact every field before storing it, dedup against
+  the pending queue so re-running is idempotent, and label each candidate with a
+  `source`. A dry run (the default) reports what an apply would enqueue.
+
+- Write-path hardening: `localmind propose --json-file <path>` (`-` for stdin)
+  reads a whole proposal as one JSON object instead of many flags (handy for a
+  hook passing a long body); a read-only `memory_status` MCP tool reports the
+  server's store readiness (learning on/off, accepted memory split project vs
+  global, pending-review and doc-index counts, schema version) from a shared
+  best-effort snapshot — a not-ready project returns a structured `ready:false`,
+  never a tool error — without consuming the proposal cap; and `localmind mcp
+  serve` binds to an explicit `--project` exactly, else walks up from its launch
+  directory to the nearest `.localmind.toml` (like `ui`/`review`) so it binds to
+  the workspace it started in instead of a hard-coded path.
+
+- Agents can propose a distilled lesson directly into the review queue without a
+  transcript closeout: `localmind propose "<lesson>" [--body --category --scope
+  --source --tag --file --evidence --idempotency-key --confidence]`, and the
+  `memory_propose` MCP tool (D-LM-0033). A bounded proposal enters as a
+  **pending** candidate even under trusted/automatic review — never
+  auto-accepted (D-LM-0016) — and is deduplicated against pending and accepted
+  memory through the existing lexical/semantic ladder. MCP calls return a
+  schema-declared structured result, advertise additive/idempotent/closed-world
+  annotations, and are capped per server session. Schema v11 adds hashed
+  proposal receipts so retries remain no-ops even when pending dedup routed the
+  first call to a different survivor. `CandidateLesson` gained an
+  optional `source` field recording the proposing agent (serde-default; no
+  migration — candidates are JSON blobs). See `docs/on-disk-contract.md`.
+
+## v3.1.0 - 2026-08-11
+
+Coordinated LocalX release.
+
+## v3.0.0 - 2026-08-11
+
+Coordinated LocalX release.
+
+## v2.8.1 - 2026-08-07
+
+Coordinated LocalX release.
+
+## v2.8.0 - 2026-08-07
+
+Coordinated LocalX release.
+
+- **The review screen can show the whole queue at once.** The state filter gains
+  an **All states** view that lists items in every state, each row labelled with
+  its own state (accepted/edited rows keep their promotion chip). `Pending` stays
+  the default. The All view is read-only for bulk actions — it exposes no
+  selection surface — while per-item actions remain available. Frontend only; no
+  backend or schema change (LocalHub#54, D-LM-0032).
+
+## v2.7.0 - 2026-08-02
+
+Coordinated LocalX release.
+
+- **Code snippets can reuse LocalMind's compiled grammars for syntax highlighting.**
+  `localmind-codegraph` now exposes each supported language's bundled highlight
+  query and a cached `highlight` API that returns ordered, non-overlapping byte
+  ranges with their grammar capture names. Invalid or unsupported input falls
+  back to an empty span set so callers can render the original text unchanged.
+
+## v2.6.0 - 2026-07-27
+
+Coordinated LocalX release.
+
+- **One-line install for the whole stack.** `localmind` is now installed alongside
+  the rest of LocalX by a single command, with each archive checked against its
+  published SHA-256 before it is unpacked:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+  ```
+
+  The train cuts every tool to one version and they are only tested together, so
+  they are installed together; `localpilot update --all` re-runs it. Nothing in
+  this repository changed to support it — the release archives and `manifest.json`
+  already published were the whole contract.
+
+## v2.5.0 - 2026-07-27
+
+Coordinated LocalX release.
+
+- **Releases now ship prebuilt binaries.** A tagged release previously carried
+  release notes and nothing else, so the only way to get this tool was to build
+  it from source with a Rust toolchain. Each release now attaches an archive per
+  platform — Linux x86-64 (glibc and a static musl build that runs anywhere),
+  Linux arm64, macOS Apple Silicon, and Windows x86-64 — with a SHA-256 beside
+  each archive and a `manifest.json` indexing the release.
+
+  Publishing happens once, only when every platform built. A partial release is
+  worse than a failed one: a download cannot tell the difference. The checksums
+  prove an archive was not corrupted in transit; they do not prove who produced
+  it, which needs signing.
+
+## v2.4.0 - 2026-07-26
+
+Coordinated LocalX release.
+
+- **Skills review tab for skill-discovery proposals** (LocalHub#41, D-LM-0031). A
+  new **Skills** tab reads the review proposals LocalPilot's discovery lane writes
+  to `<project>/.localpilot/skill-proposals.toml`, grouped by repository, and lets a
+  reviewer add the source, install the recommended skill, install all, defer, or
+  reject. Every mutation delegates to LocalPilot's `skills` CLI (never registers or
+  installs in-process); install-from-unregistered is atomic (a failed install rolls
+  back the fresh registration) and a moved repository is flagged as drift. Distinct
+  from the memory review queue — skill recommendations are not memory candidates.
+- **The audit log no longer attributes decisions to the wrong person**
+  (LocalHub#35, D-LM-0030). The review UI shipped with a hardcoded `reviewer`
+  default and never persisted what a reviewer typed, so every page load restored
+  that name into the append-only audit log. The field now ships empty (an
+  embedded-asset test asserts no hardcoded name), identity is stored per browser
+  origin in `localStorage` (`localmind.reviewer`), and a first run opens a
+  non-dismissable modal: accept/reject/defer/edit/promote and the bulk actions
+  are disabled until an identity is given, while Memory, Docs, Graph and Audit
+  stay browsable. Whitespace is trimmed and rejected as an actor. Existing audit
+  rows are never rewritten.
+- **Review candidates carry source evidence separately from the lesson**
+  (LocalHub#24, D-LM-0029). `CandidateLesson` gains optional `evidence_text`
+  (full carried source, shown by the review UI under the summary in a
+  collapsible block, never written into the promoted memory body) and
+  `requires_edit_before_promotion` (a provenance-backed excerpt must be
+  edited into a standalone lesson before promotion — refused with a clear
+  error until then; nothing is deleted). Legacy candidates are unaffected.
+  The quality classifier gains an `evidence-dump` verdict for bodies
+  dominated by carried fenced evidence or sentence-free web boilerplate;
+  through the existing retroactive freshness pass this also flags existing
+  raw-dump accepted memories for manual review (flag-only, never deleted).
+- **`Accept only` no longer strands review items in an invisible limbo**
+  (LocalHub#31). The review UI gains a state filter (Pending, Accepted,
+  Edited, Deferred, Rejected, Merged); accepted/edited items show whether
+  they are *awaiting promotion* or already *promoted*, carry a
+  `Promote to memory` action backed by the existing promote endpoint, and a
+  bulk `Promote selected` action (idempotent per item, per-item errors
+  surfaced). Status, the pill, and the dashboard now report `accepted review
+  items awaiting promotion` separately from `accepted memory` instead of one
+  conflated `accepted` label. `Accept only` stays non-promoting, and no
+  retained accepted item is silently promoted — they are simply visible and
+  actionable again. Keyboard accept/reject/defer shortcuts stay scoped to
+  the Pending view.
+- **`insights research` is now topic-scoped accepted-memory distillation**
+  (LocalHub#29). The batch pass selects only memories relevant to the topic
+  (via the disciplined accepted-memory search) instead of concatenating the
+  whole store into one prompt, fits them into a token budget truncated at
+  memory boundaries with provenance ids preserved, and prefers each memory's
+  concise lesson text over any attached raw evidence block. An empty
+  relevant selection makes no model call. Small stores skip scoping (a
+  handful of memories needs no selection). The command is documented as
+  accepted-memory distillation — local-only, distinct from the host's web
+  research workflow; the batch contract is unchanged (inert without
+  configured inference, strict validated output, review-routed insights).
+- **Semantic doc search now explains an empty answer** (LocalHub#28). An empty
+  `doc_search` result distinguishes: nothing ingested, embeddings not
+  configured, embedding endpoint unreachable, passages present but unvectored,
+  an index embedded under a different model/dimensions than the active model
+  (with a re-embed recommendation), and a genuine no-match — each with its own
+  message on the MCP tool and a `status` field on the UI `/api/docs` response.
+  Doc vectors are now ranked kind-filtered inside the vector scan, so
+  high-ranking memory vectors can no longer crowd doc hits out of the window,
+  and a configurable relevance floor (`[retrieval] doc_search_min_cosine`,
+  default 0.25) stops an unrelated nearest neighbour from being presented as
+  relevant merely to fill the limit. `localmind status` and the UI stats now
+  report doc chunk and doc vector counts. Embeddings stay best-effort: no
+  diagnostic turns a degraded capability into a failure.
+- **Memory search now returns match-centred snippets and disciplined queries**
+  (LocalHub#27). A search hit's snippet is an FTS5 `snippet()` window centred
+  on the matched terms instead of the first 160 characters of the body, so a
+  match deep inside a large memory is represented by the matching passage,
+  not its boilerplate head. Query terms are normalized (punctuation-trimmed
+  edges), stopwords are dropped (an all-stopword query matches nothing
+  instead of everything), short terms match exactly rather than as prefixes,
+  and a query with three or more significant terms requires at least two of
+  them to appear in a body before it is eligible. The MCP `memory_search`
+  tool gains an optional `limit` argument (default 8) so a broad query cannot
+  flood the caller's context; each result still leads with the memory id for
+  id-based inspection. Project-over-global precedence now dedups global
+  results by full body (previously by snippet), and the rerank contract is
+  unchanged.
+- Fixed `localmind ui` review actions failing with `reviewer is not a function`.
+  Individual and bulk accept/reject/defer/edit actions now read the reviewer
+  input explicitly, refresh the queue statistics after success, and keep review
+  keyboard shortcuts within the review module instead of relying on undefined
+  cross-module state.
+- **The Docs tab now explains itself instead of sitting silently empty**
+  (LocalHub#18). An empty doc index shows the exact ingest command; a semantic
+  search without a configured embedding endpoint says so (browsing works
+  without embeddings) instead of an indistinguishable "no matches"
+  (`/api/docs` now reports `embeddings_configured`); a failed load surfaces
+  its error. Re-ingesting a shrunk or emptied file now prunes its stale
+  passages, and `localmind_store` gains `ingest_doc_text` (per-file doc ingest
+  for hosts with their own walker/redaction) and `delete_doc_file`. Doc-ingest
+  callers can also suppress the best-effort embedding pass (an `embed` flag on
+  `ingest_doc_text`/`ingest_doc_chunk`), so a host that promises no
+  ingest-time embedding cost can keep that promise; the tree-walking
+  `localmind ingest docs` is unchanged.
+- Synced memory is now **environment-aware**. A synced memory records the machine
+  that wrote it (`memory_index.origin_device`, schema v10), and retrieval can
+  **down-weight — never drop —** a lesson from another machine so a
+  machine-specific tip (a local path, a GPU/driver quirk) ranks below an
+  equally-relevant same-machine lesson, tunable via `[sync] foreign_env_weight`
+  (conservative default, `1.0` disables). Derived state (vectors, code graph,
+  usage counters) is never part of a sync payload — imports re-embed locally
+  through the existing promotion path. A synced memory's origin machine is
+  surfaced on `MemorySearchResult`/`MemoryProvenance` and in its review candidate.
+  See `docs/on-disk-contract.md`.
+- `localmind sync run` / `localmind sync status` **exchange memory through a sync
+  folder** (`[sync] folder`) — LocalMind opens no sockets; the folder is carried
+  by the user's own transport. A run exports this device's syncable memory as one
+  opaque, encrypted bundle and imports peers': every incoming op is **review-
+  gated** (never straight to active memory), an unknown signer is rejected
+  fail-closed, a same-memory divergence routes to review as a conflict without
+  ever overwriting the local memory (no last-writer-wins), and a proposed
+  deletion flags the memory for review (never auto-deletes). Re-runs are
+  idempotent. See `docs/on-disk-contract.md`.
+- The **encrypted sync payload** is in place: an incremental op-bundle
+  (create/update/supersede/tombstone over accepted memory), signed with the
+  device's Ed25519 identity and then sealed to every enrolled device's X25519
+  key (`crypto_box` sealed box). Fail-closed — a bundle that cannot be encrypted
+  to at least one enrolled device is never produced, so the transport folder
+  only ever holds ciphertext with opaque, content-addressed names. A per-peer
+  cursor makes export incremental (only changed memory, no echo). See
+  `docs/on-disk-contract.md`.
+- `localmind sync` gains **device enrollment**: each machine has a per-device
+  X25519 encryption keypair (`device.json`, owner-only) beside its signing key,
+  and the trust list doubles as a device registry. `sync device-card` publishes
+  a machine's public card + fingerprint, `sync enroll --confirm-fingerprint`
+  adds a peer only when the out-of-band fingerprint matches (fail-closed),
+  `sync devices` lists them, and `sync revoke` removes a device so future
+  exports stop encrypting to it and its signature is no longer trusted for sync.
+  See `docs/on-disk-contract.md`.
+- Accepted memory now carries **cross-device sync scoping**, the foundation for
+  syncing memory between a user's machines. Each memory has a *sync disposition*
+  (`sync` / `machine_local` / `sync_annotated`) layered over its scope — durable
+  `Project`/`GlobalUser` knowledge syncs by default, while `Session`/`Research`/
+  `Skill` stay machine-local — and syncing memory is stamped at write time with
+  a best-effort *environment fingerprint* (OS, arch, device label) recording the
+  machine that wrote it. A new `[sync]` config section adds `project_key`
+  (a path-independent project identity, otherwise derived from the git `origin`
+  remote so the same repo at different paths on two machines maps to one store)
+  and `device_label`. All fields are additive and forward-compatible: existing
+  memory files and older readers are unaffected. See `docs/on-disk-contract.md`.
+- `localmind ui` and `localmind review list` now find the project store by
+  walking up from the given directory (default: the current directory) to the
+  nearest ancestor holding `.localmind.toml`, so running either from a
+  subdirectory finds the project's store instead of silently opening a
+  different, empty one. An explicit `--project` still points where you say. When
+  no store is found at or above the directory, both print an actionable message
+  instead of opening an empty store; the UI dashboard shows the resolved store
+  path and marks an empty store as empty (rather than an ambiguous `0/0/0`). See
+  `docs/on-disk-contract.md`.
+- `localmind_store` exposes `ingest_docs`/`ingest_docs_into` (with
+  `DocIngestSummary`/`DocIngestError`): the Markdown chunk+ingest previously
+  inline in the `ingest docs` CLI command, extracted so other hosts can reuse
+  the same chunker and store path in-process. The CLI command is unchanged in
+  behaviour.
+- **`localmind ui` — a local web app for reviewing and managing memory.** A
+  localhost-only sync HTTP server with a self-contained tabbed SPA (no
+  framework, no build step, no external assets): Dashboard (stat cards plus
+  scope/category bars), Review (the pending queue with bulk actions and
+  keyboard shortcuts), Memory (search/filter, full detail with provenance,
+  audited delete), Docs (semantic passages over the ingested documentation,
+  with a per-repo dropdown), Graph (an interactive Obsidian-style code-graph
+  browser backed by the four graph tools, plus a global map), and Audit (the
+  event table with kind-filter counts). Every endpoint is a thin wrapper over
+  the same store methods the CLI uses — no logic duplication, no review-gate
+  bypass. Localhost bind is the control; an optional `--token` guards LAN
+  exposure. Theme-aware light/dark.
+- **`localmind ingest docs <path>` — semantic documentation ingest**
+  (`doc_chunk`, schema v9; see `docs/on-disk-contract.md`). Walks Markdown,
+  chunks at headings (oversized sections split at paragraph boundaries), and
+  embeds each passage into the shared `vector_index` under
+  `subject_kind = "doc"`, keeping the citable text in the new `doc_chunk`
+  table. Re-ingest is idempotent (chunk id = `<relpath>#<ordinal>`) and
+  embedding is best-effort — a down embedding endpoint stores text without a
+  vector. A new `doc_search` store path (embed query → rank → join text)
+  serves the CLI, the UI Docs tab, and a new MCP `doc_search` tool.
+- **`localmind mcp serve` — a live stdio MCP server.** A hand-rolled,
+  synchronous, newline-delimited JSON-RPC 2.0 server over stdin/stdout (no
+  new async runtime) exposing `memory_search`, `memory_context_export`, the
+  four code-graph tools, skill list/fetch, and `doc_search` — each wired to
+  the existing store/graph APIs. Alongside it, **`localmind graph reindex
+  <path>`** walks a repo tree (VCS, build, and vendored directories skipped;
+  candidates restricted to a source/doc extension allowlist so a stray binary
+  cannot abort the pass) and drives the resumable reindexer to completion —
+  whole-repo code-graph ingest from the CLI.
+
+## v2.3.0 - 2026-07-07
+
+Coordinated LocalX release.
+
+- The retrieval rerank stage gained a stored-vector entry point
+  (`rerank_scored`) so a host that already scored its candidates against the
+  `vector_index` can rerank without re-embedding hit texts per query; the
+  `[retrieval] rerank`/`rerank_window` keys now take effect through the
+  LocalPilot host's memory-injection retrieval (D-LM-0026). Default off and
+  byte-identical to the blend order when off or without an embedding
+  endpoint.
+- Every production database open now sets WAL journal mode, a 5-second busy
+  timeout, and `synchronous=NORMAL` through one shared helper — the host and
+  the CLI share `.localmind/localmind.sqlite`, and an overlap previously
+  failed immediately with `SQLITE_BUSY`. WAL adds `-wal`/`-shm` sidecar files
+  beside the database (see `docs/on-disk-contract.md`).
+- `status` counts only items actually awaiting review as pending — an
+  accepted, rejected, or deferred candidate no longer inflated the count.
+- `status` and `eval` accept `--project` like their sibling commands instead
+  of silently reading the current directory.
+
+## v2.2.0 - 2026-07-06
+
+Coordinated LocalX release.
+
+- OKF (Open Knowledge Format) interop: `localmind okf import <dir>` enqueues an OKF
+  bundle's concepts as untrusted, review-gated candidates, and `localmind okf export
+  <dir>` writes accepted memory as a conformant OKF bundle. Import/export is a profile
+  over the Markdown memory format — a LocalMind-origin file round-trips losslessly;
+  OKF is unsigned, so imports are flagged untrusted and never auto-promoted.
+  (`docs/on-disk-contract.md`, `docs/decisions.md` D-LM-0025)
+- Docs: clarified the on-disk contract's `schema_migrations` row — the table
+  records only the baseline (`version = 1`); the stepper appends no per-step row,
+  so `PRAGMA user_version` is the authoritative schema version. Corrected the
+  README release-train badge to the current version. (`docs/on-disk-contract.md`)
+
+## v2.1.5 - 2026-07-04
+
+Coordinated LocalX release.
+
+## v2.1.4 - 2026-07-04
+
+Coordinated LocalX release.
+
+## v2.1.3 - 2026-07-03
+
+Coordinated LocalX release.
+
+## v2.1.2 - 2026-07-03
+
+Coordinated LocalX release.
+
+## v2.1.1 - 2026-07-03
+
+Coordinated LocalX release.
+
+## v2.1.0 - 2026-07-03
+
+Coordinated LocalX release.
+
+- **`localmind status` is honest.** It now reports real project readiness —
+  config discovery, the memory store and its accepted-memory count, the review
+  queue, and whether inference is configured — and exits non-zero when the
+  project is unusable, instead of printing a canned "ready".
+- **`insights distill`/`research` say when nothing ran.** With no `[inference]`
+  endpoint they print an explicit "model-backed pass skipped" note instead of a
+  bare "Enqueued: 0" that looked like "ran, found nothing".
+- **Docs: a capability table** in the README names which surfaces the standalone
+  CLI exposes versus which are host-mounted (hybrid/vector search, rerank, the
+  code graph, MCP, freshness, provenance).
+- **Fixed: the trusted/automatic auto-supersede arm now honors the D-LM-0024
+  quality gate.** A non-`General` (tooling-noise / over-fit) candidate that
+  contradicts an accepted memory no longer auto-retires it — the strongest
+  automated action was ungated while auto-accept was gated; both now require
+  `quality.is_general()` and a non-general contradiction routes to manual review.
+- **Docs: corrected the learning opt-in and global-scope defaults.**
+  `docs/on-disk-contract.md` now states plainly that `.localmind.toml` is
+  **required** to enable learning (a missing file refuses all writes), matching
+  the code and README; the `allows_global` rustdoc and `vision.md` now state that
+  global cross-project scope is **on by default** once learning is enabled
+  (same-machine, `local_only`; narrow to `["project"]` to opt out) instead of the
+  stale "off by default". README privacy section calls out the global default.
+
+## v2.0.2 - 2026-07-02
+
+Coordinated LocalX release.
+
+## v2.0.1 - 2026-07-02
+
+Coordinated LocalX release.
+
+## v2.0.0 - 2026-07-02
+
+Coordinated LocalX release.
+
+## v1.2.1 - 2026-07-01
+
+Coordinated LocalX release.
+
+## v1.2.0 - 2026-06-30
+
+Coordinated LocalX release.
+
+- **Retroactive low-quality freshness flag (D-LM-0024).** The freshness pass gains
+  a `low-quality` reason that reuses the write-time quality classifier to flag an
+  already-stored tooling-noise or over-fit lesson — one that predates the write
+  gate — for review, across the project and global stores. It is the most
+  actionable reason and is **age-independent** (a bad lesson is flagged on the
+  first pass regardless of age), while still only routing to review (never
+  deleting) and honouring the per-run cap and dry-run. Markers match whole
+  words/phrases, so `function` / `uncertain` never mis-flag. An operator applies it
+  with `learning freshness`.
+
+- **Write-time lesson-quality gate (D-LM-0024).** A model-pinned benchmark showed
+  accepted learning is net-positive but noisy: tooling/process artifacts (a
+  working-directory or build-wrapper note) and over-fit, exercise-specific claims
+  auto-accepted and then mis-injected into unrelated tasks. A new deterministic,
+  offline classifier (`classify_quality`) labels every candidate `general`,
+  `over-fit`, or `tooling-noise`. The verdict is marked at extraction (in
+  `review_annotation.notes`, both the deterministic and the model paths) and
+  enforced at the accept seam: under trusted/automatic mode a non-`general`
+  candidate is **withheld from auto-accept and routed to manual review** — treated
+  like a duplicate, never discarded, **never auto-deleted**. An error-code recipe
+  stays `general` (specific but generalizable), and a path/shell phrase inside a
+  security or architecture lesson is not read as tooling noise (the category gate).
+  See `docs/on-disk-contract.md`.
+
+## v1.1.0 - 2026-06-29
+
+Coordinated LocalX release.
+
+- **The semantic (vector) rung now reaches the machine-wide global store
+  (D-LM-0023).** `vector_search` scanned only the project `vector_index`, while
+  `GlobalUser`-scoped lessons embed their vectors into the global index — so the
+  embedding-cosine dedup rung and the hybrid-retrieval vector boost were both
+  blind to global memories (a global paraphrase auto-accepted under automatic
+  mode; a global memory never gained a vector score). `vector_search` now scans
+  **project + global** vectors, merged by score with project precedence, mirroring
+  the keyword path's `search`/`search_lang` merge. The duplicate probe also fetches
+  candidate headroom and filters to memory subjects, so a higher-ranked non-memory
+  vector (e.g. an ingested code chunk) can no longer hide a real memory duplicate.
+  Adds a **route-to-review band**: cosine ≥ 0.86 is a confident `duplicate_of`,
+  `[0.83, 0.86)` is a borderline one — both routed to review, **never auto-deleted
+  or auto-merged** (the band only widens what a human sees). No-embeddings behaviour
+  stays byte-identical to the lexical contract. Refines D-LM-0020; reuses
+  D-LM-0010/0017; honours D-LM-0016. See `docs/on-disk-contract.md`.
+
+- **Accepted memory now tracks usage (schema v8).** `memory_index` gains
+  `hit_count` (default 0) and `last_used_at` (NULL = never), bumped post-turn
+  when a memory is injected into context, so never-retrieved dead weight and
+  high-value lessons are both visible. The bump is best-effort and never on the
+  retrieval read path; the columns are runtime-accumulated (a reindex resets them
+  to zero-usage). New store queries surface never-retrieved and most-used
+  memories, and search results expose the count. Pre-v8 databases upgrade cleanly
+  (rows read as zero-usage). See `docs/on-disk-contract.md`.
+
+- **A proactive freshness pass flags stale memory for review (D-LM-0021).** A
+  deterministic, offline pass (`freshness_pass`) selects accepted memory for
+  review by age, never-retrieved-after-a-grace, and a version-sensitive
+  keyword/semver heuristic — across the project **and** global stores, covering
+  the non-code-anchored global lessons the change-aware staleness flag never
+  reaches. It only routes to the existing review gate (it never deletes or
+  re-ranks), with conservative configurable thresholds, a per-run cap, and a
+  dry-run; re-runs are idempotent. `list_stale_candidates` now spans both stores.
+
+- **Optional source re-validation (opt-in, default-off).** `revalidate_sources`
+  samples version-sensitive lessons and asks a `VerdictSource` whether each still
+  holds, routing a "no longer true" verdict to review (never deletes); an
+  `Unknown` verdict never flags. The logic is model-agnostic (offline-testable
+  with a fixture); `revalidate_with_model` drives it with the configured chat
+  model, best-effort (degrades to unavailable when none is configured).
+
+- **Language detection is whole-word and covers more languages.** Keyword
+  matching was substring-based, so "cpp" matched a project name like `llama.cpp`
+  and bare names risked colliding with English; and Go-by-name, C#, PowerShell,
+  and Bash lessons were never tagged at all (only `golang` was a Go keyword). The
+  matcher now requires whole-word boundaries (`contains_word`) so "go" matches
+  "Go:" but not "going"/"cargo", "java" never matches inside "javascript", and
+  `llama.cpp` is not read as C++; and the table adds **Go** (via `goroutine`/`go
+  build`/`go:` markers, not the ambiguous bare token), **C#** (`c#`/`dotnet`),
+  **PowerShell** (`pwsh`/`cmdlet`), and **Bash** (`pipefail`) for both prose tags
+  and `.cs`/`.ps1`/`.sh` workspace detection. Tagging stays conservative — a
+  lesson naming zero or several languages is left untagged.
+
+- **Accepted-memory dedup is now semantic, not just lexical (opt-in,
+  review-routed).** A candidate that means the same thing as an accepted lesson
+  but shares few words (token overlap ~0.33, under the 0.6 lexical bar) used to
+  slip through and promote a near-duplicate. When `review.semantic_dedup` is on
+  **and** an embedding endpoint is configured, dedup now layers: lexical overlap
+  stays the cheap first pass and the no-embeddings fallback; if it does not
+  already flag a duplicate, the candidate is embedded and compared by cosine to
+  accepted-memory vectors, and a nearest match at **cosine ≥ 0.86** (fixed,
+  conservative, test-pinned) flags `duplicate_of` → routed to review like any
+  duplicate, **never auto-deleted**. With embeddings unavailable the behaviour is
+  byte-identical to the lexical contract (pinned by a no-regression test), and the
+  vector path is best-effort. Decision **D-LM-0020** (refines D-LM-0007, reuses
+  D-LM-0010's embeddings).
+
+- **Accepted memory is embedded into `vector_index`, best-effort.** When an
+  `[inference]` embedding endpoint **and** `embedding_model` are configured, each
+  accepted memory is embedded at promotion/persist time (keyed by a content
+  fingerprint so an unchanged body is not re-embedded), making the warm store
+  vector-searchable for dedup and rerank. Embedding is **best-effort**: a down or
+  slow endpoint no longer fails the promotion — the memory still persists (the
+  lexical contract is the fallback), the failure is logged as a new
+  `InferenceCallFailed` audit row, and the memory carries no vector until it is
+  re-embedded. With no `embedding_model` set, no vectors are written and behaviour
+  is byte-identical to the lexical-only path. See `docs/on-disk-contract.md`.
+
+- **Language tagging no longer under-tags lessons named only by idiom.** Body-text
+  detection alone missed clearly language-specific lessons that never spell the
+  language out (a Go `sort.Strings` anti-pattern, a Rust borrow recipe), so they
+  stored untagged and leaked across languages. `resolve_memory_language` now lets
+  a **language-bound category** (code pattern, anti-pattern, debugging recipe,
+  test strategy) inherit the **session's language** — the dominant language of the
+  workspace the lesson was learned in — while an explicit language in the body
+  still wins and cross-cutting categories (tooling, process) stay untagged.
+  Workspace-language detection (`detect_workspace_language`) moved here too, so the
+  workspace signal and the stored tag share one source of truth.
+
+- **Accepted memory is tagged with a programming language and retrieval filters
+  by it.** A lesson clearly about one language ("In Python, …") is noise in a
+  task in another — a Python idiom injected into a Rust task degrades the
+  solution. The single language a lesson names is now detected once at write
+  time from the full body (new shared `language` module — the same table drives
+  the host's workspace-language detection so the two cannot drift) and stored on
+  `memory_index.language` (**schema v7**, see `docs/on-disk-contract.md`). The
+  column is **nullable**: a lesson that names no single language (general) or
+  several (cross-cutting) stays untagged and eligible for every task, and every
+  pre-v7 row upgrades cleanly (treated as agnostic until a reindex re-detects
+  it). `MemoryPersistence::search_lang(query, language)` excludes off-language
+  memories **inside the FTS query**, so retrieval returns rows that are already
+  language-relevant instead of ranking N and dropping the off-language ones
+  afterward. `search` is unchanged (no filter).
+
+- **Learning is on by default.** `[learning] enabled` now defaults to **`true`**
+  (was `false`), so a project accumulates reviewed memory — and the machine-wide
+  global store (D-LM-0017) fills with cross-project lessons (language/tooling/
+  shell/build patterns and their anti-patterns) — out of the box. It stays
+  `local_only` and review-gated (candidates, never auto-active memory); opt out
+  with `[learning] enabled = false`. A measurement that must touch no accumulated
+  memory disables learning explicitly. See `docs/on-disk-contract.md` and D-LM-0019.
+
+- **Scope-aware, review-gated bundle import.** A verified bundle can be imported:
+  a `Rejected` bundle never reaches the store; a `Trusted`/`Untrusted` one has each
+  entry routed by scope (project → project store, global → the machine-wide global
+  store, D-LM-0017) and **enqueued as a review candidate** carrying import
+  provenance (origin author, trust class, bundle digest) — never written straight
+  to active memory. The existing dedup ladder makes a re-import idempotent,
+  and a `--dry-run` (the CLI default) reports added/duplicate/rejected counts
+  without writing. Rollback is the existing path: discard un-reviewed candidates
+  with `review purge`, or remove a promoted memory with `memory delete`.
+
+- **Signed, fail-closed-verified bundles.** A bundle can be signed (Ed25519 over
+  a SHA-256 digest of its canonical bytes) and verified on the way in: a tampered
+  byte, bad signature, malformed key, author/key mismatch, or unsupported version
+  is `Rejected` and never imported; a valid unknown-key bundle is `Untrusted`
+  (heavier review); your own/trusted key is `Trusted`. A verified author is **not**
+  verified content — imported memory is still review-gated. Trust is local — an
+  Ed25519 keypair in a `0600` file under `~/.localmind/keys/` (the BYOK pattern,
+  host ADR-0042) plus a manual trust list; no PKI or network. The private key is
+  never serialized into a bundle or logged. New crypto deps (`ed25519-dalek`,
+  `sha2`, `getrandom`) are pinned + `cargo deny`-clean. Decision: D-LM-0018;
+  contract: `docs/on-disk-contract.md` §Signed bundle.
+
+- **Portable memory bundle (format v1).** Accepted memory can be exported to a
+  portable, versioned, self-describing JSON pack (`MemoryBundle`) and parsed back,
+  the basis for moving knowledge across your own machines and sharing it. The
+  bundle is built from the Markdown source of truth via the new
+  `MarkdownMemoryFormat::parse` (the inverse of `serialize`), reusing the
+  canonical model serde — no second serialization of a lesson. Export is
+  accepted-only, scope-selectable (`project`/`global`/`both`), re-redacted with a
+  pre-export `SecretScanReport` seam, and deterministic/content-addressable; a
+  reader rejects an unknown newer `format_version`. Signing/verify and the
+  import/merge path layer on top (later changes). Contract:
+  `docs/on-disk-contract.md` §Portable memory bundle.
+
+- **Machine-wide global memory (on by default).** The modelled-but-dormant
+  `GlobalUser` scope is now real and on by default: `allowed_scopes` defaults to
+  `["project", "global_user"]`, so cross-project knowledge accumulates in a
+  separate per-user-home store (`~/.localmind/memory`, overridable by an absolute
+  `global_memory_root` or the `LOCALMIND_GLOBAL_ROOT` env — `@project` roots it
+  under each project for hermetic tests) with its own index, shared across
+  projects. A conservative scope classifier
+  (`CandidateDestination::default_for_category`) routes clearly cross-project
+  lessons (tool-use, debugging recipe, process, anti-pattern, user preference) to
+  global and keeps project-specific lessons project; promotion stays review-gated.
+  Retrieval merges project + global with **project precedence**, and
+  `delete_memory` is now scope-aware. `local_only` still holds (same-machine,
+  never remote). A project that wants project-only memory sets
+  `allowed_scopes = ["project"]`. Contract: `docs/on-disk-contract.md`
+  §Global-scope store; D-LM-0017.
+
+## v1.0.0 - 2026-06-24
+
+Coordinated LocalX 1.0 release. First stable: the on-disk contract and engine
+surface are now SemVer-stable. Validated cross-model (lesson-injection uplift
+holds on a second local model).
+
+- Model-backed lesson extraction (`closeout` with `[inference]`) now tolerates the
+  output real local models actually produce. A reasoning model wraps its JSON in a
+  `<think>...</think>` block and a Markdown code fence, which made a raw parse fail at
+  column 1 and abort the whole closeout. The chat client gained
+  `extract_json_payload`, which strips the think block and fence and isolates the
+  outer JSON span; the extractor now also requests a JSON object via `response_format`
+  (retried once without it if the server rejects the constraint) and, on any extraction
+  or parse failure, falls back to the deterministic extractor instead of erroring.
+- `flag_for_review(memory_id, reason)` generalizes the route-to-review staleness
+  flag to carry a caller-supplied reason, so outcome-aware down-weighting (a
+  lesson that didn't improve eval outcomes) and change-aware invalidation share
+  one audited, never-auto-delete path. `mark_stale_candidate` is now a thin
+  wrapper over it (unchanged behaviour). (D-LM-0016)
+- `MemorySearchResult` now carries the matched memory's `category`, so a host can
+  gate or dedup context injection by category without a second store lookup. The
+  field is populated from the existing `memory_index.category` column — purely
+  additive to the search contract (D-LM-0015).
+
+## v0.3.0-beta.3 - 2026-06-18
+
+Coordinated LocalX beta release.
+
+### 2026-06-19 - Memory quality
+
+- Broadened the golden eval `default_fixtures` from three to eight, adding the
+  hard categories the small set missed: stale/superseded knowledge, contradictory
+  preferences, a failed-tool→recovery recipe, a long noisy transcript with a
+  single buried lesson, and a low-value close-out that must yield no durable
+  memory. All score precision/recall/recall@k 1.0.
+- The `golden_eval_meets_quality_threshold` gate now enforces **per-fixture
+  (per-category) minimums** and a negative-fixture zero-candidate check, so a
+  strong mean can no longer hide a weak category.
+- Reconciled the `vision.md` host-integration note, which still said extraction
+  quality was "not yet measured / until the quality eval lands" — it now states
+  the eval exists, is fixture-backed and per-category gated, and should keep
+  growing toward real-world coverage. Prose and status table now agree.
+
+### 2026-06-19 - Release hygiene
+
+- Stamped every crate's `Cargo.toml` package version at `0.3.0-beta.3` to match
+  the top-level `VERSION`; the coordinated cut had moved `VERSION` but left the
+  Rust packages a train behind.
+
+### 2026-06-18 - Memory quality
+
+- Added a third golden extraction fixture (`lock-order-deadlock`) to
+  `default_fixtures`, broadening the gated eval beyond the exporter case while
+  keeping mean precision/recall at 1.0.
+- Corrected the `vision.md` status table: lesson-extraction quality **is** gated
+  by the golden eval (`golden_eval_meets_quality_threshold`, mean precision/recall
+  ≥ 0.9 with a negative no-false-positive fixture) and the extraction acceptance
+  bar — the previous "not yet measured" line was stale.
+
+### 2026-06-17 - Documentation
+
+- Added an in-repo wiki source (`docs/wiki/`) that is one-way CI-synced to the
+  GitHub Wiki, a `docs/README.md` doc-ownership index, and an offline link check
+  over the docs.
+- Documented the `localmind eval` memory-quality command in the README.
+
+## v0.3.0-beta.2 - 2026-06-15
+
+Coordinated LocalX beta release. Makes the learning loop produce usable results.
+
+- Hardened the deterministic extractor: candidates pass a prose-admission gate
+  (no bare file paths, code/markup, or punctuation fragments), and each heuristic
+  family is tightened and capped. Stops the review queue flooding with noise.
+- Batch distillation and research now emit strict-JSON, schema-validated
+  candidates; non-JSON model output is rejected, not stored.
+- Replaced the naive review-mode conflict/duplicate detection (top-1 keyword hit;
+  literal "contradict") with token-overlap similarity and a real
+  corrective-contradiction check.
+- Added a golden-session memory-quality evaluation (extraction precision/recall,
+  retrieval recall@k) with a regression threshold, exposed as `localmind eval`.
+- Recorded engine decision `D-LM-0006`.
+- Docs: vision Implementation-Status table discloses host-unwired/quality-
+  unmeasured; section 13 marked superseded; README MCP wording corrected.
+
+## v0.3.0-beta.1 - 2026-06-12
+
+Coordinated LocalX beta release.
+
+- Added opt-in local OpenAI-compatible inference for chat completions and
+  embeddings, with deterministic behavior when inference is not configured.
+- Added schema-versioned vector storage and hybrid memory retrieval.
+- Added model-backed extraction, review annotations, and manual/assisted/
+  trusted/automatic review modes.
+- Added active skill lifecycle records and MCP host surface.
+- Added batch research and distillation jobs that route through the review
+  pipeline.
+
+## v0.1.0 — 2026-06-12
+
+First tagged snapshot of the host-neutral learning engine.
+
+- 3-OS CI (fmt, clippy `-D warnings`, nextest, doctests, check).
+- Redaction: data-driven pattern table (AWS, Slack, JWT, GitHub, OpenAI-style
+  keys, bearer headers, assignment/JSON/.env shapes, URL credentials) plus a
+  Shannon-entropy backstop; corpus-tested in both directions; documented
+  caught / not-caught guarantee.
+- Persistence integrity: promote/persist/delete commit atomically; audit
+  metadata is serde-built JSON; interrupted deletions heal on retry
+  (including on Windows).
+- Database schema versioned with a `PRAGMA user_version` stepper; the
+  baseline step is a no-op on databases created before versioning existed;
+  newer databases are refused with a typed error.
+- Search serves from the FTS5 index (`MATCH` + bm25) with operator-safe
+  query construction.
+- Extraction: deterministic heuristics over explicit `Lesson:` markers,
+  failure→resolution pairs, repeated commands, and user corrections, with a
+  per-family cap and a fixture-backed acceptance bar (vision.md).
+- Code-structure graph: schema/store, tree-sitter ingester, incremental
+  reindex, graph-aware retrieval, memory-to-code join, MCP graph tools.
+- `docs/on-disk-contract.md` documents the full on-disk contract for hosts.

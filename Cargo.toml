@@ -1,0 +1,67 @@
+[workspace]
+members = [
+    "crates/localmind-cli",
+    "crates/localmind-codegraph",
+    "crates/localmind-core",
+    "crates/localmind-inference",
+    "crates/localmind-mcp",
+    "crates/localmind-review",
+    "crates/localmind-search",
+    "crates/localmind-skills",
+    "crates/localmind-store",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
+repository = "https://github.com/C0deGeek-dev/LocalMind"
+homepage = "https://github.com/C0deGeek-dev/LocalMind"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "=1.0.95"
+assert_cmd = "=2.0.16"
+clap = { version = "=4.5.23", features = ["derive", "env"] }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "zeroize"] }
+fs2 = "=0.4.3"
+getrandom = "=0.2.15"
+regex = "=1.11.3"
+sha2 = "=0.10.8"
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+streaming-iterator = "=0.1.9"
+tempfile = "=3.14.0"
+thiserror = "=2.0.9"
+time = { version = "=0.3.37", features = ["formatting", "parsing", "serde"] }
+toml = "=0.8.23"
+tree-sitter = "=0.26.9"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.25.0"
+tree-sitter-go = "=0.25.0"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-c-sharp = "=0.23.5"
+tree-sitter-java = "=0.23.5"
+tree-sitter-c = "=0.24.2"
+tree-sitter-cpp = "=0.23.4"
+tree-sitter-ruby = "=0.23.1"
+tree-sitter-php = "=0.24.2"
+tree-sitter-lua = "=0.5.0"
+tree-sitter-ocaml = "=0.24.2"
+tree-sitter-elixir = "=0.3.5"
+tree-sitter-powershell = "=0.26.4"
+ureq = { version = "=2.12.1", default-features = false }
+url = "=2.5.4"
+idna_adapter = "=1.2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"
