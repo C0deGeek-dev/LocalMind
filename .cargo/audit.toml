@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # time 0.3.37 is affected by RUSTSEC-2026-0009 only when parsing
+    # untrusted RFC 2822 input. LocalMind does not use that parser. The fixed
+    # time 0.3.47 crate requires edition 2024 metadata that Cargo 1.82 cannot
+    # parse; remove this exception when the workspace MSRV is raised.
+    "RUSTSEC-2026-0009",
+]

@@ -21,7 +21,7 @@ homepage = "https://github.com/C0deGeek-dev/LocalMind"
 rust-version = "1.82"
 
 [workspace.dependencies]
-anyhow = "=1.0.95"
+anyhow = "=1.0.103"
 assert_cmd = "=2.0.16"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "zeroize"] }

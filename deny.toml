@@ -1,0 +1,30 @@
+[advisories]
+ignore = [
+    # Reachable only through untrusted RFC 2822 parsing, which LocalMind does
+    # not perform. The fixed time release requires a newer Cargo than the 1.82
+    # MSRV. Remove when the workspace MSRV is raised.
+    "RUSTSEC-2026-0009",
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    "PolyForm-Noncommercial-1.0.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
