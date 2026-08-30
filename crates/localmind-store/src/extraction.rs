@@ -916,7 +916,7 @@ fn looks_like_code_or_markup(text: &str) -> bool {
         return true;
     }
     // A list bullet whose body is a file/line citation (e.g.
-    // "- LocalHub/plans/foo.md:62-93 - …") is dumped doc content, not a lesson.
+    // "- project/plans/foo.md:62-93 - …") is dumped doc content, not a lesson.
     if t.starts_with("- ") || t.starts_with("* ") {
         if let Some(rest) = t.get(2..) {
             if (rest.contains(".md:") || rest.contains(".rs:") || rest.contains(".ps1:"))
@@ -1167,7 +1167,7 @@ mod tests {
     fn rejects_bare_file_paths() {
         for path in [
             r"LocalMind\crates\localmind-core\src\skill.rs",
-            "LocalHub/plans/archive/09-localmind-skills.md",
+            "project/plans/archive/09-localmind-skills.md",
             r"- LocalPilot\external\localmind\crates\localmind-store\src\skill_drafts.rs",
         ] {
             assert!(looks_like_path(path), "should be a path: {path:?}");
