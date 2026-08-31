@@ -2,7 +2,15 @@
 ignore = [
     # time 0.3.37 is affected by RUSTSEC-2026-0009 only when parsing
     # untrusted RFC 2822 input. LocalMind does not use that parser. The fixed
-    # time 0.3.47 crate requires edition 2024 metadata that Cargo 1.82 cannot
-    # parse; remove this exception when the workspace MSRV is raised.
+    # time 0.3.47 crate requires edition-2024 manifest metadata that Cargo
+    # 1.82 cannot parse.
+    #
+    # Waiver added 2026-08-30. Exit criterion: remove this entry and adopt
+    # `time >= 0.3.47` once the workspace MSRV is raised to Rust/Cargo
+    # >= 1.85.0 — the release that stabilized edition 2024
+    # (https://doc.rust-lang.org/edition-guide/rust-2024/index.html,
+    # confirmed against the 1.85.0 release notes). Recheck at the
+    # tooling-research/readiness step of whichever future plan raises the
+    # workspace MSRV; do not let this ignore outlive that check.
     "RUSTSEC-2026-0009",
 ]

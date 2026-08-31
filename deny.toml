@@ -1,8 +1,10 @@
 [advisories]
 ignore = [
     # Reachable only through untrusted RFC 2822 parsing, which LocalMind does
-    # not perform. The fixed time release requires a newer Cargo than the 1.82
-    # MSRV. Remove when the workspace MSRV is raised.
+    # not perform. The fixed time release requires a newer Cargo than the
+    # 1.82 MSRV. Exit criterion (added 2026-08-30): remove once the workspace
+    # MSRV reaches Rust/Cargo >= 1.85.0 (edition 2024) — see the fuller note
+    # in .cargo/audit.toml, which carries the canonical version/date/source.
     "RUSTSEC-2026-0009",
 ]
 
