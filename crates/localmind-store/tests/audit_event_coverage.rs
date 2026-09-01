@@ -237,6 +237,44 @@ fn an_oversized_superseded_body_is_truncated_in_the_audit_row() {
     );
 }
 
+#[test]
+fn deleting_a_memory_captures_its_prior_body_in_the_audit_row() {
+    let dir = project("[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n");
+    let persistence = MemoryPersistence::open_project(dir.path()).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "to-delete",
+            "this wording must survive the delete in the audit trail",
+        ))
+        .unwrap();
+
+    assert!(persistence
+        .delete_memory(&MemoryEntryId::new("to-delete"), "tester")
+        .unwrap());
+
+    let rows = audit_rows(dir.path(), "MemoryDeleted");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].subject, "to-delete");
+    assert!(rows[0]
+        .metadata_json
+        .contains(r#""before_body":"this wording must survive the delete in the audit trail""#));
+
+    // The file and the index row are both gone — this audit row is now the
+    // only surviving record of the exact wording.
+    assert!(!dir
+        .path()
+        .join(".localmind")
+        .join("memory")
+        .join("project")
+        .join("to-delete.md")
+        .exists());
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "to-delete"));
+}
+
 fn run_batch(research: bool) -> tempfile::TempDir {
     let base_url = one_chat_response();
     let dir = project(&format!(

@@ -685,6 +685,12 @@ impl MemoryPersistence {
             return Err(MemoryPersistenceError::UnsafeIndexedMemoryPath { path });
         }
 
+        // Read before mutating: once the file is removed and the index row
+        // deleted below, this is the last place the body exists anywhere —
+        // capture it now or it is gone for good, unlike a supersede (which
+        // keeps the file and merely flips a status column).
+        let before_body = Self::memory_body_in(connection, memory_id)?;
+
         // The file goes first: a crash between the file removal and the
         // transaction below leaves a stale index row pointing at a missing
         // file, and re-running the delete heals it (missing files are
@@ -726,12 +732,16 @@ impl MemoryPersistence {
             params![memory_id.as_str()],
         )
         .map_err(MemoryPersistenceError::Sqlite)?;
+        let mut metadata = serde_json::json!({});
+        if let Some(body) = before_body {
+            metadata["before_body"] = serde_json::Value::String(truncate_for_audit(&body));
+        }
         Self::write_audit_with(
             &tx,
             AuditEventKind::MemoryDeleted,
             actor,
             memory_id.as_str(),
-            &serde_json::json!({}),
+            &metadata,
         )?;
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         Ok(true)
