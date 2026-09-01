@@ -108,15 +108,34 @@ pub struct ReconciliationReport {
     pub stale: Vec<OrphanEntry>,
 }
 
+/// Every scope `MemoryPathResolver::write_memory_file` will ever write
+/// under the *project* memory root — every scope except `GlobalUser`,
+/// which is rooted at the separate global store instead (handled on its
+/// own in [`MemoryPersistence::orphan_sweep_plan`]). Not every project
+/// enables all of these (`ProjectConfig::allows_scope` gates each one), but
+/// the sweep must not silently skip a scope the *config* allows just
+/// because it defaults to unused — `write_memory_file` writes it the same
+/// way whichever scope is configured.
+const PROJECT_ROOTED_SCOPES: [MemoryScope; 4] = [
+    MemoryScope::Project,
+    MemoryScope::Session,
+    MemoryScope::Skill,
+    MemoryScope::Research,
+];
+
 impl MemoryPersistence {
-    /// Report-only: scans the project store (and the global store, when one
-    /// is open) for orphaned memory files. No side effects.
+    /// Report-only: scans every scope directory this project's config
+    /// allows under the project memory root, plus the global store when one
+    /// is open, for orphaned memory files. No side effects.
     pub fn orphan_sweep_plan(&self) -> Result<OrphanReport, MemoryPersistenceError> {
-        let mut report = scan_scope(
-            self.connection(),
-            &self.config().memory_root(),
-            MemoryScope::Project,
-        )?;
+        let mut report = OrphanReport::default();
+        let memory_root = self.config().memory_root();
+        for scope in PROJECT_ROOTED_SCOPES {
+            if !self.config().allows_scope(&scope) {
+                continue;
+            }
+            report.merge(scan_scope(self.connection(), &memory_root, scope)?);
+        }
         if let (Some(global_connection), Some(global_root)) =
             (self.global_connection(), self.config().global_memory_root())
         {
@@ -171,10 +190,7 @@ fn scan_scope(
     memory_root: &Path,
     scope: MemoryScope,
 ) -> Result<OrphanReport, MemoryPersistenceError> {
-    let scope_dir = memory_root.join(match scope {
-        MemoryScope::GlobalUser => "global",
-        _ => "project",
-    });
+    let scope_dir = memory_root.join(crate::paths::scope_dir(&scope));
 
     let entries = match fs::read_dir(&scope_dir) {
         Ok(entries) => entries,

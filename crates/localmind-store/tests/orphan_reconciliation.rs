@@ -12,14 +12,37 @@ use localmind_core::{
 };
 use localmind_store::{MarkdownMemoryFormat, MemoryPathResolver, MemoryPersistence, ProjectConfig};
 
+/// A project scoped to `["project"]` **only** — no global scope, ever. Every
+/// test in this file that has no reason to touch the global store at all
+/// uses this, so it can never accidentally open the real machine-wide
+/// `~/.localmind` store: `allowed_scopes` defaults to
+/// `["project", "global_user"]`, and a bare `enabled = true` config would
+/// silently inherit that default.
 fn enabled_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".localmind.toml"),
-        "[learning]\nenabled = true\n",
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
     )
     .unwrap();
     dir
+}
+
+/// A project with an **explicit, hermetic** `global_memory_root` under its
+/// own tempdir, for the one test that specifically exercises global-scope
+/// reconciliation. Never resolves to the real per-user `~/.localmind` store.
+fn enabled_project_with_global() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let global_root = dir.path().join("hermetic-global-root");
+    std::fs::create_dir_all(&global_root).unwrap();
+    std::fs::write(
+        dir.path().join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\", \"global_user\"]\nglobal_memory_root = {global_root:?}\n"
+        ),
+    )
+    .unwrap();
+    (dir, global_root)
 }
 
 fn seed_memory(id: &str, scope: MemoryScope, body: &str) -> MemoryEntry {
@@ -242,4 +265,111 @@ fn a_file_whose_front_matter_scope_disagrees_with_its_directory_is_flagged_not_g
         .unwrap()
         .iter()
         .any(|record| record.memory_id.as_str() == "scopemismatch1"));
+}
+
+/// Global-scope coverage, fully hermetic: `enabled_project_with_global`
+/// points `global_memory_root` at a tempdir under this test's own project,
+/// never the real per-user `~/.localmind` store.
+#[test]
+fn a_global_scope_orphan_is_found_and_reindexed_without_touching_the_real_home_store() {
+    let (dir, global_root) = enabled_project_with_global();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    write_unindexed(
+        root,
+        &seed_memory(
+            "global-orphan1",
+            MemoryScope::GlobalUser,
+            "a cross-project lesson written but never indexed",
+        ),
+    );
+
+    // Confirm the file actually landed under the hermetic global root, not
+    // the real per-user store.
+    assert!(global_root
+        .join("global")
+        .join("global-orphan1.md")
+        .exists());
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert_eq!(plan.reindexable.len(), 1);
+    assert_eq!(plan.reindexable[0].memory_id, "global-orphan1");
+    assert_eq!(plan.reindexable[0].scope, MemoryScope::GlobalUser);
+
+    let report = persistence.orphan_sweep_apply().unwrap();
+    assert_eq!(report.reindexed, 1);
+    assert!(persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "global-orphan1"));
+}
+
+/// Non-`Project` project-rooted scope coverage: a project that opts into
+/// `session` scope (per `[learning] allowed_scopes`) gets that directory
+/// swept too, not only `project/`.
+#[test]
+fn a_session_scope_orphan_is_found_and_reindexed_when_the_project_allows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".localmind.toml"),
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\", \"session\"]\n",
+    )
+    .unwrap();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    write_unindexed(
+        root,
+        &seed_memory(
+            "session-orphan1",
+            MemoryScope::Session,
+            "a session-scoped lesson written but never indexed",
+        ),
+    );
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert_eq!(plan.reindexable.len(), 1);
+    assert_eq!(plan.reindexable[0].memory_id, "session-orphan1");
+    assert_eq!(plan.reindexable[0].scope, MemoryScope::Session);
+
+    let report = persistence.orphan_sweep_apply().unwrap();
+    assert_eq!(report.reindexed, 1);
+    assert!(persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "session-orphan1"));
+}
+
+/// A scope the project's config does **not** allow is never scanned, even
+/// if a stray file happens to sit in that directory (e.g. left over from a
+/// config change that narrowed `allowed_scopes`).
+#[test]
+fn a_disallowed_scope_directory_is_never_scanned() {
+    let dir = enabled_project(); // allowed_scopes = ["project"] only
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    // A file sitting in `skill/` even though this project's config never
+    // allows the `skill` scope.
+    let skill_dir = root.join(".localmind").join("memory").join("skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let stray = seed_memory(
+        "stray-skill1",
+        MemoryScope::Skill,
+        "should never be scanned",
+    );
+    std::fs::write(
+        skill_dir.join("stray-skill1.md"),
+        MarkdownMemoryFormat::serialize(&stray),
+    )
+    .unwrap();
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert!(
+        plan.is_empty(),
+        "a disallowed scope directory must not be swept at all"
+    );
 }

@@ -170,7 +170,10 @@ fn unique_temp_path(parent: &Path, target: &Path) -> io::Result<PathBuf> {
     )))
 }
 
-fn scope_dir(scope: &MemoryScope) -> &'static str {
+/// `pub(crate)` so a sibling module (the orphan reconciliation sweep) can
+/// walk every scope directory this resolver would ever write to, instead of
+/// hand-maintaining a second copy of this mapping that could silently drift.
+pub(crate) fn scope_dir(scope: &MemoryScope) -> &'static str {
     match scope {
         MemoryScope::GlobalUser => "global",
         MemoryScope::Project => "project",
