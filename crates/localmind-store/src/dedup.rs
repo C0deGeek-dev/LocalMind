@@ -73,6 +73,78 @@ pub fn is_near_duplicate(a: &str, b: &str) -> bool {
     similarity(&token_set(a), &token_set(b)) >= NEAR_DUP_THRESHOLD
 }
 
+/// The candidate-level half of the two-level dedup decision. Replaces the
+/// prior single undifferentiated "similar, review it" outcome: a *confident*
+/// duplicate is redundant enough to skip outright, a clean candidate creates
+/// as normal, and only a genuinely ambiguous (borderline) match defers to the
+/// second level ([`ExistingItemDecision`]) instead of being guessed at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateDedupDecision {
+    /// A confident duplicate of already-accepted memory — not worth creating
+    /// as a new memory. Routed to `ReviewAction::IgnoreSimilar`, never
+    /// silently dropped (it still closes as a reviewable, audited decision).
+    Skip,
+    /// No duplicate found (or found but not confident/borderline) — proceeds
+    /// through the existing accept/create path unaffected.
+    Create,
+    /// A borderline match: neither confidently redundant nor clearly novel.
+    /// Defers to a human, annotated with an [`ExistingItemDecision`]
+    /// suggestion for the *existing* memory it resembles.
+    None,
+}
+
+/// Pure classifier for the candidate-level decision, from the two signals
+/// `review_modes.rs`'s accepted-memory match already computes: whether a
+/// duplicate was found at all, and — when one was — whether it was a
+/// *confident* match (lexical, or vector cosine ≥ the confident bar) versus
+/// a *borderline* one (vector cosine in the route-to-review band). Neither
+/// existing threshold changes (D-LM-0020/D-LM-0023 stay exactly as they
+/// are) — this only adds a name and a routed outcome to what those
+/// thresholds already distinguish.
+#[must_use]
+pub fn classify_candidate_decision(
+    duplicate_found: bool,
+    borderline: bool,
+) -> CandidateDedupDecision {
+    match (duplicate_found, borderline) {
+        (false, _) => CandidateDedupDecision::Create,
+        (true, false) => CandidateDedupDecision::Skip,
+        (true, true) => CandidateDedupDecision::None,
+    }
+}
+
+/// The existing-item half of the two-level decision: what a human reviewer
+/// should consider doing about the *existing* accepted memory a
+/// [`CandidateDedupDecision::None`] candidate resembles. A suggestion only —
+/// per D-LM-0016, neither outcome ever auto-applies; a reviewer always
+/// confirms it explicitly (`review merge` / `review delete-existing`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExistingItemDecision {
+    /// The candidate reads as a restatement/consolidation of the existing
+    /// memory's wording, not a contradiction of it — consider merging the
+    /// two (`review merge`, which promotes the candidate as the existing
+    /// memory's replacement, same mechanics as a supersede).
+    Merge,
+    /// The candidate reads as a correction of the existing memory (it
+    /// contradicts it), and the existing memory is not being kept in any
+    /// form — consider deleting it (`review delete-existing`), which
+    /// rejects the candidate too rather than promoting it as a replacement.
+    Delete,
+}
+
+/// Pure suggester for the existing-item decision, from the same
+/// contradiction signal `review_modes.rs` already computes
+/// (`is_contradiction`) for the auto-supersede path — reused, not
+/// reimplemented, so the two never diverge.
+#[must_use]
+pub fn suggest_existing_item_decision(contradicts_existing: bool) -> ExistingItemDecision {
+    if contradicts_existing {
+        ExistingItemDecision::Delete
+    } else {
+        ExistingItemDecision::Merge
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +188,33 @@ mod tests {
             "use guard clauses in the parser",
             "use guard clauses in the request handler",
         ));
+    }
+
+    #[test]
+    fn candidate_decision_maps_confidence_to_the_right_outcome() {
+        assert_eq!(
+            classify_candidate_decision(false, false),
+            CandidateDedupDecision::Create
+        );
+        assert_eq!(
+            classify_candidate_decision(true, false),
+            CandidateDedupDecision::Skip
+        );
+        assert_eq!(
+            classify_candidate_decision(true, true),
+            CandidateDedupDecision::None
+        );
+    }
+
+    #[test]
+    fn existing_item_decision_follows_the_contradiction_signal() {
+        assert_eq!(
+            suggest_existing_item_decision(true),
+            ExistingItemDecision::Delete
+        );
+        assert_eq!(
+            suggest_existing_item_decision(false),
+            ExistingItemDecision::Merge
+        );
     }
 }

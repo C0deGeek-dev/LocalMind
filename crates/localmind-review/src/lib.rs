@@ -20,25 +20,30 @@ pub fn decision_closes_item(action: &ReviewAction) -> bool {
             | ReviewAction::MergeInto(_)
             | ReviewAction::ConvertToSkill
             | ReviewAction::Supersede(_)
+            | ReviewAction::IgnoreSimilar
+            | ReviewAction::MergeIntoMemory(_)
+            | ReviewAction::DeleteExisting(_)
     )
 }
 
 pub fn state_after_decision(decision: &ReviewDecision) -> ReviewState {
     match &decision.action {
         ReviewAction::Accept => ReviewState::Accepted,
-        ReviewAction::Reject | ReviewAction::IgnoreSimilar => ReviewState::Rejected,
+        ReviewAction::Reject | ReviewAction::IgnoreSimilar | ReviewAction::DeleteExisting(_) => {
+            ReviewState::Rejected
+        }
         ReviewAction::Edit => ReviewState::Edited,
         ReviewAction::MergeInto(_) => ReviewState::Merged,
         ReviewAction::MarkTemporary => ReviewState::Deferred,
         ReviewAction::ConvertToSkill => ReviewState::Accepted,
-        ReviewAction::Supersede(_) => ReviewState::Accepted,
+        ReviewAction::Supersede(_) | ReviewAction::MergeIntoMemory(_) => ReviewState::Accepted,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{decision_closes_item, state_after_decision};
-    use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId, ReviewState};
+    use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, ReviewState};
 
     fn decision(action: ReviewAction) -> ReviewDecision {
         ReviewDecision {
@@ -57,7 +62,17 @@ mod tests {
         assert!(decision_closes_item(&ReviewAction::Accept));
         assert!(decision_closes_item(&ReviewAction::ConvertToSkill));
         assert!(!decision_closes_item(&ReviewAction::MarkTemporary));
-        assert!(!decision_closes_item(&ReviewAction::IgnoreSimilar));
+        // IgnoreSimilar closes the item (state_after_decision maps it to
+        // Rejected, a terminal state) — this predicate previously
+        // disagreed with that mapping while the action had no production
+        // caller; fixed now that it does.
+        assert!(decision_closes_item(&ReviewAction::IgnoreSimilar));
+        assert!(decision_closes_item(&ReviewAction::MergeIntoMemory(
+            MemoryEntryId::new("m1")
+        )));
+        assert!(decision_closes_item(&ReviewAction::DeleteExisting(
+            MemoryEntryId::new("m1")
+        )));
     }
 
     #[test]
@@ -72,6 +87,24 @@ mod tests {
         );
         assert_eq!(
             state_after_decision(&decision(ReviewAction::Reject)),
+            ReviewState::Rejected
+        );
+        // MergeIntoMemory promotes the candidate (same mechanics as
+        // Supersede), so it must land in the Accepted|Edited set
+        // promote_review_item requires — not Merged, which is reserved for
+        // MergeInto's "folded into another still-pending item" case that
+        // never gets promoted on its own.
+        assert_eq!(
+            state_after_decision(&decision(ReviewAction::MergeIntoMemory(
+                MemoryEntryId::new("m1")
+            ))),
+            ReviewState::Accepted
+        );
+        // DeleteExisting never promotes the candidate.
+        assert_eq!(
+            state_after_decision(&decision(ReviewAction::DeleteExisting(MemoryEntryId::new(
+                "m1"
+            )))),
             ReviewState::Rejected
         );
     }

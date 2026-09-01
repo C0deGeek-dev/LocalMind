@@ -618,8 +618,22 @@ impl ReviewQueue {
                 item_id: decision.item_id,
             });
         }
+        // `MergeIntoMemory` shares `Supersede`'s exact promotion mechanics (see
+        // `localmind_review::state_after_decision`), so it shares its storage
+        // column too — the distinct `ReviewAction` variant is what keeps the
+        // audit trail (`reviewer_action`) honest about which one the reviewer
+        // actually chose. Neither `Supersede` nor `MergeIntoMemory` validates
+        // its target's existence here — this queue only ever opens the
+        // *project* database, while a target can legitimately live in the
+        // separate machine-wide global store, so an existence check here
+        // could reject a valid global target. `DeleteExisting`'s target is
+        // validated where it is actually acted on
+        // (`MemoryPersistence::delete_memory`, which already searches both
+        // stores correctly), not here.
         let supersede_target = match &decision.action {
-            ReviewAction::Supersede(target) => Some(target.as_str().to_string()),
+            ReviewAction::Supersede(target) | ReviewAction::MergeIntoMemory(target) => {
+                Some(target.as_str().to_string())
+            }
             _ => None,
         };
         let merge_target = match &decision.action {
@@ -797,6 +811,8 @@ fn action_name(action: &ReviewAction) -> &'static str {
         ReviewAction::ConvertToSkill => "convert_to_skill",
         ReviewAction::IgnoreSimilar => "ignore_similar",
         ReviewAction::Supersede(_) => "supersede",
+        ReviewAction::MergeIntoMemory(_) => "merge_into_memory",
+        ReviewAction::DeleteExisting(_) => "delete_existing",
     }
 }
 

@@ -391,6 +391,24 @@ enum ReviewCommand {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Reject this candidate and delete an existing accepted memory it
+    /// resembles, rather than promoting the candidate as its replacement
+    /// (use `supersede` for that instead). Deletes immediately — unlike
+    /// `supersede`, there is no separate `promote` step.
+    DeleteExisting {
+        item_id: String,
+        /// The accepted memory to delete.
+        target: String,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1095,8 +1113,18 @@ fn main() -> Result<()> {
                 let persistence = MemoryPersistence::open_project(&project)?;
                 let queue = ReviewQueue::open_project(project)?;
                 let item_id = ReviewItemId::new(item_id);
+                // `duplicate_of` (whether passed explicitly or auto-derived
+                // from the candidate's own suggestion) names *either* another
+                // pending review item or an already-accepted memory — most
+                // often the latter, since that is what the dedup annotation's
+                // `duplicate_of` field actually points at. Resolve which one
+                // it is rather than assuming: a target with a retained
+                // review-item row merges into that item (existing
+                // behaviour); one with no such row, but an active accepted
+                // memory, merges into that memory instead — same reviewer
+                // confirmation shape, dispatched to the right action.
                 let target = match target {
-                    Some(target) => ReviewItemId::new(target),
+                    Some(target) => target,
                     None => {
                         let item = queue
                             .get(&item_id)?
@@ -1109,7 +1137,6 @@ fn main() -> Result<()> {
                         item.candidate
                             .review_annotation
                             .and_then(|annotation| annotation.duplicate_of)
-                            .map(ReviewItemId::new)
                             .with_context(|| {
                                 format!(
                                     "review item {item_id} has a merge suggestion without a target; pass --target explicitly"
@@ -1117,9 +1144,32 @@ fn main() -> Result<()> {
                             })?
                     }
                 };
+                // A review item's row is never deleted (only its state
+                // changes), so an id can simultaneously be "an existing
+                // review-item row" (Accepted but not yet promoted, or even
+                // still Pending) *and*, once promoted, "an accepted memory".
+                // Check the more specific, more likely case first: a target
+                // that has actually been promoted into memory is what a
+                // dedup suggestion's target almost always is, so merge into
+                // *that*; only fall back to the review-item merge (a target
+                // accepted or pending but not yet promoted) when no such
+                // memory exists.
+                let action = if persistence
+                    .list_memory()?
+                    .iter()
+                    .any(|record| record.memory_id.as_str() == target)
+                {
+                    ReviewAction::MergeIntoMemory(MemoryEntryId::new(target.clone()))
+                } else if queue.get(&ReviewItemId::new(target.clone()))?.is_some() {
+                    ReviewAction::MergeInto(ReviewItemId::new(target.clone()))
+                } else {
+                    anyhow::bail!(
+                        "merge target {target} is neither an existing review item nor an active accepted memory"
+                    );
+                };
                 let item = queue.decide(ReviewDecision {
                     item_id,
-                    action: ReviewAction::MergeInto(target.clone()),
+                    action,
                     reviewer,
                     decided_at: None,
                     note,
@@ -1172,6 +1222,40 @@ fn main() -> Result<()> {
                 println!(
                     "{} -> {:?} (promote to retire the target)",
                     item.id, item.state
+                );
+            }
+            ReviewCommand::DeleteExisting {
+                item_id,
+                target,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let target_id = MemoryEntryId::new(&target);
+                let item = queue.decide(ReviewDecision {
+                    item_id: ReviewItemId::new(item_id),
+                    action: ReviewAction::DeleteExisting(target_id.clone()),
+                    reviewer: reviewer.clone(),
+                    decided_at: None,
+                    note,
+                    replacement_summary: None,
+                    evidence: Vec::new(),
+                })?;
+                persistence.record_review_item_audit(&item)?;
+                // No promote step for this decision — the deletion happens
+                // now, alongside recording the decision, not deferred.
+                let deleted = persistence.delete_memory(&target_id, &reviewer)?;
+                println!(
+                    "{} -> {:?} (candidate rejected, {})",
+                    item.id,
+                    item.state,
+                    if deleted {
+                        format!("deleted {target}")
+                    } else {
+                        format!("{target} was already gone — nothing to delete")
+                    }
                 );
             }
         },

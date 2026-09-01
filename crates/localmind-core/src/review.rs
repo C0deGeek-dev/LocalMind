@@ -45,4 +45,21 @@ pub enum ReviewAction {
     /// conflict target) selects which memory to supersede; promotion records the
     /// new memory's `supersedes`, flips the target to `Superseded`, and audits it.
     Supersede(MemoryEntryId),
+    /// The dedup existing-item counterpart to [`ReviewAction::MergeInto`]: the
+    /// target is an already-*accepted* memory (no retained review-item row to
+    /// merge into) rather than another pending candidate. Consolidates the
+    /// candidate's wording into the target exactly like [`Self::Supersede`] —
+    /// same promotion mechanics, retire-and-replace — recorded as a distinct
+    /// action so the audit trail shows the reviewer chose to *merge* a
+    /// near-duplicate, not correct an outdated one.
+    MergeIntoMemory(MemoryEntryId),
+    /// The dedup existing-item counterpart to [`ReviewAction::IgnoreSimilar`]:
+    /// the existing accepted memory this candidate resembles is retired
+    /// outright (never resurfaces, D-LM-0016 route-to-review invariant still
+    /// holds — this is an explicit reviewer decision, not an automated one),
+    /// and — unlike [`Self::Supersede`]/[`Self::MergeIntoMemory`] — the
+    /// candidate itself is **not** promoted as its replacement: if the
+    /// candidate were worth keeping, the reviewer would merge/supersede
+    /// instead.
+    DeleteExisting(MemoryEntryId),
 }

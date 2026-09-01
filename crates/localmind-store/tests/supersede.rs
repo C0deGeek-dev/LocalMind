@@ -132,3 +132,154 @@ fn supersede_retires_the_target_records_the_link_and_audits_it() {
     assert_eq!(audit.actor, "tester");
     assert!(audit.metadata_json.contains("\"superseded_by\":\"m2\""));
 }
+
+/// Subject 04's `ExistingItemDecision::Merge`, confirmed via a real
+/// `review merge`-shaped decision against an *accepted* memory (not another
+/// pending item — `MergeInto`'s existing target type): identical promotion
+/// mechanics to `Supersede` (same retire-and-replace, same `before_body`
+/// capture), but a distinct `reviewer_action` in the audit trail so "the
+/// reviewer chose to merge a near-duplicate" is not indistinguishable from
+/// "the reviewer chose to correct an outdated one".
+#[test]
+fn merge_into_memory_retires_the_target_exactly_like_supersede_but_is_recorded_distinctly() {
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "m1",
+            "run the integration suite after every exporter change",
+        ))
+        .unwrap();
+
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("s2"),
+            &[candidate(
+                "m2",
+                "after an exporter change, run the integration suite",
+            )],
+        )
+        .unwrap();
+    let decided = queue
+        .decide(ReviewDecision {
+            item_id: ReviewItemId::new("m2"),
+            action: ReviewAction::MergeIntoMemory(MemoryEntryId::new("m1")),
+            reviewer: "tester".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    // Same promotion-eligible state as Supersede — not Merged, which is
+    // MergeInto's "folded into another still-pending item" state and is
+    // never itself promoted.
+    assert_eq!(decided.state, localmind_core::ReviewState::Accepted);
+    assert_eq!(
+        decided.supersede_target.as_ref().map(MemoryEntryId::as_str),
+        Some("m1")
+    );
+    assert_eq!(
+        decided.reviewer_action.as_deref(),
+        Some("merge_into_memory")
+    );
+
+    let new_entry = persistence
+        .promote_review_item(&ReviewItemId::new("m2"))
+        .unwrap();
+    assert_eq!(new_entry.supersedes, vec![MemoryEntryId::new("m1")]);
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "m1"));
+
+    let audit = persistence
+        .audit_records()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.kind == "MemorySuperseded")
+        .expect("a MemorySuperseded audit row");
+    assert_eq!(audit.subject, "m1");
+    assert!(audit
+        .metadata_json
+        .contains("\"before_body\":\"run the integration suite after every exporter change\""));
+}
+
+/// Subject 04's `ExistingItemDecision::Delete`: the existing memory is
+/// removed outright and the candidate is **not** promoted as its
+/// replacement — the CLI-layer sequence `review delete-existing` runs
+/// (`decide` then `delete_memory`), proven here at the store-API level
+/// directly.
+#[test]
+fn delete_existing_rejects_the_candidate_and_removes_the_target_without_promoting_it() {
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "m1",
+            "this tooling note is stale and not worth keeping",
+        ))
+        .unwrap();
+
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("s2"),
+            &[candidate(
+                "m2",
+                "do not follow that stale tooling note anymore",
+            )],
+        )
+        .unwrap();
+    let decided = queue
+        .decide(ReviewDecision {
+            item_id: ReviewItemId::new("m2"),
+            action: ReviewAction::DeleteExisting(MemoryEntryId::new("m1")),
+            reviewer: "tester".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    // The candidate is rejected, not accepted — DeleteExisting never
+    // promotes it.
+    assert_eq!(decided.state, localmind_core::ReviewState::Rejected);
+    assert!(decided.supersede_target.is_none());
+
+    // The CLI-layer sequence: decide() closes the item, a separate
+    // delete_memory() call actually removes the target.
+    assert!(persistence
+        .delete_memory(&MemoryEntryId::new("m1"), "tester")
+        .unwrap());
+
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "m1"));
+    // The candidate was never promoted either — it stays rejected, no "m2"
+    // memory exists.
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "m2"));
+
+    let audit = persistence
+        .audit_records()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.kind == "MemoryDeleted")
+        .expect("a MemoryDeleted audit row");
+    assert_eq!(audit.subject, "m1");
+    assert!(audit
+        .metadata_json
+        .contains("\"before_body\":\"this tooling note is stale and not worth keeping\""));
+}

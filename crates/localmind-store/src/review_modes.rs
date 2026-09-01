@@ -1,4 +1,7 @@
-use crate::dedup::{similarity, token_set};
+use crate::dedup::{
+    classify_candidate_decision, similarity, suggest_existing_item_decision, token_set,
+    CandidateDedupDecision, ExistingItemDecision,
+};
 use crate::{
     MemoryPersistence, MemoryPersistenceError, ProjectConfig, ReviewModeConfig, ReviewQueue,
     ReviewQueueError,
@@ -120,7 +123,20 @@ pub(crate) fn accepted_memory_match(
 pub struct ReviewModeReport {
     pub annotated: usize,
     pub accepted: usize,
+    /// Auto-decided `IgnoreSimilar` (a confident duplicate of accepted
+    /// memory, `CandidateDedupDecision::Skip`) — never counted as
+    /// `accepted`: the candidate was not promoted, it was closed as
+    /// redundant.
+    pub skipped: usize,
     pub manual: usize,
+}
+
+/// What an automated dedup/quality decision actually did, so the caller
+/// tallies the right [`ReviewModeReport`] counter instead of treating every
+/// successful `auto_decide` as an acceptance.
+enum AutoOutcome {
+    Accepted,
+    Skipped,
 }
 
 pub struct ReviewModeProcessor;
@@ -136,6 +152,7 @@ impl ReviewModeProcessor {
         let mut report = ReviewModeReport {
             annotated: 0,
             accepted: 0,
+            skipped: 0,
             manual: 0,
         };
 
@@ -190,14 +207,35 @@ impl ReviewModeProcessor {
             // duplicate), and the reason is surfaced to the reviewer here. The
             // classifier only labels — it never deletes (D-LM-0016).
             let quality = crate::classify_quality(&item.candidate.category, summary, "");
-            let mut notes = match (duplicate_of.is_some(), borderline_duplicate) {
-                (true, true) => {
-                    "Borderline semantic match (review band); human review recommended.".to_string()
+            // The two-level dedup decision (replacing the prior single
+            // undifferentiated "similar, review it" outcome): a confident
+            // duplicate is redundant enough to auto-skip below; a clean
+            // candidate proceeds normally; only a genuinely borderline match
+            // defers to a human with an existing-item suggestion attached.
+            let candidate_decision =
+                classify_candidate_decision(duplicate_of.is_some(), borderline_duplicate);
+            let mut notes = match candidate_decision {
+                CandidateDedupDecision::None => match suggest_existing_item_decision(conflict) {
+                    ExistingItemDecision::Merge => {
+                        "Borderline semantic match (review band); consider `review merge` \
+                             to consolidate into the existing memory, or `review reject`."
+                            .to_string()
+                    }
+                    ExistingItemDecision::Delete => {
+                        "Borderline semantic match (review band) and contradicts existing \
+                             memory; consider `review delete-existing` to retire it, or \
+                             `review supersede` to replace it with this candidate instead."
+                            .to_string()
+                    }
+                },
+                CandidateDedupDecision::Skip => {
+                    "Confident duplicate of accepted memory; auto-skipped where review mode \
+                     allows, otherwise reject as redundant."
+                        .to_string()
                 }
-                (true, false) => {
-                    "Similar accepted memory found; human review recommended.".to_string()
+                CandidateDedupDecision::Create => {
+                    "No close duplicate found in accepted memory.".to_string()
                 }
-                (false, _) => "No close duplicate found in accepted memory.".to_string(),
             };
             if let Some(note) = quality.review_note() {
                 notes = format!("{notes} {note}");
@@ -221,18 +259,22 @@ impl ReviewModeProcessor {
                 ReviewModeConfig::Trusted => {
                     queue.replace_candidate(&item.id, &item.candidate)?;
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
-                    // A contradiction with a clear target retires that memory; a
-                    // clean novel candidate is accepted; everything else (a
-                    // conflict with no clear target, a duplicate, low confidence)
-                    // stays human-gated.
-                    let decided = if above_threshold {
-                        match (conflict, related_target.clone()) {
-                            // Auto-superseding an accepted memory is the strongest
-                            // automated action; gate it on the same D-LM-0024
-                            // quality check as auto-accept, so a non-`General`
-                            // (tooling-noise / over-fit) candidate can't retire a
-                            // human's memory — it routes to manual review.
-                            (true, Some(target)) if quality.is_general() => auto_decide(
+                    // Precedence, checked in order: a contradiction with a
+                    // clear target retires that memory; else a confident
+                    // duplicate auto-skips (redundancy is orthogonal to the
+                    // candidate's own confidence, so this is not gated on the
+                    // threshold); else a clean novel candidate is accepted;
+                    // everything else (a conflict with no clear target, a
+                    // borderline duplicate, low confidence) stays human-gated.
+                    let mut outcome = None;
+                    if above_threshold && conflict && quality.is_general() {
+                        if let Some(target) = related_target.clone() {
+                            // Auto-superseding an accepted memory is the
+                            // strongest automated action; gate it on the same
+                            // D-LM-0024 quality check as auto-accept, so a
+                            // non-`General` candidate can't retire a human's
+                            // memory — it routes to manual review.
+                            if auto_decide(
                                 &queue,
                                 &persistence,
                                 &item.id,
@@ -240,41 +282,65 @@ impl ReviewModeProcessor {
                                 "localmind-trusted",
                                 "trusted mode auto-superseded a contradicted memory",
                                 "trusted",
-                            )?,
-                            (false, _) if duplicate_of.is_none() && quality.is_general() => {
-                                auto_decide(
-                                    &queue,
-                                    &persistence,
-                                    &item.id,
-                                    ReviewAction::Accept,
-                                    "localmind-trusted",
-                                    "trusted mode auto-accepted above threshold",
-                                    "trusted",
-                                )?
+                            )? {
+                                outcome = Some(AutoOutcome::Accepted);
                             }
-                            _ => false,
                         }
-                    } else {
-                        false
-                    };
-                    if decided {
-                        report.accepted += 1;
-                    } else {
-                        persistence.write_mode_audit("trusted", item.id.as_str(), false)?;
-                        report.manual += 1;
+                    }
+                    if outcome.is_none()
+                        && matches!(candidate_decision, CandidateDedupDecision::Skip)
+                        && auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::IgnoreSimilar,
+                            "localmind-trusted",
+                            "trusted mode auto-skipped a confident duplicate",
+                            "trusted",
+                        )?
+                    {
+                        outcome = Some(AutoOutcome::Skipped);
+                    }
+                    if outcome.is_none()
+                        && above_threshold
+                        && duplicate_of.is_none()
+                        && quality.is_general()
+                        && auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::Accept,
+                            "localmind-trusted",
+                            "trusted mode auto-accepted above threshold",
+                            "trusted",
+                        )?
+                    {
+                        outcome = Some(AutoOutcome::Accepted);
+                    }
+                    match outcome {
+                        Some(AutoOutcome::Accepted) => report.accepted += 1,
+                        Some(AutoOutcome::Skipped) => report.skipped += 1,
+                        None => {
+                            persistence.write_mode_audit("trusted", item.id.as_str(), false)?;
+                            report.manual += 1;
+                        }
                     }
                 }
                 ReviewModeConfig::Automatic => {
                     queue.replace_candidate(&item.id, &item.candidate)?;
                     // Auto-retiring a human's prior memory is gated on the same
-                    // confidence threshold as trusted mode (risk control); a clean
-                    // novel candidate auto-accepts as before.
+                    // confidence threshold as trusted mode (risk control); a
+                    // confident duplicate auto-skips regardless of confidence
+                    // (same reasoning as trusted mode); a clean novel candidate
+                    // auto-accepts as before, with no confidence gate (matching
+                    // this mode's existing, more permissive accept posture).
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
-                    let decided = match (conflict, related_target.clone()) {
+                    let mut outcome = None;
+                    if above_threshold && conflict && quality.is_general() {
                         // Same D-LM-0024 quality gate as the accept arm: a
                         // non-`General` candidate never auto-retires a memory.
-                        (true, Some(target)) if above_threshold && quality.is_general() => {
-                            auto_decide(
+                        if let Some(target) = related_target.clone() {
+                            if auto_decide(
                                 &queue,
                                 &persistence,
                                 &item.id,
@@ -282,26 +348,47 @@ impl ReviewModeProcessor {
                                 "localmind-automatic",
                                 "automatic mode auto-superseded a contradicted memory",
                                 "automatic",
-                            )?
+                            )? {
+                                outcome = Some(AutoOutcome::Accepted);
+                            }
                         }
-                        (false, _) if duplicate_of.is_none() && quality.is_general() => {
-                            auto_decide(
-                                &queue,
-                                &persistence,
-                                &item.id,
-                                ReviewAction::Accept,
-                                "localmind-automatic",
-                                "automatic mode auto-accepted",
-                                "automatic",
-                            )?
+                    }
+                    if outcome.is_none()
+                        && matches!(candidate_decision, CandidateDedupDecision::Skip)
+                        && auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::IgnoreSimilar,
+                            "localmind-automatic",
+                            "automatic mode auto-skipped a confident duplicate",
+                            "automatic",
+                        )?
+                    {
+                        outcome = Some(AutoOutcome::Skipped);
+                    }
+                    if outcome.is_none()
+                        && duplicate_of.is_none()
+                        && quality.is_general()
+                        && auto_decide(
+                            &queue,
+                            &persistence,
+                            &item.id,
+                            ReviewAction::Accept,
+                            "localmind-automatic",
+                            "automatic mode auto-accepted",
+                            "automatic",
+                        )?
+                    {
+                        outcome = Some(AutoOutcome::Accepted);
+                    }
+                    match outcome {
+                        Some(AutoOutcome::Accepted) => report.accepted += 1,
+                        Some(AutoOutcome::Skipped) => report.skipped += 1,
+                        None => {
+                            persistence.write_mode_audit("automatic", item.id.as_str(), false)?;
+                            report.manual += 1;
                         }
-                        _ => false,
-                    };
-                    if decided {
-                        report.accepted += 1;
-                    } else {
-                        persistence.write_mode_audit("automatic", item.id.as_str(), false)?;
-                        report.manual += 1;
                     }
                 }
             }

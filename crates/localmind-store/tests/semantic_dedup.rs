@@ -14,7 +14,8 @@ use std::thread;
 
 use localmind_core::{
     CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId, MemoryEntry,
-    MemoryEntryId, MemoryScope, MemoryStatus, ReviewState, SessionId, SuggestedAction,
+    MemoryEntryId, MemoryScope, MemoryStatus, ReviewAction, ReviewDecision, ReviewItemId,
+    ReviewState, SessionId, SuggestedAction,
 };
 use localmind_store::{MemoryPersistence, ReviewModeProcessor, ReviewQueue};
 
@@ -329,9 +330,12 @@ fn tiered_candidate(id: &str, summary: &str) -> CandidateLesson {
 
 #[test]
 fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
-    // The route-to-review band: a confident match (cosine ≥ 0.86) and a borderline
-    // match (in [0.83, 0.86)) both flag `duplicate_of` and are held for review
-    // (never auto-merged); a genuinely-distinct lesson (cosine < 0.83) auto-accepts.
+    // The route-to-review band: a confident match (cosine ≥ 0.86) is redundant
+    // enough to auto-skip (never auto-merged into anything, but also not left
+    // pending forever — CandidateDedupDecision::Skip, subject 04); a borderline
+    // match (in [0.83, 0.86)) is genuinely ambiguous and stays held for a human
+    // (CandidateDedupDecision::None, annotated with an existing-item
+    // suggestion); a genuinely-distinct lesson (cosine < 0.83) auto-accepts.
     // Four embed calls: the seed body, then the three candidate summaries.
     let base = tiered_embeddings_server(4);
     let dir = tempfile::tempdir().unwrap();
@@ -387,7 +391,8 @@ fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
             .unwrap_or_else(|| panic!("missing annotation for {summary}"))
     };
 
-    // Confident (0.90): flagged, held for review, with the confident note.
+    // Confident (0.90): auto-skipped in automatic mode — never auto-accepted,
+    // and (subject 04) not left pending either: closed via IgnoreSimilar.
     let conf = find(confident);
     assert_ne!(
         conf.state,
@@ -395,20 +400,29 @@ fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
         "a confident semantic duplicate must not auto-accept"
     );
     assert_eq!(
+        conf.state,
+        ReviewState::Rejected,
+        "a confident duplicate auto-skips (IgnoreSimilar) in automatic mode, it does not linger pending"
+    );
+    assert_eq!(conf.reviewer_action.as_deref(), Some("ignore_similar"));
+    assert_eq!(
         annotation(confident).duplicate_of.as_deref(),
         Some("mem-accepted")
     );
     assert_eq!(
         annotation(confident).notes,
-        "Similar accepted memory found; human review recommended."
+        "Confident duplicate of accepted memory; auto-skipped where review mode allows, \
+         otherwise reject as redundant."
     );
 
-    // Borderline (0.84): in the band — flagged, held for review, borderline note.
+    // Borderline (0.84): in the band — genuinely ambiguous, stays pending for a
+    // human, annotated with an existing-item (merge, since it does not
+    // contradict the seed) suggestion.
     let band = find(borderline);
-    assert_ne!(
+    assert_eq!(
         band.state,
-        ReviewState::Accepted,
-        "a borderline paraphrase in the review band must route to review, not auto-accept"
+        ReviewState::Pending,
+        "a borderline paraphrase in the review band must stay pending for a human, not auto-decide"
     );
     assert_eq!(
         annotation(borderline).duplicate_of.as_deref(),
@@ -417,8 +431,9 @@ fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
     );
     assert_eq!(
         annotation(borderline).notes,
-        "Borderline semantic match (review band); human review recommended.",
-        "a borderline match must be surfaced to the human as borderline"
+        "Borderline semantic match (review band); consider `review merge` to consolidate into \
+         the existing memory, or `review reject`.",
+        "a borderline, non-contradicting match suggests merge, not delete"
     );
 
     // Distinct (0.80): below the band — not flagged, auto-accepts (no false merge).
@@ -432,6 +447,93 @@ fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
         annotation(distinct).duplicate_of.is_none(),
         "a sub-band cosine must not flag a duplicate"
     );
+}
+
+/// Subject 04's `ExistingItemDecision::Delete`: a borderline vector match
+/// whose candidate text also contradicts existing guidance ("no longer")
+/// suggests delete instead of merge, stays pending (never auto-applied,
+/// D-LM-0016), and the suggested `review delete-existing` action, exercised
+/// end-to-end here, actually removes the target without promoting the
+/// candidate.
+#[test]
+fn a_contradicting_borderline_match_suggests_delete_and_it_actually_removes_the_target() {
+    // Two embed calls: the seed body, then the one candidate summary.
+    let base = tiered_embeddings_server(2);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[inference]\nembedding_base_url = \"{base}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 5\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.5\nsemantic_dedup = true\n",
+        ),
+    )
+    .unwrap();
+
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "mem-accepted",
+            "use anchortoken when scanning directories",
+        ))
+        .unwrap();
+
+    // "bandtoken" reaches the borderline cosine tier (0.84); "no longer"
+    // triggers the contradiction signal directly (no lexical overlap with
+    // the seed is needed for that — `is_contradiction` reads it straight
+    // off the candidate text when no topically-related lexical hit exists).
+    let contradicting = "bandtoken should no longer be used to traverse nested folders";
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("session"),
+            &[tiered_candidate("c-contra", contradicting)],
+        )
+        .unwrap();
+
+    ReviewModeProcessor::apply_project(root).unwrap();
+
+    let item = queue.get(&ReviewItemId::new("c-contra")).unwrap().unwrap();
+    assert_eq!(
+        item.state,
+        ReviewState::Pending,
+        "a borderline match — contradicting or not — is never auto-applied (D-LM-0016)"
+    );
+    let annotation = item.candidate.review_annotation.unwrap();
+    assert_eq!(annotation.duplicate_of.as_deref(), Some("mem-accepted"));
+    assert!(
+        annotation.conflict,
+        "the 'no longer' phrasing must be read as a contradiction"
+    );
+    assert_eq!(
+        annotation.notes,
+        "Borderline semantic match (review band) and contradicts existing memory; consider \
+         `review delete-existing` to retire it, or `review supersede` to replace it with this \
+         candidate instead.",
+        "a borderline, contradicting match suggests delete, not merge"
+    );
+
+    // Act on the suggestion — the same two-call sequence `review
+    // delete-existing` runs.
+    let decided = queue
+        .decide(ReviewDecision {
+            item_id: ReviewItemId::new("c-contra"),
+            action: ReviewAction::DeleteExisting(MemoryEntryId::new("mem-accepted")),
+            reviewer: "tester".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(decided.state, ReviewState::Rejected);
+    assert!(persistence
+        .delete_memory(&MemoryEntryId::new("mem-accepted"), "tester")
+        .unwrap());
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "mem-accepted"));
 }
 
 #[test]
