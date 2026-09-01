@@ -6,12 +6,13 @@ use std::path::Path;
 use std::thread;
 
 use localmind_core::{
-    Confidence, LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope, MemoryStatus,
-    SessionSource, SyncMeta,
+    CandidateLesson, Confidence, EvidenceKind, EvidenceRef, LessonCategory, LessonId, MemoryEntry,
+    MemoryEntryId, MemoryScope, MemoryStatus, ReviewAction, ReviewDecision, ReviewItemId,
+    SessionId, SessionSource, SuggestedAction, SyncMeta,
 };
 use localmind_store::{
     BatchInsightPipeline, CloseoutProcessor, DeterministicExtractor, ImportReport,
-    MemoryPersistence, ProjectConfig, TranscriptImportFormat, TranscriptImporter,
+    MemoryPersistence, ProjectConfig, ReviewQueue, TranscriptImportFormat, TranscriptImporter,
 };
 
 fn project(config: &str) -> tempfile::TempDir {
@@ -124,6 +125,116 @@ fn a_research_batch_emits_research_insight_created() {
     assert!(!rows[0]
         .metadata_json
         .contains("Audit every generated batch insight"));
+}
+
+fn seed_memory(id: &str, body: &str) -> MemoryEntry {
+    MemoryEntry {
+        id: MemoryEntryId::new(id),
+        scope: MemoryScope::Project,
+        body: body.to_string(),
+        category: LessonCategory::ProjectConvention,
+        confidence: Confidence::new(0.9).unwrap(),
+        source_session: Some(SessionId::new("seed")),
+        evidence: vec![EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted()],
+        tags: vec!["accepted".to_string()],
+        related_files: Vec::new(),
+        related_entities: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        supersedes: Vec::new(),
+        contradicts: Vec::new(),
+        status: MemoryStatus::Active,
+        sync_meta: SyncMeta::default(),
+    }
+}
+
+fn supersede_candidate(id: &str, summary: &str) -> CandidateLesson {
+    CandidateLesson::new(
+        LessonId::new(id),
+        summary,
+        LessonCategory::ProjectConvention,
+        Confidence::new(0.8).unwrap(),
+        SuggestedAction::SupersedeExisting,
+    )
+    .with_evidence(EvidenceRef::new(EvidenceKind::Transcript, "redacted").redacted())
+}
+
+/// Retires `target_id` (already-persisted) with a new memory whose summary
+/// is `replacement_summary`, via the same candidate → decide → promote path
+/// a reviewer uses. Returns the project dir.
+fn supersede_via_review(
+    target_id: &str,
+    target_body: &str,
+    replacement_id: &str,
+    replacement_summary: &str,
+) -> tempfile::TempDir {
+    let dir = project("[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n");
+    let persistence = MemoryPersistence::open_project(dir.path()).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(target_id, target_body))
+        .unwrap();
+
+    let queue = ReviewQueue::open_project(dir.path()).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("s-supersede"),
+            &[supersede_candidate(replacement_id, replacement_summary)],
+        )
+        .unwrap();
+    queue
+        .decide(ReviewDecision {
+            item_id: ReviewItemId::new(replacement_id),
+            action: ReviewAction::Supersede(MemoryEntryId::new(target_id)),
+            reviewer: "tester".to_string(),
+            decided_at: None,
+            note: None,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    persistence
+        .promote_review_item(&ReviewItemId::new(replacement_id))
+        .unwrap();
+    dir
+}
+
+#[test]
+fn superseding_a_memory_captures_its_prior_body_in_the_audit_row() {
+    let dir = supersede_via_review(
+        "m1",
+        "use tabs for indentation in this project",
+        "m2",
+        "do not use tabs for indentation; use spaces instead",
+    );
+    let rows = audit_rows(dir.path(), "MemorySuperseded");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].subject, "m1");
+    // Existing keys survive unchanged alongside the new one.
+    assert!(rows[0].metadata_json.contains(r#""superseded_by":"m2""#));
+    assert!(rows[0]
+        .metadata_json
+        .contains(r#""before_body":"use tabs for indentation in this project""#));
+}
+
+#[test]
+fn an_oversized_superseded_body_is_truncated_in_the_audit_row() {
+    let long_body = "x".repeat(20_000);
+    let dir = supersede_via_review("m1", &long_body, "m2", "a short replacement");
+    let rows = audit_rows(dir.path(), "MemorySuperseded");
+
+    assert_eq!(rows.len(), 1);
+    let metadata = &rows[0].metadata_json;
+    let expected_truncated = format!("{}…", "x".repeat(16_384));
+    assert!(
+        metadata.contains(&format!(r#""before_body":"{expected_truncated}""#)),
+        "expected before_body truncated to exactly 16,384 chars plus an ellipsis marker"
+    );
+    assert_eq!(
+        metadata.matches('x').count(),
+        16_384,
+        "no more than the capped character count of the original body may survive"
+    );
 }
 
 fn run_batch(research: bool) -> tempfile::TempDir {

@@ -44,7 +44,12 @@ function drawAudit() {
       if (has) { tr.nextSibling.remove(); return; }
       const dr = document.createElement('tr');
       dr.className = 'detail';
-      dr.innerHTML = `<td></td><td colspan="4"><div class="body">${esc(r.metadata || '{}')}</div></td>`;
+      // Pretty-print so a captured before/after body snapshot (e.g. on a
+      // MemorySuperseded row) reads as real text, not one minified line —
+      // still the same raw metadata, no separate diff viewer.
+      let pretty = r.metadata || '{}';
+      try { pretty = JSON.stringify(JSON.parse(r.metadata || '{}'), null, 2); } catch { /* leave as-is if not JSON */ }
+      dr.innerHTML = `<td></td><td colspan="4"><pre class="body">${esc(pretty)}</pre></td>`;
       tr.after(dr);
     });
     body.appendChild(tr);

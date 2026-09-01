@@ -430,16 +430,25 @@ impl MemoryPersistence {
             .map_err(MemoryPersistenceError::Sqlite)?;
         Self::index_memory_with(&tx, &entry, &path, session_language)?;
         if let Some(target) = &target {
+            // Read before mutating: the target's wording as it stood at the
+            // moment of retirement, captured into the audit trail so it
+            // survives even for a non-git-tracked store — notably the
+            // machine-wide global store, which nothing else snapshots.
+            let before_body = Self::memory_body_in(&tx, target)?;
             Self::supersede_memory_with(&tx, target)?;
+            let mut metadata = serde_json::json!({
+                "superseded_by": entry.id.to_string(),
+                "review_item": item.id.to_string(),
+            });
+            if let Some(body) = before_body {
+                metadata["before_body"] = serde_json::Value::String(truncate_for_audit(&body));
+            }
             Self::write_audit_with(
                 &tx,
                 AuditEventKind::MemorySuperseded,
                 item.reviewer.as_deref().unwrap_or("unknown"),
                 target.as_str(),
-                &serde_json::json!({
-                    "superseded_by": entry.id.to_string(),
-                    "review_item": item.id.to_string(),
-                }),
+                &metadata,
             )?;
         }
         Self::write_audit_with(
@@ -473,6 +482,24 @@ impl MemoryPersistence {
             )
             .map_err(MemoryPersistenceError::Sqlite)?;
         Ok(())
+    }
+
+    /// The current body of a memory in the given store, or `None` when the
+    /// id is unknown there. Callers read this *before* a status flip or
+    /// other retiring mutation, so an audit snapshot captures the wording
+    /// as it stood at that moment, not after.
+    fn memory_body_in(
+        connection: &Connection,
+        memory_id: &MemoryEntryId,
+    ) -> Result<Option<String>, MemoryPersistenceError> {
+        connection
+            .query_row(
+                "SELECT body FROM memory_index WHERE memory_id = ?1",
+                params![memory_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(MemoryPersistenceError::Sqlite)
     }
 
     /// Persists an accepted memory entry: the Markdown file plus its search
@@ -2851,6 +2878,21 @@ impl MemoryPersistence {
             .map_err(MemoryPersistenceError::Sqlite)?;
         Ok(())
     }
+}
+
+/// Bounds an audit-embedded body snapshot so a long-lived project's
+/// `audit_events` table doesn't grow unboundedly from full-body copies —
+/// mirrors `review_queue.rs`'s `PROPOSAL_BODY_MAX_CHARS`, the existing
+/// size-discipline precedent for text embedded in a review/audit record
+/// rather than searchable memory itself.
+const AUDIT_BODY_SNAPSHOT_MAX_CHARS: usize = 16_384;
+
+fn truncate_for_audit(text: &str) -> String {
+    if text.chars().count() <= AUDIT_BODY_SNAPSHOT_MAX_CHARS {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(AUDIT_BODY_SNAPSHOT_MAX_CHARS).collect();
+    format!("{truncated}…")
 }
 
 /// A [`VerdictSource`] backed by the configured chat model. Best-effort: a chat

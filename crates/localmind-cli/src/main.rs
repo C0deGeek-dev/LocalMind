@@ -163,6 +163,10 @@ enum Command {
     Audit {
         #[arg(long, default_value = ".")]
         project: PathBuf,
+        /// Also print each row's metadata JSON (e.g. a MemorySuperseded
+        /// row's captured before_body) on the following line.
+        #[arg(long)]
+        metadata: bool,
     },
     /// Export accepted memory and suggested skills as agent-ready context.
     Context {
@@ -1249,13 +1253,16 @@ fn main() -> Result<()> {
                 println!("{}", result.snippet);
             }
         }
-        Command::Audit { project } => {
+        Command::Audit { project, metadata } => {
             let persistence = MemoryPersistence::open_project(project)?;
             for record in persistence.audit_records()? {
                 println!(
                     "{}\t{}\t{}\t{}",
                     record.id, record.kind, record.actor, record.subject
                 );
+                if metadata {
+                    println!("  {}", record.metadata_json);
+                }
             }
         }
         Command::Context { command } => match command {
