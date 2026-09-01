@@ -373,3 +373,44 @@ fn a_disallowed_scope_directory_is_never_scanned() {
         "a disallowed scope directory must not be swept at all"
     );
 }
+
+/// A `.md` symlink inside the scope directory is never opened or followed —
+/// it is flagged, not silently read (it could point outside the memory
+/// root entirely). Unix-only: creating a file symlink without elevation is
+/// unreliable on Windows CI runners; the guard itself
+/// (`DirEntry::file_type`, which never follows links) is platform-uniform,
+/// so this one platform's coverage stands for the mechanism.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_md_entry_is_flagged_and_never_read() {
+    use localmind_store::FlagReason;
+
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    // A real file living outside the memory root entirely.
+    let outside_target = root.join("outside-memory-root.txt");
+    std::fs::write(&outside_target, "not a memory file at all").unwrap();
+
+    let project_dir = root.join(".localmind").join("memory").join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_target, project_dir.join("symlinked1.md")).unwrap();
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert!(plan.reindexable.is_empty());
+    assert_eq!(plan.flagged_for_review.len(), 1);
+    assert_eq!(plan.flagged_for_review[0].entry.memory_id, "symlinked1");
+    assert_eq!(
+        plan.flagged_for_review[0].reason,
+        FlagReason::NotRegularFile
+    );
+
+    let report = persistence.orphan_sweep_apply().unwrap();
+    assert_eq!(report.reindexed, 0);
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "symlinked1"));
+}

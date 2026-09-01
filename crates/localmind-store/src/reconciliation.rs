@@ -31,7 +31,7 @@ use time::OffsetDateTime;
 
 use crate::markdown::MarkdownMemoryFormat;
 use crate::memory_persistence::{MemoryPersistence, MemoryPersistenceError};
-use localmind_core::{AuditEventKind, MemoryEntry, MemoryScope};
+use localmind_core::{content_fingerprint, AuditEventKind, MemoryEntry, MemoryScope};
 
 /// One `.md` file on disk with no matching `memory_index` row, confirmed
 /// self-consistent (front matter id/scope match the filename/directory it
@@ -42,6 +42,12 @@ pub struct OrphanEntry {
     pub memory_id: String,
     pub path: PathBuf,
     pub scope: MemoryScope,
+    /// A content fingerprint of the body planning read, so apply can detect
+    /// a same-id/same-scope body replacement between the scan and the
+    /// write — not just that the id/scope still match, but that the
+    /// content a reviewer would have seen in the plan is the content that
+    /// is about to be indexed.
+    pub content_fingerprint: String,
 }
 
 /// Why a candidate orphan was routed to manual review instead of the
@@ -59,6 +65,18 @@ pub enum FlagReason {
     /// The file's front matter names a different scope than the directory
     /// it was found in.
     ScopeMismatch { parsed_scope: MemoryScope },
+    /// The directory entry is not a regular file (a symlink, most
+    /// plausibly) — never opened or followed, since it could point outside
+    /// the memory root.
+    NotRegularFile,
+    /// Apply-time only: another writer indexed this id in the gap between
+    /// planning and this write.
+    AlreadyIndexed,
+    /// Apply-time only: the file's content changed in the gap between
+    /// planning and this write — the id/scope still match, but the body
+    /// about to be indexed is not the body a reviewer of the plan would
+    /// have seen.
+    ContentChanged,
 }
 
 /// A candidate that was **not** classified as safely reindexable, with why.
@@ -102,10 +120,10 @@ pub struct ReconciliationReport {
     pub reindexed: usize,
     /// Entries from `found.reindexable` whose state had changed by the time
     /// apply reached them (another process indexed or retired the id, or
-    /// the file no longer matches what planning saw) — skipped rather than
-    /// written. Distinct from `found.flagged_for_review`, which planning
-    /// already knew about before any write was attempted.
-    pub stale: Vec<OrphanEntry>,
+    /// the file no longer matches what planning saw), with why — skipped
+    /// rather than written. Distinct from `found.flagged_for_review`, which
+    /// planning already knew about before any write was attempted.
+    pub stale: Vec<FlaggedOrphan>,
 }
 
 /// Every scope `MemoryPathResolver::write_memory_file` will ever write
@@ -169,10 +187,12 @@ impl MemoryPersistence {
                     .ok_or(MemoryPersistenceError::GlobalStoreUnavailable)?,
                 _ => self.connection(),
             };
-            if reindex_one(connection, entry, &sweep_run)? {
-                reindexed += 1;
-            } else {
-                stale.push(entry.clone());
+            match reindex_one(connection, entry, &sweep_run)? {
+                ReindexOutcome::Reindexed => reindexed += 1,
+                ReindexOutcome::Stale(reason) => stale.push(FlaggedOrphan {
+                    entry: entry.clone(),
+                    reason,
+                }),
             }
         }
         Ok(ReconciliationReport {
@@ -220,28 +240,48 @@ fn scan_scope(
         let Some(memory_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+
+        // Never open or follow anything but a plain regular file: a
+        // symlinked `.md` name inside a scope directory could point
+        // anywhere on disk, and this sweep must never read (let alone
+        // index) content from outside the memory root it was asked to
+        // scan.
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|source| MemoryPersistenceError::ScanMemoryRoot {
+                    path: path.clone(),
+                    source,
+                })?;
+        if !file_type.is_file() {
+            report.flagged_for_review.push(FlaggedOrphan {
+                entry: placeholder(memory_id, &path, &scope),
+                reason: FlagReason::NotRegularFile,
+            });
+            continue;
+        }
+
         if is_indexed(connection, memory_id)? {
             continue; // has a memory_index row already — not an orphan, whatever its status
         }
 
-        let candidate = OrphanEntry {
-            memory_id: memory_id.to_string(),
-            path: path.clone(),
-            scope: scope.clone(),
-        };
-
         if has_retirement_event(connection, memory_id)? {
             report.flagged_for_review.push(FlaggedOrphan {
-                entry: candidate,
+                entry: placeholder(memory_id, &path, &scope),
                 reason: FlagReason::Retired,
             });
             continue;
         }
 
-        match read_and_validate(&candidate) {
-            Ok(_) => report.reindexable.push(candidate),
+        match read_and_validate(memory_id, &path, &scope) {
+            Ok((_, fingerprint)) => report.reindexable.push(OrphanEntry {
+                memory_id: memory_id.to_string(),
+                path: path.clone(),
+                scope: scope.clone(),
+                content_fingerprint: fingerprint,
+            }),
             Err(reason) => report.flagged_for_review.push(FlaggedOrphan {
-                entry: candidate,
+                entry: placeholder(memory_id, &path, &scope),
                 reason,
             }),
         }
@@ -249,27 +289,44 @@ fn scan_scope(
     Ok(report)
 }
 
-/// Reads and parses `candidate.path`, then confirms its front matter names
-/// the exact id and scope the filename/directory already imply, returning
-/// the parsed entry on success. A file whose content disagrees with its own
-/// name is never guessed at — it is the caller's job to route it to manual
-/// review.
-fn read_and_validate(candidate: &OrphanEntry) -> Result<MemoryEntry, FlagReason> {
-    let text = fs::read_to_string(&candidate.path)
-        .map_err(|source| FlagReason::Unreadable(source.to_string()))?;
+/// An `OrphanEntry` for a candidate that is being flagged rather than
+/// reindexed — its `content_fingerprint` is meaningless (flagged entries
+/// are never applied) and left empty rather than computed.
+fn placeholder(memory_id: &str, path: &Path, scope: &MemoryScope) -> OrphanEntry {
+    OrphanEntry {
+        memory_id: memory_id.to_string(),
+        path: path.to_path_buf(),
+        scope: scope.clone(),
+        content_fingerprint: String::new(),
+    }
+}
+
+/// Reads and parses `path`, then confirms its front matter names the exact
+/// `expected_id`/`expected_scope` the filename/directory already imply,
+/// returning the parsed entry and its content fingerprint on success. A
+/// file whose content disagrees with its own name is never guessed at — it
+/// is the caller's job to route it to manual review.
+fn read_and_validate(
+    expected_id: &str,
+    path: &Path,
+    expected_scope: &MemoryScope,
+) -> Result<(MemoryEntry, String), FlagReason> {
+    let text =
+        fs::read_to_string(path).map_err(|source| FlagReason::Unreadable(source.to_string()))?;
     let entry = MarkdownMemoryFormat::parse(&text)
         .map_err(|source| FlagReason::Unreadable(source.to_string()))?;
-    if entry.id.as_str() != candidate.memory_id {
+    if entry.id.as_str() != expected_id {
         return Err(FlagReason::IdMismatch {
             parsed_id: entry.id.as_str().to_string(),
         });
     }
-    if entry.scope != candidate.scope {
+    if &entry.scope != expected_scope {
         return Err(FlagReason::ScopeMismatch {
             parsed_scope: entry.scope,
         });
     }
-    Ok(entry)
+    let fingerprint = content_fingerprint(&entry.body);
+    Ok((entry, fingerprint))
 }
 
 /// Whether `memory_id` already has a `memory_index` row, of any `status` —
@@ -309,28 +366,43 @@ fn has_retirement_event(
         .map_err(MemoryPersistenceError::Sqlite)
 }
 
+/// What [`reindex_one`] actually did.
+#[derive(Debug)]
+enum ReindexOutcome {
+    Reindexed,
+    /// A precondition no longer held when the write was about to happen —
+    /// not an error: "someone else already resolved this orphan" (or its
+    /// content moved) is not a fault, just something to report.
+    Stale(FlagReason),
+}
+
 /// Re-verifies `orphan` from scratch — still unindexed, still no retirement
-/// event, its file still readable/parseable and still self-consistent —
-/// inside the same transaction as the write, then indexes it and records
-/// the recovery. Returns `Ok(false)` (not an error) when any precondition
-/// no longer holds: the caller counts that as skipped-stale rather than
-/// treating it as a failure, since "someone else already resolved this
-/// orphan" is not a fault.
+/// event, its file still readable/parseable/self-consistent, and its
+/// content fingerprint still matches what planning saw — inside the same
+/// transaction as the write, then indexes it and records the recovery.
 fn reindex_one(
     connection: &Connection,
     orphan: &OrphanEntry,
     sweep_run: &str,
-) -> Result<bool, MemoryPersistenceError> {
+) -> Result<ReindexOutcome, MemoryPersistenceError> {
     let tx = connection
         .unchecked_transaction()
         .map_err(MemoryPersistenceError::Sqlite)?;
 
-    if is_indexed(&tx, &orphan.memory_id)? || has_retirement_event(&tx, &orphan.memory_id)? {
-        return Ok(false);
+    if is_indexed(&tx, &orphan.memory_id)? {
+        return Ok(ReindexOutcome::Stale(FlagReason::AlreadyIndexed));
     }
-    let Ok(entry) = read_and_validate(orphan) else {
-        return Ok(false);
-    };
+    if has_retirement_event(&tx, &orphan.memory_id)? {
+        return Ok(ReindexOutcome::Stale(FlagReason::Retired));
+    }
+    let (entry, fingerprint) =
+        match read_and_validate(&orphan.memory_id, &orphan.path, &orphan.scope) {
+            Ok(pair) => pair,
+            Err(reason) => return Ok(ReindexOutcome::Stale(reason)),
+        };
+    if fingerprint != orphan.content_fingerprint {
+        return Ok(ReindexOutcome::Stale(FlagReason::ContentChanged));
+    }
 
     // The orphan's own file predates this sweep and carries no session
     // context to infer a language from beyond its body — the same
@@ -347,17 +419,17 @@ fn reindex_one(
         }),
     )?;
     tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
-    Ok(true)
+    Ok(ReindexOutcome::Reindexed)
 }
 
 #[cfg(test)]
 mod reindex_one_tests {
     #![allow(clippy::unwrap_used)]
-    use super::{reindex_one, OrphanEntry};
+    use super::{reindex_one, FlagReason, OrphanEntry, ReindexOutcome};
     use crate::memory_persistence::MemoryPersistence;
     use localmind_core::{
-        Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-        MemoryScope, MemoryStatus, SessionId, SyncMeta,
+        content_fingerprint, Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry,
+        MemoryEntryId, MemoryScope, MemoryStatus, SessionId, SyncMeta,
     };
     use rusqlite::Connection;
 
@@ -399,6 +471,7 @@ mod reindex_one_tests {
             memory_id: memory_entry.id.as_str().to_string(),
             path,
             scope: memory_entry.scope.clone(),
+            content_fingerprint: content_fingerprint(&memory_entry.body),
         }
     }
 
@@ -418,10 +491,10 @@ mod reindex_one_tests {
         MemoryPersistence::index_memory_with(&tx, &memory_entry, &orphan.path, None).unwrap();
         tx.commit().unwrap();
 
-        let reindexed = reindex_one(&connection, &orphan, "sweep-1").unwrap();
+        let outcome = reindex_one(&connection, &orphan, "sweep-1").unwrap();
         assert!(
-            !reindexed,
-            "an id that is no longer an orphan must be skipped, not re-upserted"
+            matches!(outcome, ReindexOutcome::Stale(FlagReason::AlreadyIndexed)),
+            "an id that is no longer an orphan must be skipped, not re-upserted; got {outcome:?}"
         );
     }
 
@@ -442,8 +515,11 @@ mod reindex_one_tests {
             )
             .unwrap();
 
-        let reindexed = reindex_one(&connection, &orphan, "sweep-1").unwrap();
-        assert!(!reindexed);
+        let outcome = reindex_one(&connection, &orphan, "sweep-1").unwrap();
+        assert!(matches!(
+            outcome,
+            ReindexOutcome::Stale(FlagReason::Retired)
+        ));
         let indexed: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM memory_index WHERE memory_id = 'raced-retired'",
@@ -464,8 +540,8 @@ mod reindex_one_tests {
         let memory_entry = entry("raced-clean");
         let orphan = write_and_orphan(dir.path(), &memory_entry);
 
-        let reindexed = reindex_one(&connection, &orphan, "sweep-xyz").unwrap();
-        assert!(reindexed);
+        let outcome = reindex_one(&connection, &orphan, "sweep-xyz").unwrap();
+        assert!(matches!(outcome, ReindexOutcome::Reindexed));
 
         let metadata: String = connection
             .query_row(
@@ -475,5 +551,44 @@ mod reindex_one_tests {
             )
             .unwrap();
         assert!(metadata.contains("sweep-xyz"));
+    }
+
+    /// The race navigator review caught in a later round: the id/scope
+    /// still match what planning saw, but the file's *content* changed in
+    /// the gap between planning and this write — must be treated as stale,
+    /// not silently indexed under a body the plan never showed anyone.
+    #[test]
+    fn skips_when_the_file_content_changed_since_planning() {
+        let connection = schema_connection();
+        let dir = tempfile::tempdir().unwrap();
+        let memory_entry = entry("raced-content-changed");
+        let orphan = write_and_orphan(dir.path(), &memory_entry);
+
+        // The file is edited in place after planning captured its
+        // fingerprint, keeping the same id/scope.
+        let mut edited = memory_entry.clone();
+        edited.body = "a completely different body than planning saw".to_string();
+        std::fs::write(
+            &orphan.path,
+            crate::markdown::MarkdownMemoryFormat::serialize(&edited),
+        )
+        .unwrap();
+
+        let outcome = reindex_one(&connection, &orphan, "sweep-1").unwrap();
+        assert!(matches!(
+            outcome,
+            ReindexOutcome::Stale(FlagReason::ContentChanged)
+        ));
+        let indexed: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_index WHERE memory_id = 'raced-content-changed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexed, 0,
+            "changed content must never be silently indexed under the plan's fingerprint"
+        );
     }
 }

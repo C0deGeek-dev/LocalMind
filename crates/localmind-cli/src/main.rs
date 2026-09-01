@@ -1859,8 +1859,13 @@ reindexed: {}",
             "stale:     {} file(s) skipped — their state changed between planning and this run (already resolved by something else); re-run to see current state",
             report.stale.len()
         );
-        for entry in &report.stale {
-            println!("  {}  {}", entry.memory_id, entry.path.display());
+        for stale in &report.stale {
+            println!(
+                "  {}  {}  ({})",
+                stale.entry.memory_id,
+                stale.entry.path.display(),
+                describe_flag_reason(&stale.reason)
+            );
         }
     }
     Ok(())
@@ -1895,6 +1900,15 @@ fn describe_flag_reason(reason: &localmind_store::FlagReason) -> String {
         }
         localmind_store::FlagReason::ScopeMismatch { parsed_scope } => {
             format!("front matter names a different scope: {parsed_scope:?}")
+        }
+        localmind_store::FlagReason::NotRegularFile => {
+            "not a regular file (a symlink?) — never opened".to_string()
+        }
+        localmind_store::FlagReason::AlreadyIndexed => {
+            "another writer indexed this id first".to_string()
+        }
+        localmind_store::FlagReason::ContentChanged => {
+            "the file's content changed since planning".to_string()
         }
     }
 }
