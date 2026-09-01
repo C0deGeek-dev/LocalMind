@@ -40,4 +40,11 @@ pub enum AuditEventKind {
     DistillationCreated,
     ResearchInsightCreated,
     ContextPackExported,
+    /// The orphan-reconciliation sweep reindexed a fully-written memory file
+    /// that a prior crash left un-indexed (a gap between the atomic file
+    /// write and the SQLite transaction that indexes it). Never emitted for
+    /// a file whose id already carries a `MemorySuperseded`/`MemoryDeleted`
+    /// event — that file is reported for manual review instead, never
+    /// reindexed.
+    OrphanReconciled,
 }

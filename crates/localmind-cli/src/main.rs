@@ -232,6 +232,18 @@ enum Command {
         #[arg(long)]
         prune_stale: bool,
     },
+    /// Report (or, with --apply, repair) memory files written but never
+    /// indexed — the gap between an atomic file write and its indexing
+    /// transaction.
+    ReconcileOrphans {
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Actually reindex confirmed orphans. Without this flag, only
+        /// reports what would be reindexed — writes nothing.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Serve LocalMind query tools to an MCP client over stdio.
     Mcp {
         #[command(subcommand)]
@@ -1426,6 +1438,7 @@ fn main() -> Result<()> {
             dry_run,
             prune_stale,
         } => backfill_command(&project, dry_run, prune_stale)?,
+        Command::ReconcileOrphans { project, apply } => reconcile_orphans_command(&project, apply)?,
         Command::Mcp { command } => match command {
             McpCommand::Serve { project } => {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1794,6 +1807,67 @@ fn print_backfill_plan(plan: &localmind_store::BackfillPlan) {
     line("docs:", &plan.doc_chunks);
 }
 
+/// Report (or, with `apply`, repair) memory Markdown files that were fully
+/// written but never indexed. Report-only by default — unlike `backfill`,
+/// which defaults to doing the work — because reindexing trusts arbitrary
+/// on-disk content back into the search index, so the safer default here is
+/// to look before writing.
+fn reconcile_orphans_command(project: &Path, apply: bool) -> Result<()> {
+    let persistence = localmind_store::MemoryPersistence::open_project(project)
+        .context("opening the project store")?;
+
+    if !apply {
+        let plan = persistence
+            .orphan_sweep_plan()
+            .context("scanning for orphaned memory files")?;
+        print_orphan_report(&plan);
+        if plan.is_empty() {
+            println!("nothing to reconcile.");
+        } else if plan.reindexable.is_empty() {
+            println!(
+                "
+{} file(s) flagged for manual review — none are safe to auto-reindex.",
+                plan.flagged_for_review.len()
+            );
+        } else {
+            println!(
+                "
+re-run with --apply to reindex {}.",
+                plan.reindexable.len()
+            );
+        }
+        return Ok(());
+    }
+
+    let report = persistence
+        .orphan_sweep_apply()
+        .context("running the reconciliation sweep")?;
+    print_orphan_report(&report.found);
+    println!(
+        "
+reindexed: {}",
+        report.reindexed
+    );
+    if !report.found.flagged_for_review.is_empty() {
+        println!(
+            "flagged:   {} file(s) left untouched — a retirement event is on record for their id; needs manual review",
+            report.found.flagged_for_review.len()
+        );
+    }
+    Ok(())
+}
+
+fn print_orphan_report(report: &localmind_store::OrphanReport) {
+    println!("reindexable:         {}", report.reindexable.len());
+    for entry in &report.reindexable {
+        println!("  {}  {}", entry.memory_id, entry.path.display());
+    }
+    println!("flagged for review:  {}", report.flagged_for_review.len());
+    for entry in &report.flagged_for_review {
+        println!("  {}  {}", entry.memory_id, entry.path.display());
+    }
+}
+
 /// Report the session inventory, and what a retention bound would remove.
 ///
 /// **Never deletes.** Session transcripts have been kept forever, and whether
@@ -2090,6 +2164,14 @@ mod tests {
                 "status-only-probes",
                 Command::Status {
                     project: project.clone(),
+                },
+                false,
+            ),
+            (
+                "reconcile-orphans-never-touches-embeddings",
+                Command::ReconcileOrphans {
+                    project: project.clone(),
+                    apply: true,
                 },
                 false,
             ),

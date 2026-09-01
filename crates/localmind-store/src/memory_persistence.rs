@@ -1096,6 +1096,12 @@ impl MemoryPersistence {
         self.global.as_ref().map(|global| &global.connection)
     }
 
+    /// This store's resolved project configuration, for in-crate passes that
+    /// need the memory roots directly (e.g. a filesystem sweep).
+    pub(crate) fn config(&self) -> &ProjectConfig {
+        &self.config
+    }
+
     /// The embedding model the project is configured to use.
     ///
     /// # Errors
@@ -2536,8 +2542,10 @@ impl MemoryPersistence {
 
     /// Writes the index, FTS, and relationship rows for `entry` on the given
     /// connection. Callers run this inside a transaction so the rows appear
-    /// atomically.
-    fn index_memory_with(
+    /// atomically. `pub(crate)` so a sibling module (the orphan
+    /// reconciliation sweep) can reuse the exact same indexing logic rather
+    /// than forking a second implementation.
+    pub(crate) fn index_memory_with(
         connection: &Connection,
         entry: &MemoryEntry,
         path: &Path,
@@ -2820,7 +2828,9 @@ impl MemoryPersistence {
 
     /// Inserts one audit row on the given connection. Metadata is a
     /// `serde_json::Value` so callers cannot hand-build malformed JSON.
-    fn write_audit_with(
+    /// `pub(crate)` so a sibling module can append audit rows through the
+    /// same single insert path every other producer in this file uses.
+    pub(crate) fn write_audit_with(
         connection: &Connection,
         kind: AuditEventKind,
         actor: &str,
@@ -3184,4 +3194,21 @@ pub enum MemoryPersistenceError {
     InvalidVector { detail: String },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error("failed to scan memory directory {path:?}: {source}")]
+    ScanMemoryRoot {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to read candidate orphan memory file {path:?}: {source}")]
+    ReadOrphanFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to parse candidate orphan memory file {path:?}: {source}")]
+    ParseOrphanFile {
+        path: PathBuf,
+        source: crate::markdown::MarkdownParseError,
+    },
+    #[error("a global-scope orphan was found but the global store is not open")]
+    GlobalStoreUnavailable,
 }

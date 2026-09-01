@@ -28,6 +28,7 @@ mod paths;
 mod primer;
 mod project_identity;
 mod quality;
+mod reconciliation;
 mod redaction;
 mod research;
 mod revalidation;
@@ -95,6 +96,7 @@ pub use primer::{
 };
 pub use project_identity::{ProjectIdentity, ProjectIdentitySource};
 pub use quality::{classify_quality, Quality};
+pub use reconciliation::{OrphanEntry, OrphanReport, ReconciliationReport};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use research::{BatchInsightError, BatchInsightPipeline, BatchInsightReport};
 pub use revalidation::{
