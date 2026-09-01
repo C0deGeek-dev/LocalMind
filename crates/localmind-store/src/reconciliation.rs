@@ -42,11 +42,12 @@ pub struct OrphanEntry {
     pub memory_id: String,
     pub path: PathBuf,
     pub scope: MemoryScope,
-    /// A content fingerprint of the body planning read, so apply can detect
-    /// a same-id/same-scope body replacement between the scan and the
-    /// write — not just that the id/scope still match, but that the
-    /// content a reviewer would have seen in the plan is the content that
-    /// is about to be indexed.
+    /// A content fingerprint of the *full re-serialized entry* planning
+    /// read (body and every indexed front-matter field — category,
+    /// confidence, source session), so apply can detect any change between
+    /// the scan and the write, not only a body edit: not just that the
+    /// id/scope still match, but that the entry a reviewer would have seen
+    /// in the plan is the entry that is about to be indexed.
     pub content_fingerprint: String,
 }
 
@@ -241,11 +242,17 @@ fn scan_scope(
             continue;
         };
 
+        if is_indexed(connection, memory_id)? {
+            continue; // has a memory_index row already — not an orphan, whatever its status or file type
+        }
+
         // Never open or follow anything but a plain regular file: a
         // symlinked `.md` name inside a scope directory could point
         // anywhere on disk, and this sweep must never read (let alone
         // index) content from outside the memory root it was asked to
-        // scan.
+        // scan. Checked only once we know the id isn't already indexed —
+        // an indexed id's file is not in scope for this sweep regardless
+        // of what it is on disk.
         let file_type =
             entry
                 .file_type()
@@ -259,10 +266,6 @@ fn scan_scope(
                 reason: FlagReason::NotRegularFile,
             });
             continue;
-        }
-
-        if is_indexed(connection, memory_id)? {
-            continue; // has a memory_index row already — not an orphan, whatever its status
         }
 
         if has_retirement_event(connection, memory_id)? {
@@ -325,7 +328,13 @@ fn read_and_validate(
             parsed_scope: entry.scope,
         });
     }
-    let fingerprint = content_fingerprint(&entry.body);
+    // Fingerprints the full re-serialized entry, not only the body: every
+    // field `index_memory_with` actually writes (category, confidence,
+    // source_session, and language derivation, which reads the category
+    // too) can change independently of the body between planning and
+    // apply, and any of them changing means the plan no longer describes
+    // what is about to be indexed.
+    let fingerprint = content_fingerprint(&MarkdownMemoryFormat::serialize(&entry));
     Ok((entry, fingerprint))
 }
 
@@ -471,7 +480,9 @@ mod reindex_one_tests {
             memory_id: memory_entry.id.as_str().to_string(),
             path,
             scope: memory_entry.scope.clone(),
-            content_fingerprint: content_fingerprint(&memory_entry.body),
+            content_fingerprint: content_fingerprint(
+                &crate::markdown::MarkdownMemoryFormat::serialize(memory_entry),
+            ),
         }
     }
 
@@ -590,5 +601,35 @@ mod reindex_one_tests {
             indexed, 0,
             "changed content must never be silently indexed under the plan's fingerprint"
         );
+    }
+
+    /// Same race, but the body is untouched and only a front-matter field
+    /// `index_memory_with` actually writes (confidence) changed — the
+    /// fingerprint must cover the full entry, not the body alone, or this
+    /// would be silently missed.
+    #[test]
+    fn skips_when_only_front_matter_metadata_changed_since_planning() {
+        let connection = schema_connection();
+        let dir = tempfile::tempdir().unwrap();
+        let memory_entry = entry("raced-metadata-changed");
+        let orphan = write_and_orphan(dir.path(), &memory_entry);
+
+        let mut edited = memory_entry.clone();
+        edited.confidence = Confidence::new(0.2).unwrap();
+        assert_eq!(
+            edited.body, memory_entry.body,
+            "this test isolates a metadata-only change"
+        );
+        std::fs::write(
+            &orphan.path,
+            crate::markdown::MarkdownMemoryFormat::serialize(&edited),
+        )
+        .unwrap();
+
+        let outcome = reindex_one(&connection, &orphan, "sweep-1").unwrap();
+        assert!(matches!(
+            outcome,
+            ReindexOutcome::Stale(FlagReason::ContentChanged)
+        ));
     }
 }

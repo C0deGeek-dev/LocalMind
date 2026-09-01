@@ -414,3 +414,43 @@ fn a_symlinked_md_entry_is_flagged_and_never_read() {
         .iter()
         .any(|record| record.memory_id.as_str() == "symlinked1"));
 }
+
+/// An id that is *already indexed* is out of scope for this sweep
+/// regardless of what its filename happens to be on disk — including a
+/// symlink. The already-indexed check must run before the file-type check,
+/// or an indexed id whose file happens to be a symlink would be
+/// (incorrectly) flagged instead of silently skipped like any other
+/// already-indexed file.
+#[cfg(unix)]
+#[test]
+fn an_already_indexed_id_is_never_flagged_even_if_its_file_is_a_symlink() {
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    let db_path = root.join(".localmind").join("localmind.sqlite");
+    let raw = rusqlite::Connection::open(&db_path).unwrap();
+    raw.execute(
+        "INSERT INTO memory_index \
+         (memory_id, path, scope, category, body, source_session, status, created_at, \
+          epistemic_status, confidence, language, origin_device) \
+         VALUES ('already-indexed1', 'irrelevant.md', 'Project', 'ProjectConvention', \
+          'already indexed elsewhere', NULL, 'active', '2026-01-01T00:00:00Z', \
+          'observation', 0.9, NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    drop(raw);
+
+    let outside_target = root.join("outside-memory-root.txt");
+    std::fs::write(&outside_target, "not a memory file at all").unwrap();
+    let project_dir = root.join(".localmind").join("memory").join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_target, project_dir.join("already-indexed1.md")).unwrap();
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert!(
+        plan.is_empty(),
+        "an already-indexed id must be silently skipped, not flagged, regardless of file type"
+    );
+}
