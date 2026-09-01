@@ -3199,16 +3199,6 @@ pub enum MemoryPersistenceError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to read candidate orphan memory file {path:?}: {source}")]
-    ReadOrphanFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("failed to parse candidate orphan memory file {path:?}: {source}")]
-    ParseOrphanFile {
-        path: PathBuf,
-        source: crate::markdown::MarkdownParseError,
-    },
     #[error("a global-scope orphan was found but the global store is not open")]
     GlobalStoreUnavailable,
 }

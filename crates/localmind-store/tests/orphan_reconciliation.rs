@@ -1,15 +1,16 @@
-//! End-to-end: a memory file written but never indexed (the crash window
-//! between subject 01's atomic file write and the SQLite indexing
-//! transaction) is found and repaired by the reconciliation sweep — unless
-//! its id already carries a retirement event, in which case it is reported
-//! for manual review and never reindexed, even under apply.
+//! End-to-end: a memory file written but never indexed (a fully-written file
+//! with no matching `memory_index` row) is found and repaired by the
+//! reconciliation sweep — unless its id already carries a retirement event,
+//! or its front matter disagrees with its own filename/directory, in which
+//! case it is reported for manual review and never reindexed, even under
+//! apply.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use localmind_core::{
     Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope,
     MemoryStatus, SessionId, SyncMeta,
 };
-use localmind_store::{MemoryPathResolver, MemoryPersistence, ProjectConfig};
+use localmind_store::{MarkdownMemoryFormat, MemoryPathResolver, MemoryPersistence, ProjectConfig};
 
 fn enabled_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -21,10 +22,10 @@ fn enabled_project() -> tempfile::TempDir {
     dir
 }
 
-fn seed_memory(id: &str, body: &str) -> MemoryEntry {
+fn seed_memory(id: &str, scope: MemoryScope, body: &str) -> MemoryEntry {
     MemoryEntry {
         id: MemoryEntryId::new(id),
-        scope: MemoryScope::Project,
+        scope,
         body: body.to_string(),
         category: LessonCategory::ProjectConvention,
         confidence: Confidence::new(0.9).unwrap(),
@@ -44,9 +45,9 @@ fn seed_memory(id: &str, body: &str) -> MemoryEntry {
 
 /// Writes a memory's Markdown file directly through the same path
 /// `persist_memory_entry`/`promote_review_item` use — but skips the
-/// indexing transaction entirely, reproducing exactly the gap a crash
-/// between the two would leave: a fully-written, permanently un-indexed
-/// file.
+/// indexing transaction entirely, reproducing exactly the gap an
+/// interruption between the two would leave: a fully-written, permanently
+/// un-indexed file.
 fn write_unindexed(root: &std::path::Path, entry: &MemoryEntry) {
     let config = ProjectConfig::discover(root).unwrap();
     MemoryPathResolver::write_memory_file(&config, entry).unwrap();
@@ -60,14 +61,16 @@ fn an_unindexed_but_fully_written_file_is_found_and_reindexed_under_apply() {
 
     write_unindexed(
         root,
-        &seed_memory("orphan1", "prefer rebasing over merge commits here"),
+        &seed_memory(
+            "orphan1",
+            MemoryScope::Project,
+            "prefer rebasing over merge commits here",
+        ),
     );
 
     // Invisible to the store until reconciled: no index row means no
     // search hit and no listing entry, even though the file is fully on
-    // disk (this is not the crash-injection scenario itself — subject 01
-    // already proved the file write side is atomic — it is the *next* gap,
-    // between a fully-written file and its indexing transaction).
+    // disk.
     assert!(persistence.search("rebasing").unwrap().is_empty());
     assert!(!persistence
         .list_memory()
@@ -86,13 +89,15 @@ fn an_unindexed_but_fully_written_file_is_found_and_reindexed_under_apply() {
     let report = persistence.orphan_sweep_apply().unwrap();
     assert_eq!(report.reindexed, 1);
     assert_eq!(report.found.reindexable.len(), 1);
+    assert!(report.stale.is_empty());
 
     // Now visible and searchable, exactly like a normally-promoted memory.
     let hits = persistence.search("rebasing").unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].memory_id.as_str(), "orphan1");
 
-    // An OrphanReconciled audit row records the recovery.
+    // An OrphanReconciled audit row records the recovery, tagged with a
+    // sweep-run identifier.
     let audit = persistence
         .audit_records()
         .unwrap()
@@ -101,6 +106,7 @@ fn an_unindexed_but_fully_written_file_is_found_and_reindexed_under_apply() {
         .expect("an OrphanReconciled audit row");
     assert_eq!(audit.subject, "orphan1");
     assert!(audit.metadata_json.contains("orphan1.md"));
+    assert!(audit.metadata_json.contains("\"sweep_run\""));
 
     // Idempotent: nothing left to find on a second sweep.
     let second_plan = persistence.orphan_sweep_plan().unwrap();
@@ -115,14 +121,18 @@ fn a_file_whose_id_carries_a_retirement_event_is_flagged_but_never_reindexed() {
 
     write_unindexed(
         root,
-        &seed_memory("retired1", "this lesson was already superseded elsewhere"),
+        &seed_memory(
+            "retired1",
+            MemoryScope::Project,
+            "this lesson was already superseded elsewhere",
+        ),
     );
 
     // Simulate a retirement event on record for this id without a
-    // memory_index row — the belt-and-suspenders case the plan's own risk
-    // table names (no code path in this crate produces it today, since
-    // supersede/delete never actually remove or skip the index row; this
-    // proves the sweep still refuses to resurrect it if that ever changes).
+    // memory_index row — the belt-and-suspenders case a supersede/delete
+    // producer would need to create for this to happen naturally (neither
+    // does today; this proves the sweep still refuses to resurrect it if
+    // that ever changes).
     let db_path = root.join(".localmind").join("localmind.sqlite");
     let raw = rusqlite::Connection::open(&db_path).unwrap();
     raw.execute(
@@ -136,12 +146,13 @@ fn a_file_whose_id_carries_a_retirement_event_is_flagged_but_never_reindexed() {
     let plan = persistence.orphan_sweep_plan().unwrap();
     assert!(plan.reindexable.is_empty());
     assert_eq!(plan.flagged_for_review.len(), 1);
-    assert_eq!(plan.flagged_for_review[0].memory_id, "retired1");
+    assert_eq!(plan.flagged_for_review[0].entry.memory_id, "retired1");
 
     // Apply must not touch it either.
     let report = persistence.orphan_sweep_apply().unwrap();
     assert_eq!(report.reindexed, 0);
     assert_eq!(report.found.flagged_for_review.len(), 1);
+    assert!(report.stale.is_empty());
     assert!(persistence
         .search("superseded elsewhere")
         .unwrap()
@@ -156,4 +167,79 @@ fn a_file_whose_id_carries_a_retirement_event_is_flagged_but_never_reindexed() {
         .unwrap()
         .iter()
         .all(|row| row.kind != "OrphanReconciled"));
+}
+
+#[test]
+fn a_file_whose_front_matter_id_disagrees_with_its_filename_is_flagged_not_guessed_at() {
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    // The file is named `mismatch1.md`, but its own front matter claims a
+    // different id — e.g. a copy/paste or a hand-edited file. Written
+    // directly (not through `write_memory_file`, which always names the
+    // file after the entry's own id) to construct exactly this
+    // inconsistency.
+    let inner = seed_memory(
+        "actually-a-different-id",
+        MemoryScope::Project,
+        "id disagrees with filename",
+    );
+    let project_dir = root.join(".localmind").join("memory").join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        project_dir.join("mismatch1.md"),
+        MarkdownMemoryFormat::serialize(&inner),
+    )
+    .unwrap();
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert!(plan.reindexable.is_empty());
+    assert_eq!(plan.flagged_for_review.len(), 1);
+    assert_eq!(plan.flagged_for_review[0].entry.memory_id, "mismatch1");
+
+    // Apply must not index it under either id.
+    let report = persistence.orphan_sweep_apply().unwrap();
+    assert_eq!(report.reindexed, 0);
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "mismatch1"
+            || record.memory_id.as_str() == "actually-a-different-id"));
+}
+
+#[test]
+fn a_file_whose_front_matter_scope_disagrees_with_its_directory_is_flagged_not_guessed_at() {
+    let dir = enabled_project();
+    let root = dir.path();
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+
+    // Filed under `project/`, but its own front matter claims `GlobalUser`
+    // scope.
+    let inner = seed_memory(
+        "scopemismatch1",
+        MemoryScope::GlobalUser,
+        "scope disagrees with directory",
+    );
+    let project_dir = root.join(".localmind").join("memory").join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        project_dir.join("scopemismatch1.md"),
+        MarkdownMemoryFormat::serialize(&inner),
+    )
+    .unwrap();
+
+    let plan = persistence.orphan_sweep_plan().unwrap();
+    assert!(plan.reindexable.is_empty());
+    assert_eq!(plan.flagged_for_review.len(), 1);
+    assert_eq!(plan.flagged_for_review[0].entry.memory_id, "scopemismatch1");
+
+    let report = persistence.orphan_sweep_apply().unwrap();
+    assert_eq!(report.reindexed, 0);
+    assert!(!persistence
+        .list_memory()
+        .unwrap()
+        .iter()
+        .any(|record| record.memory_id.as_str() == "scopemismatch1"));
 }

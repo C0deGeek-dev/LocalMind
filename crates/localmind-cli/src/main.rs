@@ -1850,9 +1850,18 @@ reindexed: {}",
     );
     if !report.found.flagged_for_review.is_empty() {
         println!(
-            "flagged:   {} file(s) left untouched — a retirement event is on record for their id; needs manual review",
+            "flagged:   {} file(s) left untouched — needs manual review (see reasons above)",
             report.found.flagged_for_review.len()
         );
+    }
+    if !report.stale.is_empty() {
+        println!(
+            "stale:     {} file(s) skipped — their state changed between planning and this run (already resolved by something else); re-run to see current state",
+            report.stale.len()
+        );
+        for entry in &report.stale {
+            println!("  {}  {}", entry.memory_id, entry.path.display());
+        }
     }
     Ok(())
 }
@@ -1863,8 +1872,30 @@ fn print_orphan_report(report: &localmind_store::OrphanReport) {
         println!("  {}  {}", entry.memory_id, entry.path.display());
     }
     println!("flagged for review:  {}", report.flagged_for_review.len());
-    for entry in &report.flagged_for_review {
-        println!("  {}  {}", entry.memory_id, entry.path.display());
+    for flagged in &report.flagged_for_review {
+        println!(
+            "  {}  {}  ({})",
+            flagged.entry.memory_id,
+            flagged.entry.path.display(),
+            describe_flag_reason(&flagged.reason)
+        );
+    }
+}
+
+fn describe_flag_reason(reason: &localmind_store::FlagReason) -> String {
+    match reason {
+        localmind_store::FlagReason::Retired => {
+            "a retirement event is on record for this id".to_string()
+        }
+        localmind_store::FlagReason::Unreadable(detail) => {
+            format!("could not read/parse the file: {detail}")
+        }
+        localmind_store::FlagReason::IdMismatch { parsed_id } => {
+            format!("front matter names a different id: {parsed_id}")
+        }
+        localmind_store::FlagReason::ScopeMismatch { parsed_scope } => {
+            format!("front matter names a different scope: {parsed_scope:?}")
+        }
     }
 }
 

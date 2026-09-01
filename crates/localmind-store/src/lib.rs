@@ -96,7 +96,9 @@ pub use primer::{
 };
 pub use project_identity::{ProjectIdentity, ProjectIdentitySource};
 pub use quality::{classify_quality, Quality};
-pub use reconciliation::{OrphanEntry, OrphanReport, ReconciliationReport};
+pub use reconciliation::{
+    FlagReason, FlaggedOrphan, OrphanEntry, OrphanReport, ReconciliationReport,
+};
 pub use redaction::{Redaction, RedactionReport, Redactor};
 pub use research::{BatchInsightError, BatchInsightPipeline, BatchInsightReport};
 pub use revalidation::{
