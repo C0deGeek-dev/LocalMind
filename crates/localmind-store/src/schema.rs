@@ -18,7 +18,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 13;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 14;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -109,6 +109,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 13 {
         apply_v13(&tx)?;
+    }
+    if current < 14 {
+        apply_v14(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -400,6 +403,21 @@ fn apply_v12(connection: &Connection) -> Result<(), SchemaError> {
 fn apply_v13(connection: &Connection) -> Result<(), SchemaError> {
     connection
         .execute_batch("ALTER TABLE review_items ADD COLUMN merge_memory_target TEXT;")
+        .map_err(SchemaError::Sqlite)
+}
+
+/// `ReviewAction::DeleteExisting` names the accepted memory it removes, but —
+/// like `MergeInto`/`MergeIntoMemory` above — the action label alone cannot
+/// reconstruct that target once the decision is closed. Without a durable
+/// column the target existed only in-flight, between `decide()` closing the
+/// item `Rejected` and the CLI's separate follow-up `delete_memory()` call:
+/// a crash or error in that window left a `Rejected` item with no durable
+/// record of which memory it was ever supposed to remove. Nullable, mirroring
+/// `merge_target`/`merge_memory_target`; historic `delete_existing` rows
+/// predate this column and load with `None`.
+fn apply_v14(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch("ALTER TABLE review_items ADD COLUMN delete_existing_target TEXT;")
         .map_err(SchemaError::Sqlite)
 }
 
@@ -714,6 +732,36 @@ mod tests {
         )?;
         let historic: Option<String> = connection.query_row(
             "SELECT merge_memory_target FROM review_items WHERE id = 'historic'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(target.as_deref(), Some("mem-1"));
+        assert_eq!(historic, None);
+        Ok(())
+    }
+
+    #[test]
+    fn v14_adds_a_nullable_delete_existing_target() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        connection.execute(
+            "INSERT INTO review_items(
+                id, session_id, candidate_json, state, created_at, delete_existing_target
+             ) VALUES('source', 'session', '{}', 'rejected', 'now', 'mem-1')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO review_items(id, session_id, candidate_json, state, created_at)
+             VALUES('historic', 'session', '{}', 'rejected', 'now')",
+            [],
+        )?;
+        let target: Option<String> = connection.query_row(
+            "SELECT delete_existing_target FROM review_items WHERE id = 'source'",
+            [],
+            |row| row.get(0),
+        )?;
+        let historic: Option<String> = connection.query_row(
+            "SELECT delete_existing_target FROM review_items WHERE id = 'historic'",
             [],
             |row| row.get(0),
         )?;

@@ -58,6 +58,14 @@ pub struct ReviewQueueItem {
     /// `Merged`, exactly like a `MergeInto` decision, and is never itself
     /// promoted.
     pub merge_memory_target: Option<MemoryEntryId>,
+    /// The already-accepted memory a `DeleteExisting` decision removes,
+    /// carried from `decide()` to the CLI's separate follow-up
+    /// `delete_memory()` call — durable so a crash/error in that window
+    /// still leaves the intended target on the closed `Rejected` item
+    /// rather than only in a process that may never resume. `None` for
+    /// every other decision and for historic `delete_existing` rows that
+    /// predate this field.
+    pub delete_existing_target: Option<MemoryEntryId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -556,7 +564,8 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count, supersede_target, merge_target, merge_memory_target
+                       seen_count, supersede_target, merge_target, merge_memory_target,
+                       delete_existing_target
                 FROM review_items
                 ORDER BY created_at, id
                 "#,
@@ -578,7 +587,8 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count, supersede_target, merge_target, merge_memory_target
+                       seen_count, supersede_target, merge_target, merge_memory_target,
+                       delete_existing_target
                 FROM review_items
                 WHERE id = ?1
                 "#,
@@ -661,6 +671,17 @@ impl ReviewQueue {
             ReviewAction::MergeIntoMemory(target) => Some(target.as_str().to_string()),
             _ => None,
         };
+        // `DeleteExisting`'s target, carried through the same durability gap
+        // as `merge_memory_target` above: the CLI runs `decide()` (closing
+        // this item `Rejected`) and the actual `delete_memory()` call as two
+        // separate steps, so the target must be durable on the row the
+        // moment `decide()` returns, not only passed in memory to the next
+        // call. Not validated here for the same project/global reason as
+        // `Supersede`.
+        let delete_existing_target = match &decision.action {
+            ReviewAction::DeleteExisting(target) => Some(target.as_str().to_string()),
+            _ => None,
+        };
 
         let changed = self
             .connection
@@ -675,7 +696,8 @@ impl ReviewQueue {
                     updated_at = ?7,
                     supersede_target = ?8,
                     merge_target = ?9,
-                    merge_memory_target = ?10
+                    merge_memory_target = ?10,
+                    delete_existing_target = ?11
                 WHERE id = ?1
                 "#,
                 params![
@@ -689,6 +711,7 @@ impl ReviewQueue {
                     supersede_target,
                     merge_target,
                     merge_memory_target,
+                    delete_existing_target,
                 ],
             )
             .map_err(ReviewQueueError::Sqlite)?;
@@ -755,6 +778,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewQueueItem> {
         supersede_target: row.get::<_, Option<String>>(11)?.map(MemoryEntryId::new),
         merge_target: row.get::<_, Option<String>>(12)?.map(ReviewItemId::new),
         merge_memory_target: row.get::<_, Option<String>>(13)?.map(MemoryEntryId::new),
+        delete_existing_target: row.get::<_, Option<String>>(14)?.map(MemoryEntryId::new),
     })
 }
 

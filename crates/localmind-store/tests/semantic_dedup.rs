@@ -536,6 +536,133 @@ fn a_contradicting_borderline_match_suggests_delete_and_it_actually_removes_the_
         .any(|record| record.memory_id.as_str() == "mem-accepted"));
 }
 
+/// Subject 04 round 2: a confident duplicate that is *also* a contradiction
+/// must not fall through to the unconditional Skip arm when auto-supersede
+/// declines to fire (here: confidence below `trusted_threshold`) — it is a
+/// corrective candidate, not redundant noise, so it must stay `Pending` for
+/// a human rather than being silently auto-rejected via `IgnoreSimilar`.
+#[test]
+fn a_confident_contradicting_duplicate_below_the_supersede_threshold_stays_pending() {
+    // Two embed calls: the seed body, then the one candidate summary.
+    let base = tiered_embeddings_server(2);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[inference]\nembedding_base_url = \"{base}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 5\n\n[review]\nmode = \"automatic\"\ntrusted_threshold = 0.95\nsemantic_dedup = true\n",
+        ),
+    )
+    .unwrap();
+
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "mem-accepted",
+            "use anchortoken when scanning directories",
+        ))
+        .unwrap();
+
+    // "conftoken" reaches the confident cosine tier (0.90, >= 0.86 -> Skip);
+    // "no longer" triggers the contradiction signal; the candidate's fixed
+    // 0.7 confidence (tiered_candidate) is below this fixture's 0.95
+    // trusted_threshold, so the supersede arm above the Skip check declines
+    // to fire — this is exactly the case that must not fall through to an
+    // unconditional auto-skip.
+    let contradicting = "conftoken should no longer be used for recursive lookups";
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("session"),
+            &[tiered_candidate("c-conf-contra", contradicting)],
+        )
+        .unwrap();
+
+    let report = ReviewModeProcessor::apply_project(root).unwrap();
+    assert_eq!(
+        report.skipped, 0,
+        "must not auto-skip a contradicting duplicate"
+    );
+    assert_eq!(report.manual, 1);
+
+    let item = queue
+        .get(&ReviewItemId::new("c-conf-contra"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        item.state,
+        ReviewState::Pending,
+        "a confident duplicate that also contradicts the target must stay pending, not auto-reject"
+    );
+    assert!(item.reviewer_action.is_none());
+    let annotation = item.candidate.review_annotation.unwrap();
+    assert_eq!(annotation.duplicate_of.as_deref(), Some("mem-accepted"));
+    assert!(annotation.conflict);
+}
+
+/// Subject 04 round 2: Manual is the default review mode and must persist
+/// the computed annotation — including a `None`-level merge/delete
+/// suggestion — even though it never auto-applies anything. Before this fix
+/// `apply_project` computed `item.candidate.review_annotation` in memory but
+/// only `Assisted`/`Trusted`/`Automatic` called `replace_candidate` to save
+/// it, so a project on the default mode never saw a suggestion in its
+/// review queue at all.
+#[test]
+fn manual_mode_persists_the_computed_annotation_without_auto_applying_it() {
+    // Two embed calls: the seed body, then the one candidate summary.
+    let base = tiered_embeddings_server(2);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".localmind.toml"),
+        format!(
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n\n[inference]\nembedding_base_url = \"{base}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 5\n\n[review]\nmode = \"manual\"\ntrusted_threshold = 0.5\nsemantic_dedup = true\n",
+        ),
+    )
+    .unwrap();
+
+    let persistence = MemoryPersistence::open_project(root).unwrap();
+    persistence
+        .persist_memory_entry(&seed_memory(
+            "mem-accepted",
+            "use anchortoken when scanning directories",
+        ))
+        .unwrap();
+
+    let borderline = "choose bandtoken to traverse nested folders";
+    let queue = ReviewQueue::open_project(root).unwrap();
+    queue
+        .enqueue_candidates(
+            &SessionId::new("session"),
+            &[tiered_candidate("c-band-manual", borderline)],
+        )
+        .unwrap();
+
+    let report = ReviewModeProcessor::apply_project(root).unwrap();
+    assert_eq!(report.manual, 1);
+
+    let item = queue
+        .get(&ReviewItemId::new("c-band-manual"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        item.state,
+        ReviewState::Pending,
+        "manual mode never auto-applies"
+    );
+    let annotation = item
+        .candidate
+        .review_annotation
+        .expect("manual mode must persist the computed annotation, not only compute it in memory");
+    assert_eq!(annotation.duplicate_of.as_deref(), Some("mem-accepted"));
+    assert_eq!(
+        annotation.notes,
+        "Borderline semantic match (review band); consider `review merge` to record it as a \
+         duplicate of the existing memory, or `review reject`.",
+        "manual mode must expose the same level-two suggestion the other modes compute"
+    );
+}
+
 #[test]
 fn without_an_endpoint_dedup_is_exactly_the_lexical_contract() {
     // No `[inference]` block => semantic dedup inactive => the paraphrase's ~0.33

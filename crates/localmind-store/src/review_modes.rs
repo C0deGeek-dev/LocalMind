@@ -250,6 +250,14 @@ impl ReviewModeProcessor {
 
             match config.config.review.mode {
                 ReviewModeConfig::Manual => {
+                    // Manual never auto-applies anything, but the computed
+                    // annotation (including a None decision's merge/delete
+                    // suggestion) must still reach the row — without this,
+                    // Assisted/Trusted/Automatic all persist it but the
+                    // default mode silently drops it, so the review queue
+                    // never shows a suggestion for a project that hasn't
+                    // opted into a more automated mode.
+                    queue.replace_candidate(&item.id, &item.candidate)?;
                     report.manual += 1;
                 }
                 ReviewModeConfig::Assisted => {
@@ -262,11 +270,17 @@ impl ReviewModeProcessor {
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
                     // Precedence, checked in order: a contradiction with a
                     // clear target retires that memory; else a confident
-                    // duplicate auto-skips (redundancy is orthogonal to the
-                    // candidate's own confidence, so this is not gated on the
-                    // threshold); else a clean novel candidate is accepted;
-                    // everything else (a conflict with no clear target, a
-                    // borderline duplicate, low confidence) stays human-gated.
+                    // *non-contradicting* duplicate auto-skips (redundancy is
+                    // orthogonal to the candidate's own confidence, so this
+                    // is not gated on the threshold — but it is gated on
+                    // `!conflict`: a confident duplicate that also
+                    // contradicts the target is a corrective candidate, not
+                    // redundant noise, so it must not silently auto-reject
+                    // just because the supersede arm above declined to fire,
+                    // e.g. below threshold or no clear target); else a clean
+                    // novel candidate is accepted; everything else (a
+                    // conflict with no clear target, a borderline duplicate,
+                    // low confidence) stays human-gated.
                     let mut outcome = None;
                     if above_threshold && conflict && quality.is_general() {
                         if let Some(target) = related_target.clone() {
@@ -289,6 +303,7 @@ impl ReviewModeProcessor {
                         }
                     }
                     if outcome.is_none()
+                        && !conflict
                         && matches!(candidate_decision, CandidateDedupDecision::Skip)
                         && auto_decide(
                             &queue,
@@ -331,10 +346,15 @@ impl ReviewModeProcessor {
                     queue.replace_candidate(&item.id, &item.candidate)?;
                     // Auto-retiring a human's prior memory is gated on the same
                     // confidence threshold as trusted mode (risk control); a
-                    // confident duplicate auto-skips regardless of confidence
-                    // (same reasoning as trusted mode); a clean novel candidate
-                    // auto-accepts as before, with no confidence gate (matching
-                    // this mode's existing, more permissive accept posture).
+                    // confident *non-contradicting* duplicate auto-skips
+                    // regardless of confidence (same reasoning as trusted
+                    // mode, same `!conflict` gate — a confident duplicate
+                    // that also contradicts the target is a corrective
+                    // candidate, not redundant noise, even when the
+                    // supersede arm above declined to fire); a clean novel
+                    // candidate auto-accepts as before, with no confidence
+                    // gate (matching this mode's existing, more permissive
+                    // accept posture).
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
                     let mut outcome = None;
                     if above_threshold && conflict && quality.is_general() {
@@ -355,6 +375,7 @@ impl ReviewModeProcessor {
                         }
                     }
                     if outcome.is_none()
+                        && !conflict
                         && matches!(candidate_decision, CandidateDedupDecision::Skip)
                         && auto_decide(
                             &queue,

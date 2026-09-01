@@ -261,6 +261,17 @@ fn delete_existing_rejects_the_candidate_and_removes_the_target_without_promotin
     // promotes it.
     assert_eq!(decided.state, localmind_core::ReviewState::Rejected);
     assert!(decided.supersede_target.is_none());
+    // Subject 04 round 2: the target must be durable on the row the moment
+    // decide() returns — this is the crash-window fix. Simulated here by
+    // asserting it before the separate delete_memory() call below ever runs.
+    assert_eq!(
+        decided
+            .delete_existing_target
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("m1"),
+        "the delete target must be durable even if delete_memory() never runs"
+    );
 
     // The CLI-layer sequence: decide() closes the item, a separate
     // delete_memory() call actually removes the target.

@@ -565,6 +565,10 @@ impl MemoryPersistence {
                 // target: bookkeeping-only means no MemorySuperseded-style
                 // audit row exists elsewhere to carry it, unlike Supersede.
                 "merge_memory_target": item.merge_memory_target.as_ref().map(MemoryEntryId::as_str),
+                // Recorded here too, not only on the review_items row: this
+                // audit write happens before the CLI's separate delete_memory()
+                // call, so it survives even if that later call never runs.
+                "delete_existing_target": item.delete_existing_target.as_ref().map(MemoryEntryId::as_str),
             }),
         )
     }
