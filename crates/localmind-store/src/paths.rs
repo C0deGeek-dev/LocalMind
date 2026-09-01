@@ -74,39 +74,83 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// system temp directory: `fs::rename` is only atomic when source and
 /// destination are on the same filesystem/volume, and a same-directory temp
 /// file guarantees that. On success the temp file no longer exists (renamed
-/// onto the target); on any failure it is best-effort removed rather than
-/// left behind. Mirrors the same temp-then-rename shape already used by
-/// `sync_engine.rs::write_bundle` for the encrypted sync bundle.
+/// onto the target); on **any** failure — the write itself, the flush, or
+/// the publishing rename — it is best-effort removed rather than left
+/// behind (a cleanup failure never shadows the real error; the temp file is
+/// inert either way, since no reader ever looks at it). Mirrors the same
+/// temp-then-rename shape already used by `sync_engine.rs::write_bundle` for
+/// the encrypted sync bundle.
 ///
 /// `fs::rename` replaces an existing destination file atomically on both
 /// POSIX (`rename(2)`) and current Windows (`std`'s Windows backend calls
 /// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`) as long as both paths are
 /// on the same volume, which a same-directory temp file always is.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_via(path, |file| file.write_all(contents))
+}
+
+/// The actual publish sequence behind [`atomic_write`], parameterized over
+/// how bytes reach the temp file so a test can inject a fault partway
+/// through the write and observe this exact code path react to it (rather
+/// than hand-simulating what a crash leaves behind).
+fn atomic_write_via<W>(path: &Path, write: W) -> io::Result<()>
+where
+    W: FnOnce(&mut fs::File) -> io::Result<()>,
+{
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
-    let tmp_path = unique_temp_path(parent, path)?;
+    let (tmp_path, mut file) = create_unique_temp_file(parent, path)?;
 
-    let write_result = (|| -> io::Result<()> {
-        let mut file = fs::File::create(&tmp_path)?;
-        file.write_all(contents)?;
+    let result = (|| -> io::Result<()> {
+        write(&mut file)?;
         // Flush the temp file's own contents to disk before the rename that
         // publishes it, so a crash right after the rename can never expose a
         // file whose bytes are still sitting in a write-back cache.
         file.sync_all()?;
-        Ok(())
+        drop(file); // release the handle before rename, not after
+        fs::rename(&tmp_path, path)
     })();
 
-    if let Err(source) = write_result {
-        // Best-effort: a cleanup failure must not shadow the real write
-        // error, and the temp file is inert (never the file any reader
-        // looks at) even if it is left behind.
+    if result.is_err() {
         let _ = fs::remove_file(&tmp_path);
-        return Err(source);
     }
+    result
+}
 
-    fs::rename(&tmp_path, path)
+/// Bounded so a persistent collision (or a persistent creation failure)
+/// fails loudly instead of looping forever; five attempts is generous for a
+/// name space keyed by PID + a monotonic counter + a nanosecond timestamp.
+const MAX_TEMP_FILE_ATTEMPTS: u32 = 5;
+
+/// Creates a temp file whose name is guaranteed unique at creation time —
+/// `create_new` fails rather than silently truncating a file that happens to
+/// already exist at the generated path (another writer's in-flight temp
+/// file, or debris this same process failed to clean up on the previous
+/// nanosecond), and a fresh name is retried a bounded number of times on
+/// that one error kind.
+fn create_unique_temp_file(parent: &Path, target: &Path) -> io::Result<(PathBuf, fs::File)> {
+    let mut last_collision = None;
+    for _ in 0..MAX_TEMP_FILE_ATTEMPTS {
+        let candidate = unique_temp_path(parent, target)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                last_collision = Some(source);
+            }
+            Err(source) => return Err(source),
+        }
+    }
+    Err(last_collision.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique temp file name",
+        )
+    }))
 }
 
 fn unique_temp_path(parent: &Path, target: &Path) -> io::Result<PathBuf> {
@@ -202,8 +246,9 @@ pub enum MemoryPathError {
 #[cfg(test)]
 mod atomic_write_tests {
     #![allow(clippy::unwrap_used)]
-    use super::atomic_write;
+    use super::{atomic_write, atomic_write_via};
     use std::fs;
+    use std::io::{self, Write};
 
     #[test]
     fn a_successful_write_is_fully_readable_back() {
@@ -247,38 +292,95 @@ mod atomic_write_tests {
         );
     }
 
-    /// Crash-injection: a real crash can only ever leave a **partial temp
-    /// file** behind, because the target path is touched exactly once, by
-    /// the final `fs::rename` — never by the write itself. This test
-    /// reproduces exactly that shape (a half-written file at the same
-    /// temp-name pattern `atomic_write` uses) without needing to actually
-    /// kill a process mid-write, and proves the target is untouched by it.
+    /// Crash-injection: drives the **real** `atomic_write_via` publish
+    /// sequence with a writer that writes half a large payload to the temp
+    /// file and then fails, reproducing what an interrupted write (crash,
+    /// kill -9, full disk) leaves behind, without unsafe code or a child
+    /// process (both of which this crate's `unsafe_code = "forbid"` and its
+    /// dependency-light posture rule out). Because `path` itself is only
+    /// ever touched by the terminal `fs::rename` — reached only after a
+    /// fully successful write+flush — an interruption anywhere before that
+    /// point structurally cannot expose a truncated or partial file at the
+    /// final path; this test proves that structural claim by actually
+    /// exercising the failure, not by asserting the design in prose.
     #[test]
-    fn a_crash_during_the_temp_write_never_touches_the_final_path() {
+    fn an_interrupted_write_never_touches_the_final_path_and_cleans_up() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("memory.md");
-        fs::write(&target, b"prior content, written before any crash").unwrap();
+        fs::write(&target, b"prior content, written before the interruption").unwrap();
 
         let large_payload = vec![b'x'; 1_000_000];
-        let simulated_crash_tmp = dir.path().join("memory.md.999-0-123.tmp");
-        fs::write(
-            &simulated_crash_tmp,
-            &large_payload[..large_payload.len() / 2],
-        )
-        .unwrap();
+        let half = large_payload.len() / 2;
+        let result = atomic_write_via(&target, |file| {
+            file.write_all(&large_payload[..half])?;
+            Err(io::Error::other("simulated interruption"))
+        });
 
-        // The final path is exactly as it was before the "crash" — it was
-        // never touched by the interrupted temp-file write.
+        assert!(result.is_err());
+        // Observed: the final path is byte-identical to its pre-interruption
+        // content — never touched by the interrupted write.
         assert_eq!(
             fs::read(&target).unwrap(),
-            b"prior content, written before any crash"
+            b"prior content, written before the interruption"
+        );
+        // Observed: the dead temp file from the interrupted write is cleaned
+        // up, not left to accumulate.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path() != target)
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected no leftover temp files, found: {leftovers:?}"
         );
 
-        // A real, uninterrupted atomic_write still succeeds afterwards and
-        // fully publishes its own content — a stray partial temp file left
-        // by an earlier crash never interferes with a later write.
+        // Expected: a real, uninterrupted atomic_write afterwards still
+        // succeeds and fully publishes its own content.
         atomic_write(&target, &large_payload).unwrap();
         assert_eq!(fs::read(&target).unwrap(), large_payload);
+    }
+
+    /// A distinct scenario from the interruption above: a temp file left on
+    /// disk by an *earlier, already-finished* crashed run must not corrupt
+    /// or block a later, unrelated write.
+    #[test]
+    fn a_stray_temp_file_from_an_earlier_crash_does_not_interfere_with_a_new_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("memory.md");
+        fs::write(&target, b"prior content").unwrap();
+        fs::write(dir.path().join("memory.md.999-0-123.tmp"), b"stale debris").unwrap();
+
+        atomic_write(&target, b"fresh content").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"fresh content");
+    }
+
+    /// The publishing `fs::rename`, not only the write, can fail (a locked
+    /// destination, a permissions error, a destination that is itself a
+    /// directory). The temp file must not survive that failure either.
+    #[test]
+    fn a_failed_publish_rename_still_cleans_up_the_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory can never be the source of a rename onto it via
+        // `fs::rename` on either platform, so this deterministically fails
+        // the publish step after the temp file has already been fully
+        // written.
+        let target = dir.path().join("memory.md");
+        fs::create_dir_all(&target).unwrap();
+
+        let result = atomic_write(&target, b"content");
+
+        assert!(result.is_err());
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path() != target)
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected the failed rename's temp file to be cleaned up, found: {leftovers:?}"
+        );
     }
 
     #[test]
