@@ -47,19 +47,23 @@ pub enum ReviewAction {
     Supersede(MemoryEntryId),
     /// The dedup existing-item counterpart to [`ReviewAction::MergeInto`]: the
     /// target is an already-*accepted* memory (no retained review-item row to
-    /// merge into) rather than another pending candidate. Consolidates the
-    /// candidate's wording into the target exactly like [`Self::Supersede`] —
-    /// same promotion mechanics, retire-and-replace — recorded as a distinct
-    /// action so the audit trail shows the reviewer chose to *merge* a
-    /// near-duplicate, not correct an outdated one.
+    /// merge into) rather than another pending candidate. Bookkeeping only,
+    /// exactly like `MergeInto` — this item closes `Merged` and durably
+    /// records the target, but **never mutates the target memory and is
+    /// never itself promoted** (a `Merged` item is not in the
+    /// `Accepted`/`Edited` set `promote_review_item` requires). Recorded as
+    /// a distinct action from `MergeInto` only so the audit trail shows the
+    /// target was an accepted memory, not another pending candidate; recorded
+    /// as distinct from [`Self::Supersede`] because it makes no content
+    /// change at all, where `Supersede` promotes this candidate as the
+    /// target's replacement.
     MergeIntoMemory(MemoryEntryId),
     /// The dedup existing-item counterpart to [`ReviewAction::IgnoreSimilar`]:
     /// the existing accepted memory this candidate resembles is retired
     /// outright (never resurfaces, D-LM-0016 route-to-review invariant still
     /// holds — this is an explicit reviewer decision, not an automated one),
-    /// and — unlike [`Self::Supersede`]/[`Self::MergeIntoMemory`] — the
-    /// candidate itself is **not** promoted as its replacement: if the
-    /// candidate were worth keeping, the reviewer would merge/supersede
-    /// instead.
+    /// and — unlike [`Self::Supersede`] — the candidate itself is **not**
+    /// promoted as its replacement: if the candidate were worth keeping, the
+    /// reviewer would supersede instead.
     DeleteExisting(MemoryEntryId),
 }

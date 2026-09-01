@@ -18,7 +18,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 12;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 13;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -106,6 +106,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 12 {
         apply_v12(&tx)?;
+    }
+    if current < 13 {
+        apply_v13(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -385,6 +388,18 @@ fn apply_v11(connection: &Connection) -> Result<(), SchemaError> {
 fn apply_v12(connection: &Connection) -> Result<(), SchemaError> {
     connection
         .execute_batch("ALTER TABLE review_items ADD COLUMN merge_target TEXT;")
+        .map_err(SchemaError::Sqlite)
+}
+
+/// `ReviewAction::MergeIntoMemory` records that a candidate was recognized as
+/// a duplicate of an *already-accepted* memory — the same bookkeeping-only
+/// shape as `merge_target` (v12), but the target is a `MemoryEntryId`, not a
+/// `ReviewItemId`: an accepted memory's review item, if it ever existed, may
+/// already be closed under a different id, or long gone. A separate nullable
+/// column rather than overloading `merge_target`'s type.
+fn apply_v13(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch("ALTER TABLE review_items ADD COLUMN merge_memory_target TEXT;")
         .map_err(SchemaError::Sqlite)
 }
 
@@ -673,6 +688,36 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(target.as_deref(), Some("target"));
+        assert_eq!(historic, None);
+        Ok(())
+    }
+
+    #[test]
+    fn v13_adds_a_nullable_merge_memory_target() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        connection.execute(
+            "INSERT INTO review_items(
+                id, session_id, candidate_json, state, created_at, merge_memory_target
+             ) VALUES('source', 'session', '{}', 'merged', 'now', 'mem-1')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO review_items(id, session_id, candidate_json, state, created_at)
+             VALUES('historic', 'session', '{}', 'merged', 'now')",
+            [],
+        )?;
+        let target: Option<String> = connection.query_row(
+            "SELECT merge_memory_target FROM review_items WHERE id = 'source'",
+            [],
+            |row| row.get(0),
+        )?;
+        let historic: Option<String> = connection.query_row(
+            "SELECT merge_memory_target FROM review_items WHERE id = 'historic'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(target.as_deref(), Some("mem-1"));
         assert_eq!(historic, None);
         Ok(())
     }

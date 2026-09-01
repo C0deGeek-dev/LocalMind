@@ -561,6 +561,10 @@ impl MemoryPersistence {
                 "session": item.session_id.to_string(),
                 "action": item.reviewer_action.as_deref().unwrap_or_default(),
                 "merge_target": item.merge_target.as_ref().map(ReviewItemId::as_str),
+                // The only durable record of a MergeIntoMemory decision's
+                // target: bookkeeping-only means no MemorySuperseded-style
+                // audit row exists elsewhere to carry it, unlike Supersede.
+                "merge_memory_target": item.merge_memory_target.as_ref().map(MemoryEntryId::as_str),
             }),
         )
     }

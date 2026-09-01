@@ -33,10 +33,14 @@ pub fn state_after_decision(decision: &ReviewDecision) -> ReviewState {
             ReviewState::Rejected
         }
         ReviewAction::Edit => ReviewState::Edited,
-        ReviewAction::MergeInto(_) => ReviewState::Merged,
+        // MergeIntoMemory is the accepted-memory counterpart to MergeInto:
+        // bookkeeping only — it closes exactly like a MergeInto decision
+        // (never promoted, never mutates the target), not like Supersede
+        // (which promotes this candidate as the target's replacement).
+        ReviewAction::MergeInto(_) | ReviewAction::MergeIntoMemory(_) => ReviewState::Merged,
         ReviewAction::MarkTemporary => ReviewState::Deferred,
         ReviewAction::ConvertToSkill => ReviewState::Accepted,
-        ReviewAction::Supersede(_) | ReviewAction::MergeIntoMemory(_) => ReviewState::Accepted,
+        ReviewAction::Supersede(_) => ReviewState::Accepted,
     }
 }
 
@@ -89,16 +93,14 @@ mod tests {
             state_after_decision(&decision(ReviewAction::Reject)),
             ReviewState::Rejected
         );
-        // MergeIntoMemory promotes the candidate (same mechanics as
-        // Supersede), so it must land in the Accepted|Edited set
-        // promote_review_item requires — not Merged, which is reserved for
-        // MergeInto's "folded into another still-pending item" case that
-        // never gets promoted on its own.
+        // MergeIntoMemory is bookkeeping only, exactly like MergeInto — it
+        // never promotes the candidate or mutates the target, so it closes
+        // Merged, not Accepted.
         assert_eq!(
             state_after_decision(&decision(ReviewAction::MergeIntoMemory(
                 MemoryEntryId::new("m1")
             ))),
-            ReviewState::Accepted
+            ReviewState::Merged
         );
         // DeleteExisting never promotes the candidate.
         assert_eq!(

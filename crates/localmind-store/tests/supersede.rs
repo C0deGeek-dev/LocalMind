@@ -135,13 +135,13 @@ fn supersede_retires_the_target_records_the_link_and_audits_it() {
 
 /// Subject 04's `ExistingItemDecision::Merge`, confirmed via a real
 /// `review merge`-shaped decision against an *accepted* memory (not another
-/// pending item — `MergeInto`'s existing target type): identical promotion
-/// mechanics to `Supersede` (same retire-and-replace, same `before_body`
-/// capture), but a distinct `reviewer_action` in the audit trail so "the
-/// reviewer chose to merge a near-duplicate" is not indistinguishable from
-/// "the reviewer chose to correct an outdated one".
+/// pending item — `MergeInto`'s existing target type): bookkeeping only,
+/// exactly like `MergeInto` — it never mutates the target and is never
+/// itself promoted, only a distinct `reviewer_action` in the audit trail so
+/// "the reviewer recognized a near-duplicate of this accepted memory" is
+/// not indistinguishable from a bare rejection.
 #[test]
-fn merge_into_memory_retires_the_target_exactly_like_supersede_but_is_recorded_distinctly() {
+fn merge_into_memory_is_bookkeeping_only_and_never_mutates_or_promotes_anything() {
     let dir = enabled_project();
     let root = dir.path();
     let persistence = MemoryPersistence::open_project(root).unwrap();
@@ -174,39 +174,48 @@ fn merge_into_memory_retires_the_target_exactly_like_supersede_but_is_recorded_d
             evidence: Vec::new(),
         })
         .unwrap();
-    // Same promotion-eligible state as Supersede — not Merged, which is
-    // MergeInto's "folded into another still-pending item" state and is
-    // never itself promoted.
-    assert_eq!(decided.state, localmind_core::ReviewState::Accepted);
+    // Merged, exactly like MergeInto — not Accepted/Edited, so
+    // promote_review_item refuses it below.
+    assert_eq!(decided.state, localmind_core::ReviewState::Merged);
     assert_eq!(
-        decided.supersede_target.as_ref().map(MemoryEntryId::as_str),
+        decided
+            .merge_memory_target
+            .as_ref()
+            .map(MemoryEntryId::as_str),
         Some("m1")
     );
+    assert!(decided.supersede_target.is_none());
     assert_eq!(
         decided.reviewer_action.as_deref(),
         Some("merge_into_memory")
     );
 
-    let new_entry = persistence
+    // Never promotable: a Merged item is not in the Accepted|Edited set
+    // promote_review_item requires.
+    assert!(persistence
         .promote_review_item(&ReviewItemId::new("m2"))
-        .unwrap();
-    assert_eq!(new_entry.supersedes, vec![MemoryEntryId::new("m1")]);
+        .is_err());
+
+    // The target memory is completely untouched: no status flip, no
+    // MemorySuperseded audit row, no new memory for "m2".
+    assert!(
+        persistence
+            .list_memory()
+            .unwrap()
+            .iter()
+            .any(|record| record.memory_id.as_str() == "m1"),
+        "the target memory must remain active and untouched"
+    );
     assert!(!persistence
         .list_memory()
         .unwrap()
         .iter()
-        .any(|record| record.memory_id.as_str() == "m1"));
-
-    let audit = persistence
+        .any(|record| record.memory_id.as_str() == "m2"));
+    assert!(persistence
         .audit_records()
         .unwrap()
-        .into_iter()
-        .find(|row| row.kind == "MemorySuperseded")
-        .expect("a MemorySuperseded audit row");
-    assert_eq!(audit.subject, "m1");
-    assert!(audit
-        .metadata_json
-        .contains("\"before_body\":\"run the integration suite after every exporter change\""));
+        .iter()
+        .all(|row| row.kind != "MemorySuperseded"));
 }
 
 /// Subject 04's `ExistingItemDecision::Delete`: the existing memory is

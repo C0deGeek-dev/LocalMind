@@ -431,8 +431,8 @@ fn a_borderline_paraphrase_routes_to_review_while_a_distinct_one_does_not() {
     );
     assert_eq!(
         annotation(borderline).notes,
-        "Borderline semantic match (review band); consider `review merge` to consolidate into \
-         the existing memory, or `review reject`.",
+        "Borderline semantic match (review band); consider `review merge` to record it as a \
+         duplicate of the existing memory, or `review reject`.",
         "a borderline, non-contradicting match suggests merge, not delete"
     );
 

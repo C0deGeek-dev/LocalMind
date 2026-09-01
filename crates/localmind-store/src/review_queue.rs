@@ -51,6 +51,13 @@ pub struct ReviewQueueItem {
     /// The review item whose accumulated evidence this item was merged into.
     /// Historic `merge` records predate this field and therefore load as `None`.
     pub merge_target: Option<ReviewItemId>,
+    /// The already-accepted memory this item was recognized as a duplicate
+    /// of (`ReviewAction::MergeIntoMemory`). Bookkeeping only, the same
+    /// shape as `merge_target`: recording the decision never mutates the
+    /// target memory or promotes this candidate — this item closes
+    /// `Merged`, exactly like a `MergeInto` decision, and is never itself
+    /// promoted.
+    pub merge_memory_target: Option<MemoryEntryId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -549,7 +556,7 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count, supersede_target, merge_target
+                       seen_count, supersede_target, merge_target, merge_memory_target
                 FROM review_items
                 ORDER BY created_at, id
                 "#,
@@ -571,7 +578,7 @@ impl ReviewQueue {
                 r#"
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
-                       seen_count, supersede_target, merge_target
+                       seen_count, supersede_target, merge_target, merge_memory_target
                 FROM review_items
                 WHERE id = ?1
                 "#,
@@ -618,22 +625,13 @@ impl ReviewQueue {
                 item_id: decision.item_id,
             });
         }
-        // `MergeIntoMemory` shares `Supersede`'s exact promotion mechanics (see
-        // `localmind_review::state_after_decision`), so it shares its storage
-        // column too — the distinct `ReviewAction` variant is what keeps the
-        // audit trail (`reviewer_action`) honest about which one the reviewer
-        // actually chose. Neither `Supersede` nor `MergeIntoMemory` validates
-        // its target's existence here — this queue only ever opens the
-        // *project* database, while a target can legitimately live in the
-        // separate machine-wide global store, so an existence check here
-        // could reject a valid global target. `DeleteExisting`'s target is
-        // validated where it is actually acted on
-        // (`MemoryPersistence::delete_memory`, which already searches both
-        // stores correctly), not here.
+        // `Supersede`'s target is not validated here — this queue only ever
+        // opens the *project* database, while a target can legitimately
+        // live in the separate machine-wide global store, so an existence
+        // check here could reject a valid global target. Its resolution
+        // happens at promote time instead.
         let supersede_target = match &decision.action {
-            ReviewAction::Supersede(target) | ReviewAction::MergeIntoMemory(target) => {
-                Some(target.as_str().to_string())
-            }
+            ReviewAction::Supersede(target) => Some(target.as_str().to_string()),
             _ => None,
         };
         let merge_target = match &decision.action {
@@ -654,6 +652,15 @@ impl ReviewQueue {
             }
             _ => None,
         };
+        // `MergeIntoMemory` is the accepted-memory counterpart to
+        // `MergeInto` above: bookkeeping only (this item closes `Merged`,
+        // exactly like `MergeInto`, and is never itself promoted or
+        // mutates the target). Not validated here for the same
+        // project/global reason as `Supersede`.
+        let merge_memory_target = match &decision.action {
+            ReviewAction::MergeIntoMemory(target) => Some(target.as_str().to_string()),
+            _ => None,
+        };
 
         let changed = self
             .connection
@@ -667,7 +674,8 @@ impl ReviewQueue {
                     replacement_summary = ?6,
                     updated_at = ?7,
                     supersede_target = ?8,
-                    merge_target = ?9
+                    merge_target = ?9,
+                    merge_memory_target = ?10
                 WHERE id = ?1
                 "#,
                 params![
@@ -680,6 +688,7 @@ impl ReviewQueue {
                     now_string(),
                     supersede_target,
                     merge_target,
+                    merge_memory_target,
                 ],
             )
             .map_err(ReviewQueueError::Sqlite)?;
@@ -745,6 +754,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewQueueItem> {
         seen_count: row.get(10)?,
         supersede_target: row.get::<_, Option<String>>(11)?.map(MemoryEntryId::new),
         merge_target: row.get::<_, Option<String>>(12)?.map(ReviewItemId::new),
+        merge_memory_target: row.get::<_, Option<String>>(13)?.map(MemoryEntryId::new),
     })
 }
 

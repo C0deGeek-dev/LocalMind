@@ -218,7 +218,8 @@ impl ReviewModeProcessor {
                 CandidateDedupDecision::None => match suggest_existing_item_decision(conflict) {
                     ExistingItemDecision::Merge => {
                         "Borderline semantic match (review band); consider `review merge` \
-                             to consolidate into the existing memory, or `review reject`."
+                             to record it as a duplicate of the existing memory, or \
+                             `review reject`."
                             .to_string()
                     }
                     ExistingItemDecision::Delete => {
