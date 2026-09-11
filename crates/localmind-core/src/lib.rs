@@ -10,6 +10,7 @@ mod context;
 mod error;
 mod evidence;
 mod graph;
+mod hindsight;
 mod inference;
 mod lesson;
 mod memory;
@@ -25,16 +26,25 @@ pub use adapter::{
 pub use audit::{AuditEventKind, LearningAuditEvent};
 pub use context::{ContextPack, ContextQuery, ContextSource};
 pub use error::{ContractError, ContractResult};
-pub use evidence::{EvidenceKind, EvidenceRef};
+pub use evidence::{
+    is_canonical_evidence_id, stable_evidence_id, EvidenceKind, EvidenceRef,
+    EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX, EVIDENCE_SOURCE_KEY,
+};
 pub use graph::{
     content_fingerprint, stable_edge_id, stable_node_id, EdgeDerivation, EdgeKind, GraphEdge,
     GraphEndpoint, GraphNode, NodeKind, SourceLocation, TypeShape,
+};
+pub use hindsight::{
+    CausalHypothesis, HindsightDraft, HindsightOutcome, HindsightViolation, HINDSIGHT_DRAFT_SCHEMA,
+    HINDSIGHT_DRAFT_VERSION, MAX_EVIDENCE_IDS_PER_HYPOTHESIS, MAX_HYPOTHESES, MAX_LESSON_CHARS,
+    MAX_LIST_ITEMS, MAX_TEXT_CHARS, SINGLE_FACT_CONFIDENCE_CEILING,
 };
 pub use inference::{InferenceFeatureSettings, InferenceSettings};
 pub use lesson::{
     promote_tool_use, stale_tool_use_lessons, CandidateDestination, CandidateLesson, Confidence,
     FailureRecovery, InvalidationRule, LessonCategory, LessonScope, ReviewAnnotation,
-    SuggestedAction, ToolUseLesson, ToolUseTrajectory, ValidationStatus, TOOL_USE_SOURCE_WEIGHT,
+    SuggestedAction, ToolUseLesson, ToolUseTrajectory, ValidationStatus, CANDIDATE_IDENTITY_PREFIX,
+    TOOL_USE_SOURCE_WEIGHT,
 };
 pub use memory::{EpistemicStatus, MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};

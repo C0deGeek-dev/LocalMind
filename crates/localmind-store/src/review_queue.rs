@@ -335,10 +335,34 @@ impl ReviewQueue {
     ) -> Result<EnqueueCandidateOutcome, ReviewQueueError> {
         let summary = candidate.summary();
         let hash = crate::dedup::canonical_hash(summary);
+        let content_identity = candidate.content_identity();
         if let Some(survivor) = find_duplicate(pending, &hash, summary) {
-            self.bump_seen_count(&survivor)?;
+            let survivor_id = survivor.id.clone();
+            let restatement = survivor.content_identity == content_identity;
+            self.bump_seen_count(&survivor_id)?;
+
+            // Identical wording over different substance is a *revision*, not a
+            // repeat: a lesson re-derived from new evidence, a new hindsight
+            // draft, or a different source revision routinely keeps the same
+            // sentence. Merging it into the pending row the way a restatement
+            // is merged would leave the stale record in place and drop the new
+            // one on the floor, which is the opposite of what an evidence trail
+            // is for. It still merges rather than inserting a second row — the
+            // queue stays deduplicated — but the row now holds the revision and
+            // names what it replaced.
+            if !restatement {
+                let revised = candidate
+                    .clone()
+                    .revising(survivor.content_identity.clone());
+                let item_id = ReviewItemId::new(survivor_id.as_str());
+                self.replace_candidate(&item_id, &revised)?;
+                if let Some(key) = pending.iter_mut().find(|key| key.id == survivor_id) {
+                    key.content_identity = content_identity;
+                }
+            }
+
             return Ok(EnqueueCandidateOutcome {
-                item_id: survivor,
+                item_id: survivor_id,
                 created: false,
                 changed: true,
             });
@@ -370,6 +394,7 @@ impl ReviewQueue {
                 id: item_id.to_string(),
                 canonical_hash: hash,
                 summary: summary.to_string(),
+                content_identity,
             });
         }
         Ok(EnqueueCandidateOutcome {
@@ -463,8 +488,17 @@ impl ReviewQueue {
         let mut keys = Vec::new();
         for row in rows {
             let (id, canonical_hash, candidate_json) = row.map_err(ReviewQueueError::Sqlite)?;
-            let summary = serde_json::from_str::<CandidateLesson>(&candidate_json)
+            let stored = serde_json::from_str::<CandidateLesson>(&candidate_json).ok();
+            let summary = stored
+                .as_ref()
                 .map(|candidate| candidate.summary().to_string())
+                .unwrap_or_default();
+            // Derived on read rather than stored in a column: `candidate_json`
+            // is already selected here, so identity needs no schema change and
+            // cannot drift from the record it describes.
+            let content_identity = stored
+                .as_ref()
+                .map(CandidateLesson::content_identity)
                 .unwrap_or_default();
             keys.push(DedupKey {
                 id,
@@ -472,6 +506,7 @@ impl ReviewQueue {
                 canonical_hash: canonical_hash
                     .unwrap_or_else(|| crate::dedup::canonical_hash(&summary)),
                 summary,
+                content_identity,
             });
         }
         Ok(keys)
@@ -685,6 +720,11 @@ struct DedupKey {
     id: String,
     canonical_hash: String,
     summary: String,
+    /// The survivor's content identity, so a wording match can be told apart
+    /// from a genuine restatement. Empty when the stored row could not be
+    /// parsed, which never compares equal — a corrupt row is replaced by a
+    /// readable revision rather than silently kept.
+    content_identity: String,
 }
 
 struct EnqueueCandidateOutcome {
@@ -700,13 +740,10 @@ struct ProposalReceipt {
 
 /// The id of an existing pending candidate that `summary`/`hash` duplicates —
 /// an exact canonical match or a lexical near-duplicate — or `None` when novel.
-fn find_duplicate(pending: &[DedupKey], hash: &str, summary: &str) -> Option<String> {
-    pending
-        .iter()
-        .find(|key| {
-            key.canonical_hash == hash || crate::dedup::is_near_duplicate(&key.summary, summary)
-        })
-        .map(|key| key.id.clone())
+fn find_duplicate<'a>(pending: &'a [DedupKey], hash: &str, summary: &str) -> Option<&'a DedupKey> {
+    pending.iter().find(|key| {
+        key.canonical_hash == hash || crate::dedup::is_near_duplicate(&key.summary, summary)
+    })
 }
 
 fn parse_state(value: &str) -> ReviewState {
@@ -947,16 +984,17 @@ fn validate_length(field: &'static str, value: &str, max: usize) -> Result<(), R
     Ok(())
 }
 
+/// Whether an idempotency-key replay carries the same proposal it did the first
+/// time.
+///
+/// Compares content identity rather than a hand-listed field subset. The subset
+/// this replaces named nine fields and silently ignored the rest, so a proposal
+/// that differed only in a field nobody had added to the list replayed as
+/// identical. `content_identity` excludes `review_annotation`, which is written
+/// by review after the fact and is present on the stored side but not on the
+/// incoming one.
 fn same_proposal(existing: &CandidateLesson, candidate: &CandidateLesson) -> bool {
-    existing.summary() == candidate.summary()
-        && existing.rationale == candidate.rationale
-        && existing.category == candidate.category
-        && existing.confidence == candidate.confidence
-        && existing.evidence_text == candidate.evidence_text
-        && existing.related_files == candidate.related_files
-        && existing.related_entities == candidate.related_entities
-        && existing.suggested_destination == candidate.suggested_destination
-        && existing.source == candidate.source
+    existing.content_identity() == candidate.content_identity()
 }
 
 #[derive(Debug, Error)]

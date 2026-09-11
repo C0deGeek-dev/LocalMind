@@ -4,6 +4,136 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0045 — A constraint is asked for, never trusted, and capability is proven by refusal
+
+- **Date**: 2026-09-11
+- **Status**: accepted
+
+`ChatEndpoint` could ask for `json_object` and retried unconstrained on an HTTP
+error, but nothing recorded what became of the ask, so a caller could not tell a
+constrained reply from an unconstrained one. That matters because a local server
+can accept a constraint, ignore it, and answer 200: llama.cpp grammar
+enforcement goes silently inactive with thinking enabled, the server fails open
+when a schema grammar will not compile, and a schema using `$ref`/`$defs`
+quietly falls back to unconstrained JSON.
+
+`ChatConstraint` (`None`/`JsonObject`/`JsonSchema`) is what may be attempted;
+`ConstraintDisposition` reports what happened and has **no** `Enforced`
+variant, because nothing observable at that layer distinguishes an applied
+grammar from an ignored one. `JsonSchemaConstraint::new` refuses a schema
+containing `$ref`, `$defs` or `definitions` outright, so a constraint that is
+known to fail open cannot be built, let alone sent. `probe_capabilities`
+establishes schema support by sending a prompt that *invites* a violation and
+reporting support only when the reply conforms anyway — a request that succeeds
+is not evidence; a refusal to break the schema is.
+
+The two reasons for a second request are kept apart. A transport that rejects
+the constraint is retried without it for free. A reply that arrives and fails
+validation spends `RepairBudget`, which is exactly one pass. Collapsing them
+would let a server that rejects every constrained request exhaust a budget meant
+for malformed content. The capability contract decides whether to *attempt* a
+constraint; it never decides whether to validate. Validation runs on every reply
+on every path.
+
+## D-LM-0044 — Candidate identity is content-bound, and the queue tells a restatement from a revision
+
+- **Date**: 2026-09-11
+- **Status**: accepted
+- **Amends**: D-LM-0007
+
+The D-LM-0007 dedup ladder merges a pending duplicate by bumping `seen_count`.
+It keyed identity on summary text alone, and `enqueue_candidate` never merged or
+replaced `candidate_json`, so a lesson re-derived from a new evidence set, a new
+hindsight draft, or a different source revision — which routinely keeps the same
+sentence — collapsed into the stale row and the newer record was lost.
+`same_proposal` had the same defect from the other direction: it compared a
+fixed list of nine fields and silently ignored every field added after it was
+written.
+
+`CandidateLesson::content_identity` is a SHA-256 over the serialized candidate,
+excluding `revises` (lineage, not content) and `review_annotation` (written by
+review after the candidate exists). Derived from the serialization rather than a
+hand-listed subset, because a list has to be remembered when a field is added
+and that is precisely how the subset rotted. Adding a field shifts every
+identity once, which surfaces candidates as revised rather than losing them.
+
+The dedup ladder is unchanged; what follows a match is not. Equal identity is a
+restatement and bumps `seen_count` as before. Unequal identity is a revision:
+the row is replaced with the newer candidate, `revises` records the identity it
+superseded, and `seen_count` still bumps. The queue stays deduplicated — no
+second row — and the surviving row is the current one. Identity is derived when
+`candidate_json` is read, which it already was, so this needs no schema
+migration.
+
+## D-LM-0043 — Hindsight is optional candidate evidence, and its outcome is advisory
+
+- **Date**: 2026-09-11
+- **Status**: accepted
+
+`HindsightDraft` is an optional, versioned, serde-default field on
+`CandidateLesson`: intended and observed outcome, bounded causal hypotheses that
+cite facts by id, missed signals, intervention, counterfactual, applicability,
+invalidation, and a concise proposed lesson kept separate from the analysis that
+produced it. It carries no facts of its own — the candidate `evidence` list
+**is** the supplied fact set — so "a claim may cite only facts it was given" is
+checkable with no model and no network, and the shape a model fills in is the
+shape that is stored. Every field is bounded, which is how "store no
+unrestricted reasoning transcript" is enforced rather than asked for.
+
+`suggested_outcome` is advisory and nothing may be load-bearing on it. Measured
+over six frozen cases against two models at different capability levels: both
+produced a correct, correctly cited, high-confidence causal hypothesis and then
+manufactured a durable rule from a one-off, failing on the same two cases in the
+same direction, with zero invented ids and zero uncited claims in either. So an
+evidence-integrity check passes every failing draft cleanly, and the stronger
+model scored worse. Abstention is therefore a deterministic check applied after
+drafting, never a field the drafter fills in beside the lesson it just wrote.
+
+Nothing in review mode reads the field. A candidate carrying a full draft and
+one carrying none reach the same `apply_project` decision on the same inputs,
+and that equality is a test. The rejected alternative — gating every
+evidence-carrying candidate the way a direct agent proposal is gated
+(D-LM-0033) — would mean a candidate that auto-accepts today needs human review
+the moment evidence is attached, penalising the best-evidenced candidates and
+quietly revoking a setting the user chose.
+
+## D-LM-0042 — Evidence identity is content-addressed; a label-derived id is not an identity
+
+- **Date**: 2026-09-11
+- **Status**: accepted
+
+`EvidenceRef::new` sets `id: EvidenceId::new(label)` over a bare string newtype,
+so two facts sharing a label shared an id. Every staleness and citation
+guarantee downstream rested on that, including the rule that a model may select
+supplied ids but never mint one — which is worth nothing if two different
+observations resolve to the same id.
+
+`stable_evidence_id` is a SHA-256 over the evidence kind, the producing source,
+the locator, and the content fingerprint, truncated to 128 bits and prefixed
+`ev-`, following the `cgn-`/`cge-` shape the code graph already uses. The parts
+are length-framed, so no separator-bearing input can make two different part
+lists hash alike. The hash function deliberately differs from the FNV-1a used by
+the graph: `stable_node_id` justifies a non-cryptographic hash because the graph
+is derived data where a collision costs at worst a missed reindex. An evidence
+collision silently merges two facts, so that justification does not transfer.
+
+`EvidenceRef::new` is left alone rather than changed under its 60-plus callers:
+a reference a human reads does not need a verifiable identity, and churning
+every existing id would buy nothing. `EvidenceRef::identified` is the
+constructor for facts whose id carries weight, and it stores the producing
+source in metadata so the id can be recomputed from the record —
+`identity_is_intact` is what catches a rewritten observation or an id copied
+from another fact. `is_canonical_evidence_id` lets a caller that requires
+verifiable facts refuse a label-derived one: without it, a fact set mixing the
+two satisfies "every cited id was supplied" while remaining collidable.
+
+The identity inputs survive in `candidate_json`, which serializes the whole
+`EvidenceRef`. They do **not** survive promotion into accepted memory: the
+Markdown serializer writes `{id, kind, label, redacted, uri?}` and drops
+`content_hash` and `metadata`. Verifiable identity is therefore a review-time
+guarantee today. Carrying it across promotion is an additive on-disk change and
+is not made here.
+
 ## D-LM-0041 — LocalMind may lease an exact owned embedding server but never control it
 
 - **Date**: 2026-08-29

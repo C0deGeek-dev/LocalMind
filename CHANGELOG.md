@@ -5,6 +5,35 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Evidence references can now carry a verifiable identity** (D-LM-0042).
+  `EvidenceRef::identified` derives a content-addressed `ev-` id from the
+  evidence kind, producing source, locator and content fingerprint, and
+  `identity_is_intact` catches an observation rewritten after the fact or an id
+  copied from another record. `EvidenceRef::new` is unchanged and still
+  label-derived, for references that are read rather than cited. See
+  `docs/on-disk-contract.md`.
+- **Review candidates can carry evidence-linked hindsight** (D-LM-0043). A new
+  optional `hindsight` field on `CandidateLesson` records what was intended,
+  what happened, and bounded causal hypotheses that cite the candidate's own
+  evidence by id. Every field is bounded and no reasoning transcript is stored.
+  Its `suggested_outcome` is advisory: review-mode processing does not read the
+  field, and a candidate carrying a draft reaches the same automatic decision as
+  one without.
+- **A revised candidate no longer collapses into a stale pending row**
+  (D-LM-0044, amending D-LM-0007). Candidate identity is now content-bound, so
+  a lesson re-derived from new evidence — which routinely keeps the same
+  wording — replaces the pending row and records what it superseded in
+  `revises`, instead of merging into it and being discarded. Restatements still
+  merge and bump `seen_count` as before. No schema migration.
+- **Output constraints are attempted, never trusted** (D-LM-0045).
+  `ChatEndpoint::complete_constrained` reports whether a constraint was
+  requested or refused by the transport, with no way to claim it was enforced;
+  `probe_capabilities` establishes schema support by inviting a violation and
+  checking the reply conforms anyway, so a server that accepts a schema and
+  ignores it is not reported as capable. A schema using `$ref`/`$defs` is
+  refused at construction. The free retry after a transport refusal is kept
+  separate from the single bounded content-repair pass.
+
 ## v5.0.0 - 2026-08-30
 
 - Began a new public Git history under PolyForm Noncommercial 1.0.0. Versions

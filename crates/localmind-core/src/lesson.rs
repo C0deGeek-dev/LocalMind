@@ -1,4 +1,6 @@
-use crate::{ContractError, ContractResult, EvidenceRef, LessonId};
+use crate::{
+    ContractError, ContractResult, EvidenceRef, HindsightDraft, HindsightViolation, LessonId,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -42,6 +44,28 @@ pub struct CandidateLesson {
     /// still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The evidence-linked hindsight this candidate came out of, when one was
+    /// drafted. `None` for every candidate produced before the lab existed and
+    /// for every path that does not draft one — ordinary extraction and direct
+    /// proposal both stay first-class, so hindsight is never required to
+    /// review, accept, or promote a lesson.
+    ///
+    /// The draft cites facts by id out of [`CandidateLesson::evidence`]; it
+    /// carries none of its own. Nothing in review mode reads this field: a
+    /// candidate carrying a full draft and one carrying none must reach the
+    /// same automatic decision, so attaching evidence can never be the thing
+    /// that promotes a lesson.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hindsight: Option<HindsightDraft>,
+    /// The [`CandidateLesson::content_identity`] this candidate revises, when
+    /// it supersedes an earlier one. `None` for an original.
+    ///
+    /// Lineage is explicit because the alternative is inference from wording,
+    /// and wording is exactly what does not change when a lesson is re-derived
+    /// from new evidence. A reviewer looking at a revised row can see what it
+    /// replaced instead of guessing whether it is new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revises: Option<String>,
 }
 
 impl CandidateLesson {
@@ -70,6 +94,8 @@ impl CandidateLesson {
             evidence_text: None,
             requires_edit_before_promotion: false,
             source: None,
+            hindsight: None,
+            revises: None,
         }
     }
 
@@ -120,7 +146,86 @@ impl CandidateLesson {
     pub fn evidence(&self) -> &[EvidenceRef] {
         &self.evidence
     }
+
+    /// Attach the hindsight draft this candidate came out of.
+    #[must_use]
+    pub fn with_hindsight(mut self, hindsight: HindsightDraft) -> Self {
+        self.hindsight = Some(hindsight);
+        self
+    }
+
+    /// Check the attached hindsight against this candidate's own evidence.
+    ///
+    /// The candidate's `evidence` **is** the supplied fact set, which is what
+    /// makes "a claim may cite only facts it was given" checkable rather than
+    /// stated: a draft that cites an id this candidate does not carry is
+    /// rejected here, with no model and no network.
+    ///
+    /// A candidate with no draft is sound by definition — this validates the
+    /// hindsight contract, not lesson quality, and never judges whether a cited
+    /// claim is *true*.
+    ///
+    /// # Errors
+    /// [`HindsightViolation`] values describing each contract breach.
+    pub fn validate_hindsight(&self) -> Result<(), Vec<HindsightViolation>> {
+        match &self.hindsight {
+            Some(hindsight) => hindsight.validate(&self.evidence),
+            None => Ok(()),
+        }
+    }
+
+    /// Record that this candidate supersedes an earlier one, by that one's
+    /// [`CandidateLesson::content_identity`].
+    #[must_use]
+    pub fn revising(mut self, prior: impl Into<String>) -> Self {
+        self.revises = Some(prior.into());
+        self
+    }
+
+    /// This candidate's identity, over its content rather than its wording.
+    ///
+    /// Two candidates share an identity when they say the same thing *and* rest
+    /// on the same evidence, hindsight, provenance and routing. Re-derive a
+    /// lesson from a new evidence set and the sentence may be word for word
+    /// identical while the identity is not — which is the point. Summary text
+    /// alone cannot tell a restatement from a revision, so anything keyed on it
+    /// silently keeps the older record.
+    ///
+    /// Two fields are deliberately excluded. `revises` is lineage, not content:
+    /// including it would make a revision's identity depend on what it
+    /// replaced, so the same candidate re-derived along two paths would get two
+    /// identities. `review_annotation` is written *by* review after the
+    /// candidate exists, so including it would let annotating a row change what
+    /// the row is.
+    ///
+    /// Derived from the serialized form rather than a hand-listed field subset:
+    /// a list has to be remembered when a field is added, and the fixed subset
+    /// this replaces is precisely how a new field became invisible to identity.
+    /// Adding a field therefore shifts every identity once, which surfaces
+    /// candidates as revised rather than losing them.
+    #[must_use]
+    pub fn content_identity(&self) -> String {
+        let mut bare = self.clone();
+        bare.revises = None;
+        bare.review_annotation = None;
+
+        // `CandidateLesson` holds only serde-infallible types — `Confidence` is
+        // range-checked to a finite value on every constructor — so the
+        // fallback is unreachable rather than lossy, and it still varies with
+        // content.
+        let content = serde_json::to_string(&bare).unwrap_or_else(|_| format!("{bare:?}"));
+        let digest = crate::evidence::digest_parts(&[CANDIDATE_IDENTITY_SCHEME, &content]);
+
+        format!("{CANDIDATE_IDENTITY_PREFIX}{digest}")
+    }
 }
+
+/// Prefix on a candidate content identity.
+pub const CANDIDATE_IDENTITY_PREFIX: &str = "cnd-";
+
+/// Domain separator for candidate identity, so it can never collide with an
+/// evidence id over the same bytes.
+const CANDIDATE_IDENTITY_SCHEME: &str = "localmind.candidate.identity.v1";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ReviewAnnotation {

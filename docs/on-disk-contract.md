@@ -189,6 +189,36 @@ content fingerprint are recorded in `proposal_receipts`, allowing an exact retry
 to find the real surviving candidate even when pending dedup merged the first
 call; reusing a key with different proposal content is refused.
 
+A `CandidateLesson` also carries two optional `#[serde(default)]` fields written
+inside the same JSON blob, so neither needed a schema migration.
+
+`hindsight` holds the evidence-linked `HindsightDraft` a candidate came out of,
+when one was drafted: intended and observed outcome, bounded causal hypotheses
+citing the candidate's own `evidence` entries by id, missed signals,
+intervention, counterfactual prediction, applicability, preconditions,
+invalidation, a concise proposed lesson, and an **advisory** `suggested_outcome`.
+Absent for every candidate produced by ordinary extraction or direct proposal,
+which stay first-class review paths, and absent from the serialized form when
+`None`, so existing records gain no key. Nothing in review-mode processing reads
+it (D-LM-0043).
+
+`revises` holds the `content_identity` of the candidate this one superseded, and
+is absent for an original. Candidate identity is a SHA-256 over the serialized
+candidate excluding `revises` and `review_annotation`; it is derived when
+`candidate_json` is read rather than stored in a column. A pending duplicate
+with equal identity is a restatement and bumps `seen_count`; one with unequal
+identity is a revision and replaces the row (D-LM-0044).
+
+Evidence identity: an `EvidenceRef` minted by `EvidenceRef::identified` carries a
+content-addressed `ev-`-prefixed id derived from its kind, producing source,
+locator and `content_hash`, with the source kept in `metadata` so the id can be
+recomputed and verified from the record (D-LM-0042). Those inputs survive in
+`candidate_json`, which serializes the whole `EvidenceRef`. They do **not**
+survive promotion: the memory Markdown serializer writes
+`{id, kind, label, redacted, uri?}` and drops `content_hash` and `metadata`, so a
+promoted memory keeps the id but not the means to verify it. Verifiable evidence
+identity is a review-time guarantee.
+
 Only the redacted transcript is persisted. Redaction runs before any write
 (pattern table + entropy backstop; see `localmind-store/src/redaction.rs`
 module docs for the caught / not-caught guarantee).

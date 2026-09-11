@@ -3,6 +3,14 @@
 pub mod embedding_lease;
 
 use localmind_core::InferenceSettings;
+mod capability;
+
+pub use capability::{
+    ChatCapabilities, ChatConstraint, ConstrainedCompletion, ConstraintDisposition,
+    JsonSchemaConstraint, RepairBudget,
+};
+
+use capability::{ResponseFormatBody, PROBE_SCHEMA, PROBE_VIOLATION_PROMPT};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
@@ -127,7 +135,7 @@ impl ChatEndpoint {
     }
 
     pub fn complete(&self, messages: &[ChatMessage]) -> Result<ChatCompletion, InferenceError> {
-        self.complete_inner(messages, false)
+        self.complete_inner(messages, &ChatConstraint::None)
     }
 
     /// Like [`ChatEndpoint::complete`], but asks the server for a JSON object via
@@ -140,24 +148,95 @@ impl ChatEndpoint {
         &self,
         messages: &[ChatMessage],
     ) -> Result<ChatCompletion, InferenceError> {
-        match self.complete_inner(messages, true) {
-            Err(InferenceError::Http { .. }) => self.complete_inner(messages, false),
-            other => other,
+        self.complete_constrained(messages, &ChatConstraint::JsonObject)
+            .map(|constrained| constrained.completion)
+    }
+
+    /// Attempt `constraint`, and report what actually happened to it.
+    ///
+    /// A transport that rejects the constraint is retried once without it, and
+    /// the reply is reported as [`ConstraintDisposition::RefusedByTransport`].
+    /// That retry is **free**: it is not the bounded content-repair pass, which
+    /// exists for a reply that arrived and failed validation. Being unable to
+    /// *ask* for JSON says nothing about the model's ability to produce it, so
+    /// charging the repair budget for a refusal would let a server that rejects
+    /// every constrained request exhaust a budget meant for malformed content.
+    ///
+    /// A successful reply is never evidence the constraint was applied. Validate
+    /// it on every path.
+    ///
+    /// # Errors
+    /// [`InferenceError`] when both the constrained and unconstrained attempts
+    /// fail, or when the reply cannot be decoded.
+    pub fn complete_constrained(
+        &self,
+        messages: &[ChatMessage],
+        constraint: &ChatConstraint,
+    ) -> Result<ConstrainedCompletion, InferenceError> {
+        let requested = if matches!(constraint, ChatConstraint::None) {
+            ConstraintDisposition::NotRequested
+        } else {
+            ConstraintDisposition::Requested
+        };
+
+        match self.complete_inner(messages, constraint) {
+            Err(InferenceError::Http { .. }) if !matches!(constraint, ChatConstraint::None) => self
+                .complete_inner(messages, &ChatConstraint::None)
+                .map(|completion| ConstrainedCompletion {
+                    completion,
+                    disposition: ConstraintDisposition::RefusedByTransport,
+                }),
+            other => other.map(|completion| ConstrainedCompletion {
+                completion,
+                disposition: requested,
+            }),
+        }
+    }
+
+    /// Observe what this endpoint does with a constraint, rather than trusting
+    /// what it accepts.
+    ///
+    /// `json_object` support is a plain accept/reject. Schema support is not: a
+    /// server that takes the schema and ignores it answers exactly like one that
+    /// enforces it, so the probe sends a prompt that *invites* a violation and
+    /// only reports support when the reply conforms anyway. A request that
+    /// succeeds is not the evidence — a refusal to break the schema is.
+    ///
+    /// Two short requests, and any failure reads as "not supported", so an
+    /// unreachable endpoint degrades to the unconstrained path rather than
+    /// erroring.
+    #[must_use]
+    pub fn probe_capabilities(&self) -> ChatCapabilities {
+        let ask = [ChatMessage::user(PROBE_VIOLATION_PROMPT)];
+
+        let json_object = self
+            .complete_inner(&ask, &ChatConstraint::JsonObject)
+            .is_ok();
+
+        let json_schema_enforced = JsonSchemaConstraint::new("probe", PROBE_SCHEMA)
+            .ok()
+            .and_then(|schema| {
+                self.complete_inner(&ask, &ChatConstraint::JsonSchema(schema))
+                    .ok()
+            })
+            .is_some_and(|completion| capability::probe_reply_conforms(&completion.content));
+
+        ChatCapabilities {
+            json_object,
+            json_schema_enforced,
         }
     }
 
     fn complete_inner(
         &self,
         messages: &[ChatMessage],
-        json_object: bool,
+        constraint: &ChatConstraint,
     ) -> Result<ChatCompletion, InferenceError> {
         let request = ChatCompletionRequest {
             model: &self.model,
             messages,
             temperature: 0.0,
-            response_format: json_object.then_some(ResponseFormat {
-                kind: "json_object",
-            }),
+            response_format: constraint.response_format(),
         };
         let response = post_json(
             &format!("{}/v1/chat/completions", self.base_url),
@@ -311,13 +390,7 @@ struct ChatCompletionRequest<'a> {
     messages: &'a [ChatMessage],
     temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-struct ResponseFormat {
-    #[serde(rename = "type")]
-    kind: &'static str,
+    response_format: Option<ResponseFormatBody<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -566,6 +639,10 @@ pub enum InferenceError {
     DecodeResponse(serde_json::Error),
     #[error("inference response did not include content")]
     MissingContent,
+    #[error(
+        "a schema using {construct} cannot be enforced: a server that meets it falls back to          unconstrained JSON and still answers 200, so the constraint would be a guarantee in          name only. Inline the definition instead"
+    )]
+    UnenforceableSchema { construct: &'static str },
 }
 
 #[cfg(test)]
