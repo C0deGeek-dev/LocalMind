@@ -4,7 +4,7 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
-## D-LM-0045 — A constraint is asked for, never trusted, and capability is proven by refusal
+## D-LM-0047 — A constraint is asked for, never trusted, and capability is proven by refusal
 
 - **Date**: 2026-09-11
 - **Status**: accepted
@@ -35,7 +35,7 @@ for malformed content. The capability contract decides whether to *attempt* a
 constraint; it never decides whether to validate. Validation runs on every reply
 on every path.
 
-## D-LM-0044 — Candidate identity is content-bound, and the queue tells a restatement from a revision
+## D-LM-0046 — Candidate identity is content-bound, and the queue tells a restatement from a revision
 
 - **Date**: 2026-09-11
 - **Status**: accepted
@@ -65,7 +65,7 @@ second row — and the surviving row is the current one. Identity is derived whe
 `candidate_json` is read, which it already was, so this needs no schema
 migration.
 
-## D-LM-0043 — Hindsight is optional candidate evidence, and its outcome is advisory
+## D-LM-0045 — Hindsight is optional candidate evidence, and its outcome is advisory
 
 - **Date**: 2026-09-11
 - **Status**: accepted
@@ -97,7 +97,7 @@ evidence-carrying candidate the way a direct agent proposal is gated
 the moment evidence is attached, penalising the best-evidenced candidates and
 quietly revoking a setting the user chose.
 
-## D-LM-0042 — Evidence identity is content-addressed; a label-derived id is not an identity
+## D-LM-0044 — Evidence identity is content-addressed; a label-derived id is not an identity
 
 - **Date**: 2026-09-11
 - **Status**: accepted
@@ -133,6 +133,64 @@ Markdown serializer writes `{id, kind, label, redacted, uri?}` and drops
 `content_hash` and `metadata`. Verifiable identity is therefore a review-time
 guarantee today. Carrying it across promotion is an additive on-disk change and
 is not made here.
+
+## D-LM-0043 — Pending-queue dedup resolves in two levels and never auto-applies a merge or delete
+
+- **Date**: 2026-09-01
+- **Status**: accepted — not present in this repository
+
+> **Restored 2026-09-14.** This decision was made on 2026-09-01 together with its
+> implementation, but neither reached this repository. Its number was later reused here by
+> mistake for another decision; those records now start at D-LM-0044, and this entry is
+> back at its original number so every existing reference to it keeps its meaning. **The
+> behaviour below is not shipped by this repository.**
+
+Undifferentiated dedup review — every near-duplicate routed to a person with the same prompt —
+is replaced by a two-level decision. The candidate level is `Skip`, `Create` or `None`. Only when
+it is `None` does an existing-item level apply: `Merge` or `Delete`.
+
+A confident duplicate that does not conflict is skipped automatically through the previously
+unwired `ReviewAction::IgnoreSimilar` and closes `Rejected`; `ReviewModeReport.skipped` counts
+it, so `accepted` never includes a skip. A distinct candidate is `Create` and keeps its existing
+auto-accept path. A borderline, non-contradicting candidate stays `Pending` with a merge
+suggestion; a contradicting one stays `Pending` with a delete suggestion. `Merge` and `Delete`
+never apply automatically in any review mode (D-LM-0016). Manual-mode annotations are persisted.
+
+`ReviewAction::MergeIntoMemory` is bookkeeping only: it closes `Merged` exactly like `MergeInto`
+(D-LM-0038), never mutates or retires the target memory, and is never itself promotable. Giving
+it `Supersede`'s promotion mechanics was rejected, because `review merge` would then have a
+different blast radius depending on which table held a row for the id. Its target is recorded in
+a new `review_items.merge_memory_target` column (schema v13) rather than reusing
+`supersede_target`. `ReviewAction::DeleteExisting` records its target in
+`review_items.delete_existing_target` (schema v14) and in the `ReviewDecisionRecorded` audit
+metadata: the deletion happens after `decide()` returns, so a failure in between must still leave
+a retryable item naming the memory.
+
+## D-LM-0042 — An audit event that retires memory content keeps a bounded copy of it
+
+- **Date**: 2026-09-01
+- **Status**: accepted — not present in this repository
+
+> **Restored 2026-09-14.** This decision was made on 2026-09-01 together with its
+> implementation, but neither reached this repository. Its number was later reused here by
+> mistake for another decision; those records now start at D-LM-0044, and this entry is
+> back at its original number so every existing reference to it keeps its meaning. **The
+> behaviour below is not shipped by this repository.**
+
+`MemorySuperseded` and `MemoryDeleted` — the audit events that retire an existing memory's
+content — capture that memory's prior body as `before_body` in the existing free-form
+`audit_events.metadata_json`, so no schema change is needed. For a delete, the Markdown file and
+the `memory_index` row are gone afterwards, and the audit row can be the only surviving copy.
+`MergeInto` (D-LM-0038) was confirmed to be no second content-retiring path: it writes no audit
+row and never touches accepted memory.
+
+The snapshot is ellipsis-truncated beyond 16,384 characters, matching
+`review_queue.rs::PROPOSAL_BODY_MAX_CHARS`, the existing bound for text embedded in a review
+record, so a long-lived project's `audit_events` cannot grow without limit. This does not relax
+D-LM-0037's provenance-only rule for its ingest-side producers, which these events are not;
+D-LM-0029 already establishes content surviving in a review or audit record. The snapshot is
+readable where audit is already shown: the web UI's audit detail pretty-prints the metadata, and
+the CLI's `audit --metadata` prints it per row.
 
 ## D-LM-0041 — LocalMind may lease an exact owned embedding server but never control it
 
