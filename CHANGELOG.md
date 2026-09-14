@@ -33,6 +33,24 @@ Notable changes, newest first. Contract-relevant entries reference
   ignores it is not reported as capable. A schema using `$ref`/`$defs` is
   refused at construction. The free retry after a transport refusal is kept
   separate from the single bounded content-repair pass.
+- **Review candidates can carry lab results bound to their exact inputs**
+  (D-LM-0048). A new optional `experiments` field records what was tested
+  (`LessonAssignment`, with an independent frozen oracle), what the result is
+  bound to, and the verdict. Logic and Replay can only judge an assignment;
+  only an uplift run can call a lesson supported or contradicted, and only with
+  proven injection. A result whose candidate later changes is kept and reads as
+  stale rather than disappearing. Review-mode processing reads none of it: a
+  supported result cannot promote a lesson, and no result can block one.
+- **Promoted memory keeps the means to verify its evidence** (D-LM-0049). Memory
+  Markdown now carries each fact's `content_hash` and `source`, so a promoted
+  fact still verifies on this machine. Bundle export redacts `source` too, and a
+  redacted export is not claimed to re-verify elsewhere. Existing files parse
+  unchanged. See `docs/on-disk-contract.md`.
+- **Lab output has a retention bound that cannot reach real sessions**
+  (D-LM-0050). Lab run logs and the sessions machine-generated trials create are
+  removable after 30 days, planned by location: only entries strictly inside the
+  lab's own staging root qualify, whatever their age. Your own sessions are never
+  eligible.
 
 ## v5.0.0 - 2026-08-30
 

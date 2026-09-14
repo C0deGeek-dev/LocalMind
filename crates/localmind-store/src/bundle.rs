@@ -219,6 +219,17 @@ impl MemoryBundleExporter {
                 if let Some(uri) = &mut evidence.uri {
                     redact_in_place(&redactor, uri, &mut entry_redactions);
                 }
+                // `source` names the producing context and travels with the
+                // Markdown, so it is redacted like the other free-text fields. A
+                // redaction here, or in `uri`, changes an identity input: the
+                // receiving machine gets the id but cannot re-verify it, which is
+                // the documented limit rather than a defect.
+                if let Some(source) = evidence
+                    .metadata
+                    .get_mut(localmind_core::EVIDENCE_SOURCE_KEY)
+                {
+                    redact_in_place(&redactor, source, &mut entry_redactions);
+                }
             }
             if entry_redactions > 0 {
                 scan.entries_with_redactions += 1;

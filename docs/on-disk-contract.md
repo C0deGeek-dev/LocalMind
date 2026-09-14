@@ -213,11 +213,29 @@ Evidence identity: an `EvidenceRef` minted by `EvidenceRef::identified` carries 
 content-addressed `ev-`-prefixed id derived from its kind, producing source,
 locator and `content_hash`, with the source kept in `metadata` so the id can be
 recomputed and verified from the record (D-LM-0044). Those inputs survive in
-`candidate_json`, which serializes the whole `EvidenceRef`. They do **not**
-survive promotion: the memory Markdown serializer writes
-`{id, kind, label, redacted, uri?}` and drops `content_hash` and `metadata`, so a
-promoted memory keeps the id but not the means to verify it. Verifiable evidence
-identity is a review-time guarantee.
+`candidate_json`, which serializes the whole `EvidenceRef`, and through promotion:
+the memory Markdown writes `content_hash` and `source` alongside the other
+evidence fields (D-LM-0049). Only those two leave `metadata`, because the rest of
+that map is open and bundles are built from the Markdown. The guarantee is
+**local**: bundle export redacts `label`, `uri` and `source`, and a redaction in an
+identity input means the receiving machine gets the id without the means to
+re-verify it.
+
+A `CandidateLesson` also carries an optional `experiments` list (`#[serde(default)]`,
+omitted when empty) of `ExperimentEvidence` records: tier, reproducible
+`inputs`, the executed `LessonAssignment`, a `LabVerdict` with reason codes,
+injection proof, an `ImportedReceipt` stored as schema, digest and payload, per-arm
+records, provenance and limitations (D-LM-0048). Results are excluded from
+candidate `content_identity`. A pending revision keeps the superseded version's
+results, which then validate as stale; a re-submission carrying a new result
+keeps it. Bulky output is referenced by `LogRef` — locator, content hash, size, a
+bounded summary, capture time — and removable after 30 days from inside the lab's
+own staging root only; an expired log never invalidates its verdict (D-LM-0050).
+
+An older binary reads a record carrying `hindsight`, `revises` or `experiments`,
+because unknown fields are ignored. If it **rewrites** that row — an edit, or
+`replace_candidate` — those fields are dropped. The summary and every field that
+binary knows survive. This is pinned by a fixture rather than prevented.
 
 Only the redacted transcript is persisted. Redaction runs before any write
 (pattern table + entropy backstop; see `localmind-store/src/redaction.rs`
@@ -334,7 +352,7 @@ matter between `---` fences, then the body.
 | `origin_os`, `origin_arch` | when stamped | the machine that wrote a *syncing* memory (`std::env::consts`). Stamped best-effort at write time; a machine-local memory is never stamped |
 | `origin_device` | when non-empty | the origin machine's device label (from `[sync] device_label` or a hostname) |
 | `origin_toolchain` | when set | reserved optional GPU/toolchain summary of the origin machine |
-| `evidence` | when non-empty | list of `{id, kind, label, redacted, uri?}` |
+| `evidence` | when non-empty | list of `{id, kind, label, redacted, uri?, content_hash?, source?}`. The last two carry evidence identity through promotion (D-LM-0049); absent in files written before them, which parse unchanged |
 
 The `sync`/`origin_*` fields are additive and forward-compatible: a reader that
 predates them skips unknown keys, and a memory file written without them parses
@@ -429,8 +447,8 @@ Shape (`format_version` **1**):
 
 - **Accepted-only.** Only `status = active` memory is exported; the selected
   scope (`project`, `global`, or `both`) filters which entries are included.
-- **Redacted on export.** Each entry's body and evidence labels/URIs are run
-  through the same `Redactor` again (defense in depth on top of capture-time
+- **Redacted on export.** Each entry's body and evidence labels, URIs and
+  `source` are run through the same `Redactor` again (defense in depth on top of capture-time
   redaction); `metadata.redaction_count` and the returned `SecretScanReport` are
   the seam a caller uses to require an explicit confirm before sharing.
 - **Deterministic + content-addressable.** Entries are ordered by id and the

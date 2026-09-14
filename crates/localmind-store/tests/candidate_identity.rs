@@ -206,9 +206,13 @@ fn attaching_hindsight_changes_no_automatic_review_decision() {
         )
     };
 
+    let bare = outcome(false);
+    // Guard against a vacuous pass: the comparison only means something if the
+    // bare candidate is actually auto-accepted.
+    assert_eq!(bare.1, 1, "the bare candidate must auto-accept");
     assert_eq!(
         outcome(true),
-        outcome(false),
+        bare,
         "evidence may inform a reviewer; it may never be what decides"
     );
 }

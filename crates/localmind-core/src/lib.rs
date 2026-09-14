@@ -9,6 +9,7 @@ mod audit;
 mod context;
 mod error;
 mod evidence;
+mod experiment;
 mod graph;
 mod hindsight;
 mod inference;
@@ -29,6 +30,13 @@ pub use error::{ContractError, ContractResult};
 pub use evidence::{
     is_canonical_evidence_id, stable_evidence_id, EvidenceKind, EvidenceRef,
     EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX, EVIDENCE_SOURCE_KEY,
+};
+pub use experiment::{
+    ArmRecord, EvidenceTier, ExperimentEvidence, ExperimentInputs, ExperimentProvenance,
+    ExperimentViolation, FixtureRef, ImportedReceipt, InjectionMode, InjectionProof, LabVerdict,
+    LessonAssignment, LogRef, OracleOrigin, OracleRef, Sensitivity, VerdictReason, VerifierRef,
+    ASSIGNMENT_IDENTITY_PREFIX, EXPERIMENT_EVIDENCE_VERSION, EXPERIMENT_IDENTITY_PREFIX,
+    LAB_LOG_RETENTION_DAYS, LESSON_ASSIGNMENT_VERSION, MAX_OBSERVATIONS, MAX_OBSERVATION_CHARS,
 };
 pub use graph::{
     content_fingerprint, stable_edge_id, stable_node_id, EdgeDerivation, EdgeKind, GraphEdge,

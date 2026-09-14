@@ -350,14 +350,33 @@ impl ReviewQueue {
             // is for. It still merges rather than inserting a second row — the
             // queue stays deduplicated — but the row now holds the revision and
             // names what it replaced.
+            let item_id = ReviewItemId::new(survivor_id.as_str());
+            let stored = self.get(&item_id)?.map(|item| item.candidate);
             if !restatement {
-                let revised = candidate
+                let mut revised = candidate
                     .clone()
                     .revising(survivor.content_identity.clone());
-                let item_id = ReviewItemId::new(survivor_id.as_str());
+                // Results about the superseded version come along, still bound
+                // to the identity they tested. They are stale now and validation
+                // says so; keeping them visible is how a reviewer learns a rerun
+                // is owed, where dropping them would erase that the lesson was
+                // ever tested.
+                if let Some(stored) = &stored {
+                    merge_experiments(&mut revised, &stored.experiments);
+                }
                 self.replace_candidate(&item_id, &revised)?;
                 if let Some(key) = pending.iter_mut().find(|key| key.id == survivor_id) {
                     key.content_identity = content_identity;
+                }
+            } else if let Some(mut stored) = stored {
+                // Results are not part of identity, so re-submitting the same
+                // candidate with a new result attached is a restatement. Without
+                // this, the row would keep its old copy and the new result would
+                // be discarded on the way in.
+                let before = stored.experiments.len();
+                merge_experiments(&mut stored, &candidate.experiments);
+                if stored.experiments.len() != before {
+                    self.replace_candidate(&item_id, &stored)?;
                 }
             }
 
@@ -982,6 +1001,20 @@ fn validate_length(field: &'static str, value: &str, max: usize) -> Result<(), R
         return Err(ReviewQueueError::ProposalTooLarge { field, max });
     }
     Ok(())
+}
+
+/// Append the results `candidate` does not already hold, in order. An exact
+/// duplicate is skipped; two results that disagree are both kept, because a
+/// rerun that reached a different verdict is information, not noise.
+fn merge_experiments(
+    candidate: &mut CandidateLesson,
+    incoming: &[localmind_core::ExperimentEvidence],
+) {
+    for experiment in incoming {
+        if !candidate.experiments.contains(experiment) {
+            candidate.experiments.push(experiment.clone());
+        }
+    }
 }
 
 /// Whether an idempotency-key replay carries the same proposal it did the first

@@ -17,6 +17,7 @@ mod extraction;
 mod freshness;
 mod graph_store;
 mod import;
+mod lab_retention;
 mod language;
 mod markdown;
 mod memory_persistence;
@@ -74,6 +75,7 @@ pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };
+pub use lab_retention::{plan_lab_sweep, LabSweepPlan};
 pub use language::{
     detect_workspace_language, language_for_extension, lesson_language, resolve_memory_language,
 };

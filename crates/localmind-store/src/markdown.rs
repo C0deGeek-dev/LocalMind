@@ -48,7 +48,7 @@ impl MarkdownMemoryFormat {
     /// the full structured entry (body, scope, category, confidence, edges,
     /// evidence, tags, related files/entities) without a second serialization of
     /// the lesson. Round-trips losslessly over every field the serializer emits;
-    /// fields the serializer never writes (an evidence `content_hash`/`metadata`)
+    /// fields the serializer never writes (evidence `metadata` beyond `source`)
     /// come back empty, and `status` is always `Active` (only active memory is
     /// serialized to a file).
     ///
@@ -248,8 +248,9 @@ fn collect_id_list(lines: &[&str], cursor: &mut usize, out: &mut Vec<MemoryEntry
 }
 
 /// Collect the evidence block: a sequence of `- id:` items each followed by
-/// indented `kind`/`label`/`redacted`/`uri` fields. Advances `cursor` past the
-/// block.
+/// indented `kind`/`label`/`redacted`/`uri`/`content_hash`/`source` fields.
+/// Advances `cursor` past the block. The last two are optional, so a file
+/// written before they existed parses exactly as it always did.
 fn collect_evidence(lines: &[&str], cursor: &mut usize, out: &mut Vec<EvidenceRef>) {
     while *cursor + 1 < lines.len() {
         let next = lines[*cursor + 1];
@@ -266,6 +267,8 @@ fn collect_evidence(lines: &[&str], cursor: &mut usize, out: &mut Vec<EvidenceRe
         let mut label = String::new();
         let mut redacted = false;
         let mut uri: Option<String> = None;
+        let mut content_hash: Option<String> = None;
+        let mut source: Option<String> = None;
         while *cursor + 1 < lines.len() {
             let field_line = lines[*cursor + 1];
             // An evidence field is indented deeper than the `- id:` line and is
@@ -279,6 +282,8 @@ fn collect_evidence(lines: &[&str], cursor: &mut usize, out: &mut Vec<EvidenceRe
                 "label" => label = unescape_yaml_scalar(field_value),
                 "redacted" => redacted = field_value.trim() == "true",
                 "uri" => uri = Some(unescape_yaml_scalar(field_value)),
+                "content_hash" => content_hash = Some(unescape_yaml_scalar(field_value)),
+                "source" => source = Some(unescape_yaml_scalar(field_value)),
                 _ => {}
             }
             *cursor += 1;
@@ -293,6 +298,14 @@ fn collect_evidence(lines: &[&str], cursor: &mut usize, out: &mut Vec<EvidenceRe
         }
         if let Some(uri) = uri {
             reference = reference.with_uri(uri);
+        }
+        if let Some(content_hash) = content_hash {
+            reference = reference.with_content_hash(content_hash);
+        }
+        if let Some(source) = source {
+            reference
+                .metadata
+                .insert(localmind_core::EVIDENCE_SOURCE_KEY.to_string(), source);
         }
         out.push(reference);
     }
@@ -487,6 +500,18 @@ fn push_evidence(output: &mut String, evidence: &[EvidenceRef]) {
         output.push_str(&format!("    redacted: {}\n", item.redacted));
         if let Some(uri) = &item.uri {
             output.push_str(&format!("    uri: {}\n", escape_yaml_scalar(uri)));
+        }
+        // The two identity inputs `uri` does not already carry, so a promoted
+        // fact keeps the means to verify its id. Only these two: `metadata` is an
+        // open map, and anything else in it would reach a bundle unredacted.
+        if let Some(content_hash) = &item.content_hash {
+            output.push_str(&format!(
+                "    content_hash: {}\n",
+                escape_yaml_scalar(content_hash)
+            ));
+        }
+        if let Some(source) = item.source() {
+            output.push_str(&format!("    source: {}\n", escape_yaml_scalar(source)));
         }
     }
 }

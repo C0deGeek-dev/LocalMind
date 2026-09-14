@@ -4,6 +4,113 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0050 — Lab output is removed after 30 days, and only from inside the lab's own root
+
+- **Date**: 2026-09-14
+- **Status**: accepted
+
+Lab runs produce bulky output — check logs, per-trial output, verifier output —
+and machine-generated uplift trials create sessions of their own. All of it may
+be removed after `LAB_LOG_RETENTION_DAYS` (30). The user's own sessions never
+are; they stay kept as they are today.
+
+The age rule is the easy part. A trial session and a real session are the same
+kind of file, so a rule that selects by name, kind, or age alone is one wrong path
+away from deleting real history. `plan_lab_sweep` therefore decides eligibility by
+**location**: an entry is removable only if it sits strictly inside the staging
+root the lab created. Anything outside that root, a sibling that merely shares its
+prefix, the root itself, or a path carrying `.`/`..` components is refused and
+reported regardless of age; an unusable root refuses everything. It reuses
+`plan_retention` for the age split and, like it, plans rather than deletes. The
+runner that produced the output acts on the plan and must resolve symlinks and
+junctions first, because a lexical plan cannot see where a link points.
+
+Evidence outlives its logs. `ExperimentEvidence` keeps each log's digest and a
+bounded summary through `LogRef`, `LogRef::is_expired` reports a log past the
+bound, and an expired log never invalidates the verdict that cites it. A capture
+time in the future reads as live: expiring something that cannot be dated is the
+wrong direction for an irreversible action.
+
+`plan_lab_sweep` has no production caller yet. The runners that produce lab
+output land later in the same plan, and the sweep is wired there.
+
+## D-LM-0049 — Evidence identity survives promotion on this machine, and says so
+
+- **Date**: 2026-09-14
+- **Status**: accepted
+- **Amends**: D-LM-0044
+
+D-LM-0044 recorded that verifiable evidence identity was a review-time guarantee,
+because the memory Markdown wrote `{id, kind, label, redacted, uri?}` and dropped
+`content_hash` and `metadata`. A promoted fact kept its id and lost the means to
+check it.
+
+The Markdown evidence block now also writes `content_hash` and `source` when they
+are present, and reads them back. Both are optional, so every file written before
+parses exactly as it did. Only those two: `metadata` is an open map, portable
+bundles are built from the Markdown, and bundle export re-redacts only free-text
+fields it knows about. Carrying the whole map would have sent anything a caller
+put there off the machine unredacted. Export now redacts `source` alongside
+`label` and `uri`.
+
+The guarantee is stated as **local**. Redaction can change `uri` or `source`, and
+both are identity inputs, so a redacted export arrives with its id intact and
+without the means to re-verify it. That is the price of redacting identity
+inputs, recorded rather than papered over.
+
+## D-LM-0048 — Experiment evidence binds a result to its inputs, and no tier may overclaim
+
+- **Date**: 2026-09-14
+- **Status**: accepted
+
+`CandidateLesson.experiments` holds lab results about a candidate: optional,
+serde-default, and absent when empty, inside `candidate_json`, so no schema
+migration. Each `ExperimentEvidence` separates three things that are easy to
+conflate. `LessonAssignment` is what was tested — task, an independent frozen
+oracle, fixture, allowed tools, verifier, cleanup, sensitivity — with an identity
+fixed before any compared run. `ExperimentInputs` is what the result is bound
+to: candidate identity, assignment identity, source revision, model, runtime,
+settings, seed, budgets, tool versions, validation profile, verifier.
+Everything else — attempts, observations, timings, log references, provenance —
+varies between honest reruns and is deliberately not identity, so a rerun is
+comparable instead of "different".
+
+Results are excluded from `CandidateLesson::content_identity`, extending
+D-LM-0046's exclusions. Were they included, recording a result would change the
+identity it is bound to and every result would be stale on arrival. A result
+whose candidate changed afterwards is stale; the dedup path keeps it on a
+revised row, visibly stale, rather than erasing that the lesson was ever tested,
+and a re-submission carrying a new result keeps the result instead of dropping it
+as a restatement.
+
+`LabVerdict` splits into two families. `Valid`, `Invalid` and `NotExecutable`
+judge an assignment and are all Logic and Replay may emit, because a replayed
+trajectory makes the same choices with or without the lesson. `Supported`,
+`Contradicted` and `Inconclusive` judge a lesson and only an uplift run can reach
+them; `InvalidExperiment` is reachable from any tier. An efficacy verdict needs a
+passed injection assertion, and a failed assertion must be `InvalidExperiment`,
+never "no effect". An uplift verdict needs its imported receipt, stored as
+`ImportedReceipt` — schema, digest, payload — so LocalMind verifies the bytes
+without re-declaring a structure its producer owns. The receipt's arm identity
+type lives in the eval contract crate shared by that producer and its consumer,
+not here.
+
+This is not `localpilot-verify`'s `Verdict{Verified, Unverified, Failed}`. That
+answers whether one tool call's postcondition held; these answer whether an
+experiment is sound and whether a lesson helped, under tier restrictions that
+verdict has no notion of. LocalMind also cannot depend on LocalPilot.
+
+Validation is structural and never judges a conclusion: stale candidate,
+assignment or fixture changed after freezing, mutable oracle, oracle derived
+from the lesson it judges, verdict not permitted for its tier, missing reason
+code, missing injection proof, tampered receipt, and bounds. Review-mode
+processing reads none of it: a candidate carrying every verdict, `Supported`
+included, reaches the same trusted and automatic decisions as one carrying none,
+and that equality is a test with a guard against passing vacuously.
+
+These types have no production caller yet. The lab tiers that produce results
+land later in the same plan.
+
 ## D-LM-0047 — A constraint is asked for, never trusted, and capability is proven by refusal
 
 - **Date**: 2026-09-11

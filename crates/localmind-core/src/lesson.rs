@@ -1,5 +1,6 @@
 use crate::{
-    ContractError, ContractResult, EvidenceRef, HindsightDraft, HindsightViolation, LessonId,
+    ContractError, ContractResult, EvidenceRef, ExperimentEvidence, HindsightDraft,
+    HindsightViolation, LessonId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,17 @@ pub struct CandidateLesson {
     /// replaced instead of guessing whether it is new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revises: Option<String>,
+    /// Lab results about this candidate. Empty for every candidate that was
+    /// never tested, which is most of them, and absent from the serialized form
+    /// when empty.
+    ///
+    /// Evidence *about* the candidate, not part of it: excluded from
+    /// [`CandidateLesson::content_identity`]. Were it included, attaching a
+    /// result would change the identity that result is bound to, and every
+    /// result would be stale the moment it was recorded. Nothing in review mode
+    /// reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub experiments: Vec<ExperimentEvidence>,
 }
 
 impl CandidateLesson {
@@ -96,6 +108,7 @@ impl CandidateLesson {
             source: None,
             hindsight: None,
             revises: None,
+            experiments: Vec::new(),
         }
     }
 
@@ -174,6 +187,13 @@ impl CandidateLesson {
         }
     }
 
+    /// Attach a lab result about this candidate.
+    #[must_use]
+    pub fn with_experiment(mut self, experiment: ExperimentEvidence) -> Self {
+        self.experiments.push(experiment);
+        self
+    }
+
     /// Record that this candidate supersedes an earlier one, by that one's
     /// [`CandidateLesson::content_identity`].
     #[must_use]
@@ -191,12 +211,14 @@ impl CandidateLesson {
     /// alone cannot tell a restatement from a revision, so anything keyed on it
     /// silently keeps the older record.
     ///
-    /// Two fields are deliberately excluded. `revises` is lineage, not content:
+    /// Three fields are deliberately excluded. `revises` is lineage, not content:
     /// including it would make a revision's identity depend on what it
     /// replaced, so the same candidate re-derived along two paths would get two
     /// identities. `review_annotation` is written *by* review after the
     /// candidate exists, so including it would let annotating a row change what
-    /// the row is.
+    /// the row is. `experiments` is evidence about the candidate: including it
+    /// would make attaching a result change the identity that result is bound
+    /// to, so every result would be stale on arrival.
     ///
     /// Derived from the serialized form rather than a hand-listed field subset:
     /// a list has to be remembered when a field is added, and the fixed subset
@@ -208,6 +230,7 @@ impl CandidateLesson {
         let mut bare = self.clone();
         bare.revises = None;
         bare.review_annotation = None;
+        bare.experiments = Vec::new();
 
         // `CandidateLesson` holds only serde-infallible types — `Confidence` is
         // range-checked to a finite value on every constructor — so the
