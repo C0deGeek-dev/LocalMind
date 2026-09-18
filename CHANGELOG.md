@@ -51,6 +51,52 @@ Notable changes, newest first. Contract-relevant entries reference
   removable after 30 days, planned by location: only entries strictly inside the
   lab's own staging root qualify, whatever their age. Your own sessions are never
   eligible.
+- Accepted/candidate memory Markdown files are now written atomically (a
+  same-directory temp file plus `fs::rename`): the final path is always
+  either fully written or left exactly as it was, never observed truncated
+  or partial on any interruption. See `docs/on-disk-contract.md`.
+
+- New `localmind reconcile-orphans` command (and `MemoryPersistence::
+  orphan_sweep_plan`/`orphan_sweep_apply`) finds and, with `--apply`,
+  repairs a memory Markdown file that was fully written but never indexed —
+  the crash window between the atomic file write above and the SQLite
+  transaction that indexes it. Report-only by default; a file whose id
+  already carries a retirement (supersede/delete) audit event is reported
+  separately and never reindexed. See `docs/on-disk-contract.md`.
+
+- Superseding or deleting a memory now captures its prior wording: the
+  `MemorySuperseded`/`MemoryDeleted` audit row's metadata gains a
+  size-capped `before_body` snapshot (16,384 chars, ellipsis-truncated
+  beyond that), read before the mutation, so the original text survives
+  even for a non-git-tracked store — notably the machine-wide global store,
+  and especially a delete, which now leaves this audit row as the only
+  surviving copy. Visible via the new `localmind audit --metadata` flag and
+  the web UI's audit detail view (now pretty-printed). See
+  `docs/decisions.md` D-LM-0042.
+
+- A near-duplicate review candidate no longer routes to one undifferentiated
+  "similar, review it" state. A confident duplicate of accepted memory now
+  auto-skips in trusted/automatic mode (`ReviewAction::IgnoreSimilar`,
+  previously declared but never wired) instead of sitting pending
+  indefinitely — unless it also contradicts the memory it duplicates, in
+  which case it stays pending for a human even when auto-supersede itself
+  declines to fire (below threshold, non-`General` quality, no clear
+  target); a borderline match still always stays pending, now annotated
+  with a merge-or-delete suggestion — including in the default `manual`
+  review mode, which now persists that annotation like every other mode
+  instead of only computing it in memory. `review merge` now also accepts
+  an already-accepted memory as its target, not only another pending item
+  — bookkeeping only (a new `merge_memory_target` column, schema v13): the
+  item closes `Merged` exactly like merging into a pending item, never
+  mutating the target and never itself promoted; a new
+  `review delete-existing` rejects a candidate and removes the existing
+  memory it resembles, without promoting the candidate as a replacement —
+  its target is durably recorded too (a new `delete_existing_target`
+  column, schema v14, and the `ReviewDecisionRecorded` audit row's
+  metadata), written before the actual deletion so the decision survives a
+  crash between the two. Neither merge nor delete ever auto-applies
+  (D-LM-0016). See `docs/decisions.md` D-LM-0043 and
+  `docs/on-disk-contract.md`.
 
 ## v5.0.0 - 2026-08-30
 

@@ -367,15 +367,15 @@ database rows below are derived and rebuildable from it.
 ## Database schema: `.localmind/localmind.sqlite`
 
 Database schema lifecycle is versioned with `PRAGMA user_version`
-(currently **12**); every component steps the schema on open and refuses
+(currently **14**); every component steps the schema on open and refuses
 databases newer than it understands. Tables:
 
 | Table | Owner concern | Notes |
 |---|---|---|
 | `schema_migrations(version, applied_at)` | human-readable baseline marker | records only the baseline (`version = 1`); the stepper does **not** append a row per applied step, so `PRAGMA user_version` (above) is the authoritative schema version — read that, not this table, to gate on the schema |
-| `review_items(id, session_id, candidate_json, state, reviewer_action, reviewer, note, replacement_summary, created_at, updated_at, canonical_hash, seen_count, supersede_target, merge_target)` | review queue | `candidate_json` is a serialized `CandidateLesson`; `merge_target` (schema v12) durably identifies the `ReviewItemId` selected by a merge decision and is NULL for historic `merge` rows |
+| `review_items(id, session_id, candidate_json, state, reviewer_action, reviewer, note, replacement_summary, created_at, updated_at, canonical_hash, seen_count, supersede_target, merge_target, merge_memory_target, delete_existing_target)` | review queue | `candidate_json` is a serialized `CandidateLesson`; `merge_target` (schema v12) durably identifies the `ReviewItemId` selected by a `MergeInto` decision and is NULL otherwise; `supersede_target` (a `MemoryEntryId`) is set only by `ReviewAction::Supersede`, which promotes the candidate as the target's replacement (retire-and-replace); `merge_memory_target` (a `MemoryEntryId`, schema v13) is set only by `ReviewAction::MergeIntoMemory` — the accepted-memory counterpart to `MergeInto`, not to `Supersede`: bookkeeping only, it never mutates the target and the item is never promoted (D-LM-0043); `delete_existing_target` (a `MemoryEntryId`, schema v14) is set only by `ReviewAction::DeleteExisting`, durable the moment `decide()` returns since the actual `delete_memory()` call is a separate, later step — nullable for every other decision and for historic `delete_existing` rows that predate this column; also carried by the `ReviewDecisionRecorded` audit row's `metadata_json` (`audit_events`, below), written before that later `delete_memory()` step, for the same durability reason |
 | `proposal_receipts(proposal_id, fingerprint, survivor_id, created_at)` | retry-safe agent proposal routing (schema v11) | SHA-256-derived ids/fingerprints only; maps an exact retry to the surviving `review_items` row after pending dedup without storing raw keys or proposal text |
-| `audit_events(id, kind, actor, subject, metadata_json, happened_at)` | audit log | `metadata_json` is always valid JSON (serde-built) |
+| `audit_events(id, kind, actor, subject, metadata_json, happened_at)` | audit log | `metadata_json` is always valid JSON (serde-built). A `MemorySuperseded` or `MemoryDeleted` row's metadata additionally carries `before_body`: the memory's body as it stood immediately before the mutation (the status flip; the file removal and index delete), so the original wording survives even for a non-git-tracked store (notably the machine-wide `~/.localmind/memory` global store). For a supersede the target's Markdown file and `memory_index` row are kept, reversibly, so this is only the *convenient* record of its prior wording; for a delete, the file and row are actually removed, so this audit row becomes the *only* surviving record. Capped at 16,384 characters (ellipsis-truncated beyond that, matching the existing `PROPOSAL_BODY_MAX_CHARS` size discipline) so a long-lived project's audit trail doesn't grow unboundedly. See `docs/decisions.md` D-LM-0042. |
 | `memory_index(memory_id, path, scope, category, body, source_session, status, created_at, stale_candidate, epistemic_status, contradicted, confidence, language, hit_count, last_used_at)` | search index over accepted memory | `status = 'active'` rows are live; `stale_candidate = 1` flags change-aware staleness; `epistemic_status` ∈ {observation, hypothesis, fact, decision, procedure} (derived from category); `contradicted = 1` when in a `contradicts` relationship; `confidence` mirrors the entry's; `language` is the single programming language the lesson is about (NULL = general/cross-cutting, eligible for every task), used to filter off-language lessons in retrieval; `hit_count` (default 0) and `last_used_at` (NULL = never) are the **runtime usage signal** — bumped post-turn when a memory is injected, used by the freshness pass to surface never-retrieved dead weight. Unlike the other columns these two are **not** rebuildable from the Markdown source of truth: a reindex resets them to zero-usage (the same state as a pre-v8 upgrade), which is acceptable for a best-effort signal; `origin_device` (schema v10, NULL when not synced) is the label of the machine that wrote a synced memory, derived from the Markdown origin stamp, so injection can down-weight a foreign-machine lesson without dropping it |
 | `memory_fts(memory_id UNINDEXED, body)` | FTS5 index | queried with `MATCH` + bm25 |
 | `memory_relationships(memory_id, relation_kind, target)` | typed relations | kinds: `category`, `session`, `file`, `entity`, `contradicts` |
@@ -403,7 +403,37 @@ of replaying non-idempotent schema changes.
 Write-consistency contract: multi-statement writes (promote, persist,
 delete) commit atomically; the Markdown file write precedes the indexing
 transaction, and deletion removes the file before the database rows so an
-interrupted delete heals on retry.
+interrupted delete heals on retry. **The Markdown file write itself is
+atomic**: it lands via a same-directory temp file plus `fs::rename`
+(`paths::atomic_write`, called by `MemoryPathResolver::write_memory_file`), so
+a reader may assume any `.md` file under a memory root is always either fully
+written or entirely absent/unchanged from its previous content — never
+observed truncated or partial, on any interruption. This closes only the
+*file-write* half of the
+crash window: a process can still crash after the file lands and before the
+indexing transaction commits, leaving a fully-written file with no
+`memory_index` row. That file is an *orphan*, not a partial write, and is repaired by a
+reconciliation sweep, never by retrying the write.
+
+**Orphan reconciliation.** `MemoryPersistence::orphan_sweep_plan` (CLI:
+`localmind reconcile-orphans`) scans every scope directory `allowed_scopes`
+enables under the project memory root (`project`, and `session`/`skill`/
+`research` where configured) plus the `global` directory of the machine-wide
+store when one is open, for a `.md` file with no matching `memory_index`
+row — the signature of the write-then-index gap above. Like `backfill.rs`'s vector
+sweep, the set is defined by a query, not a cursor, so it is idempotent and
+resumable with no persisted progress state. Report-only by default;
+`--apply` reindexes a confirmed orphan by reusing the same
+`index_memory_with` the promote/persist paths use, and records an
+`OrphanReconciled` audit row (subject: the memory id; metadata: its path).
+An orphan whose id already carries a `MemorySuperseded`/`MemoryDeleted`
+audit event is **never** reindexed, even under `--apply` — it is reported
+separately for manual review, since a legitimately retired memory (never
+deleted from disk — see the Markdown memory format below) must never
+resurface into active search just because its file is still present. A
+reindexed orphan carries no vector until the next `backfill` run picks up
+the resulting gap — reconciliation restores the index row; embedding stays
+`backfill`'s job, not a second embedding path.
 `vector_index`, relationships, FTS, and memory index rows are all derived from
 Markdown memory or graph state and may be rebuilt — except the `hit_count` /
 `last_used_at` usage columns, which are runtime-accumulated and reset to

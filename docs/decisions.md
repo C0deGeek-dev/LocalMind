@@ -241,63 +241,127 @@ Markdown serializer writes `{id, kind, label, redacted, uri?}` and drops
 guarantee today. Carrying it across promotion is an additive on-disk change and
 is not made here.
 
-## D-LM-0043 — Pending-queue dedup resolves in two levels and never auto-applies a merge or delete
+## D-LM-0043 — Review-queue dedup gains a two-level decision: candidate skip/create/none, then existing-item merge/delete
 
 - **Date**: 2026-09-01
-- **Status**: accepted — not present in this repository
+- **Status**: accepted
 
-> **Restored 2026-09-14.** This decision was made on 2026-09-01 together with its
-> implementation, but neither reached this repository. Its number was later reused here by
-> mistake for another decision; those records now start at D-LM-0044, and this entry is
-> back at its original number so every existing reference to it keeps its meaning. **The
-> behaviour below is not shipped by this repository.**
+Every accepted-memory near-duplicate — lexical, confident vector, or
+borderline vector — routed to the same undifferentiated "similar, review it"
+outcome: a confident duplicate sat pending forever (no review mode ever
+auto-decided it), indistinguishable in the queue from a genuinely ambiguous
+borderline match. The dedup outcome is now an explicit two-level decision.
 
-Undifferentiated dedup review — every near-duplicate routed to a person with the same prompt —
-is replaced by a two-level decision. The candidate level is `Skip`, `Create` or `None`. Only when
-it is `None` does an existing-item level apply: `Merge` or `Delete`.
+**Level one, per candidate** (`dedup::CandidateDedupDecision`, a pure
+classifier over the two signals `review_modes.rs` already computed —
+whether a duplicate was found, and whether it was confident or borderline;
+neither existing threshold changes, D-LM-0020/D-LM-0023 hold exactly as
+they are):
 
-A confident duplicate that does not conflict is skipped automatically through the previously
-unwired `ReviewAction::IgnoreSimilar` and closes `Rejected`; `ReviewModeReport.skipped` counts
-it, so `accepted` never includes a skip. A distinct candidate is `Create` and keeps its existing
-auto-accept path. A borderline, non-contradicting candidate stays `Pending` with a merge
-suggestion; a contradicting one stays `Pending` with a delete suggestion. `Merge` and `Delete`
-never apply automatically in any review mode (D-LM-0016). Manual-mode annotations are persisted.
+- `Create` — no duplicate found; unaffected, proceeds through the existing
+  accept path.
+- `Skip` — a *confident* duplicate (lexical, or vector cosine ≥ 0.86):
+  redundant enough that it is not worth creating. Routed to
+  `ReviewAction::IgnoreSimilar` — a variant that already existed in the
+  wire format but had zero production callers before this decision; wiring
+  it, not inventing a new one, is the change. Auto-applies in
+  trusted/automatic mode (never manual/assisted, matching every other
+  automated decision's gating), closing the item as `Rejected` instead of
+  leaving it pending indefinitely. Never silently dropped — it is still a
+  reviewable, audited decision, just no longer forced to wait for a human
+  to notice it.
+- `None` — a *borderline* vector match (`[0.83, 0.86)`): genuinely
+  ambiguous. Always stays pending for a human; annotated with a level-two
+  suggestion instead of the generic note it carried before.
 
-`ReviewAction::MergeIntoMemory` is bookkeeping only: it closes `Merged` exactly like `MergeInto`
-(D-LM-0038), never mutates or retires the target memory, and is never itself promotable. Giving
-it `Supersede`'s promotion mechanics was rejected, because `review merge` would then have a
-different blast radius depending on which table held a row for the id. Its target is recorded in
-a new `review_items.merge_memory_target` column (schema v13) rather than reusing
-`supersede_target`. `ReviewAction::DeleteExisting` records its target in
-`review_items.delete_existing_target` (schema v14) and in the `ReviewDecisionRecorded` audit
-metadata: the deletion happens after `decide()` returns, so a failure in between must still leave
-a retryable item naming the memory.
+**Level two, only when level one is `None`** (`dedup::ExistingItemDecision`,
+suggested from the same contradiction signal (`is_contradiction`) the
+auto-supersede path already computes — reused, not reimplemented — and
+never auto-applied in any mode, per D-LM-0016):
 
-## D-LM-0042 — An audit event that retires memory content keeps a bounded copy of it
+- `Merge` — the candidate reads as a restatement, not a correction.
+  Suggests `review merge`. A new `ReviewAction::MergeIntoMemory(MemoryEntryId)`
+  extends the *existing* `review merge` confirmation path (previously typed
+  only for merging into another *pending* review item) to also resolve a
+  target that has no retained review-item row — an already-accepted memory,
+  which is what a dedup suggestion's target actually is. Bookkeeping only,
+  exactly like the existing `MergeInto`: it closes the item `Merged`, is
+  never itself promotable, and never mutates the target — no status flip, no
+  `MemorySuperseded` row. The target id is recorded in a new
+  `review_items.merge_memory_target` column (schema v13) rather than reusing
+  `supersede_target`, and surfaces in the audit trail only via the existing
+  `ReviewDecisionRecorded` row's `merge_memory_target` field, since a
+  bookkeeping-only decision gets no `MemorySuperseded`-shaped event of its
+  own. An earlier cut of this decision reused `Supersede`'s exact promotion
+  mechanics (retire-and-replace via `supersede_target`); rejected in review
+  because it made `review merge`'s effect on an id depend purely on which
+  table happened to hold a row for it — a pending item merged as pure
+  bookkeeping, an accepted memory merged as a full promote-and-retire — same
+  verb, silently different blast radius.
+- `Delete` — the candidate contradicts the existing memory. Suggests
+  `review delete-existing`, a new `ReviewAction::DeleteExisting(MemoryEntryId)`
+  with no existing counterpart: unlike `Supersede`/`MergeIntoMemory`, the
+  candidate is **not** promoted as a replacement — if it were worth
+  keeping, the reviewer would merge/supersede instead. Deletes immediately
+  when decided (calling the existing `delete_memory`, which already
+  captures `before_body` per D-LM-0042) rather than deferring to a
+  `promote` step, since — unlike a supersede — there is no new memory
+  whose creation it needs to stay atomic with. The target is recorded in a
+  new `review_items.delete_existing_target` column (schema v14) the
+  moment `decide()` closes the item, and again in the
+  `ReviewDecisionRecorded` audit row's metadata — both written *before*
+  the actual `delete_memory()` call, so a crash or error between closing
+  the item and performing the deletion still leaves a durable record of
+  which memory the decision named, mirroring `MergeIntoMemory`'s
+  `merge_memory_target` above.
+
+Both new `ReviewAction` variants close their item on decide
+(`localmind_review::decision_closes_item`/`state_after_decision`
+extended); `ReviewModeReport` gains a `skipped` counter distinct from
+`accepted`, so an auto-skip is never miscounted as an acceptance.
+
+## D-LM-0042 — An audit event that retires an existing memory's content captures a size-capped before-body snapshot
 
 - **Date**: 2026-09-01
-- **Status**: accepted — not present in this repository
+- **Status**: accepted
 
-> **Restored 2026-09-14.** This decision was made on 2026-09-01 together with its
-> implementation, but neither reached this repository. Its number was later reused here by
-> mistake for another decision; those records now start at D-LM-0044, and this entry is
-> back at its original number so every existing reference to it keeps its meaning. **The
-> behaviour below is not shipped by this repository.**
+`MemorySuperseded` and `MemoryDeleted` recorded only ids (the latter's
+metadata was `{}`) — a retired memory's own wording had no other durable
+record outside its Markdown file, which the machine-wide global store in
+particular never puts under git, and `delete_memory` actually removes that
+file (and its `memory_index` row) rather than merely flipping a status
+column, making its case the sharper one: after a delete, the audit row
+becomes the *only* surviving record of the exact wording. Both writes now
+read the target's body *before* their respective mutation (the status flip;
+the file removal and index delete) and embed it as `before_body` in the
+existing freeform `audit_events.metadata_json` column — no schema change;
+`MemorySuperseded`'s existing keys are extended, not replaced, and
+`MemoryDeleted`'s previously-empty metadata gains its first field.
 
-`MemorySuperseded` and `MemoryDeleted` — the audit events that retire an existing memory's
-content — capture that memory's prior body as `before_body` in the existing free-form
-`audit_events.metadata_json`, so no schema change is needed. For a delete, the Markdown file and
-the `memory_index` row are gone afterwards, and the audit row can be the only surviving copy.
-`MergeInto` (D-LM-0038) was confirmed to be no second content-retiring path: it writes no audit
-row and never touches accepted memory.
+Scope confirmed empty beyond these two: `ReviewAction::MergeInto`
+(D-LM-0038) closes a *review candidate* into another candidate's state — it
+writes no `audit_events` row today and never touches an already-accepted
+memory's body or `memory_index` row, so there is no second "merge"
+content-retiring path to extend alongside them.
 
-The snapshot is ellipsis-truncated beyond 16,384 characters, matching
-`review_queue.rs::PROPOSAL_BODY_MAX_CHARS`, the existing bound for text embedded in a review
-record, so a long-lived project's `audit_events` cannot grow without limit. This does not relax
-D-LM-0037's provenance-only rule for its ingest-side producers, which these events are not;
-D-LM-0029 already establishes content surviving in a review or audit record. The snapshot is
-readable where audit is already shown: the web UI's audit detail pretty-prints the metadata, and
-the CLI's `audit --metadata` prints it per row.
+The snapshot is bounded at 16,384 characters (ellipsis-truncated beyond
+that) — the same order of magnitude as the existing
+`PROPOSAL_BODY_MAX_CHARS`/`PROPOSAL_EVIDENCE_MAX_CHARS` size discipline for
+text embedded in a review/audit record rather than searchable memory. An
+unbounded audit trail is a real growth risk over a long-lived project; a
+capped one is not.
+
+This does not relax **D-LM-0037**'s rule that its six ingest-side audit
+producers (`SessionImported`, `TranscriptRedacted`, `SummaryCreated`,
+`CandidateLessonCreated`, `DistillationCreated`, `ResearchInsightCreated`)
+carry provenance metadata only, never generated content — neither
+`MemorySuperseded` nor `MemoryDeleted` is one of the six, and **D-LM-0029**
+already established that evidence/
+content can legitimately survive in a review or audit record when the record
+is what makes a retirement recoverable, which is exactly this case.
+`before_body` is never promoted into searchable memory itself; it is
+readable only by an operator through the existing `audit_records()` query
+surface, the CLI `audit` command, and the web UI's audit detail view.
 
 ## D-LM-0041 — LocalMind may lease an exact owned embedding server but never control it
 
