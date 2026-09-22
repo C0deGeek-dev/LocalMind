@@ -221,6 +221,14 @@ that map is open and bundles are built from the Markdown. The guarantee is
 identity input means the receiving machine gets the id without the means to
 re-verify it.
 
+An `EvidenceRef` in `candidate_json` may also carry `excerpt`: at most 500
+characters of the observed text, ending in ` [truncated]` when cut. The key is
+omitted when absent, so references written before it serialize — and identify
+their candidate — unchanged; older readers ignore it and drop it on rewrite. It
+is not an identity input. The review queue redacts it on enqueue before the row
+is written. The memory Markdown does not carry it, so it never reaches accepted
+memory or a bundle (D-LM-0051).
+
 A `CandidateLesson` also carries an optional `experiments` list (`#[serde(default)]`,
 omitted when empty) of `ExperimentEvidence` records: tier, reproducible
 `inputs`, the executed `LessonAssignment`, a `LabVerdict` with reason codes,

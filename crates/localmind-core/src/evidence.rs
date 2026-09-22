@@ -29,6 +29,15 @@ const EVIDENCE_ID_SCHEME: &str = "localmind.evidence.id.v1";
 /// because an id that cannot be recomputed cannot be verified.
 pub const EVIDENCE_SOURCE_KEY: &str = "source";
 
+/// Character ceiling on [`EvidenceRef::excerpt`]. An excerpt is the observation
+/// a reader or a drafting model needs to recognise the fact, not the output it
+/// was taken from; the full output stays wherever the locator points.
+pub const MAX_EXCERPT_CHARS: usize = 500;
+
+/// Appended to an excerpt cut at [`MAX_EXCERPT_CHARS`], so a reader can tell a
+/// short observation from a long one that was cut.
+pub const EXCERPT_TRUNCATION_MARKER: &str = " [truncated]";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EvidenceRef {
     pub id: EvidenceId,
@@ -38,6 +47,16 @@ pub struct EvidenceRef {
     pub redacted: bool,
     pub content_hash: Option<String>,
     pub metadata: BTreeMap<String, String>,
+    /// A bounded, redacted piece of what was observed, so the fact can be read
+    /// without following its locator. Not an identity input: the
+    /// `content_hash` fingerprints the content the excerpt was cut from.
+    ///
+    /// Omitted from the serialized form when absent, so a reference written
+    /// before this field existed serializes — and therefore identifies its
+    /// candidate — exactly as it did. Redaction happens before it is set and
+    /// again when the review queue persists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
 }
 
 impl EvidenceRef {
@@ -58,6 +77,7 @@ impl EvidenceRef {
             redacted: false,
             content_hash: None,
             metadata: BTreeMap::new(),
+            excerpt: None,
         }
     }
 
@@ -91,6 +111,7 @@ impl EvidenceRef {
             redacted: false,
             content_hash: Some(content_hash),
             metadata: BTreeMap::from([(EVIDENCE_SOURCE_KEY.to_string(), source)]),
+            excerpt: None,
         }
     }
 
@@ -111,6 +132,16 @@ impl EvidenceRef {
     #[must_use]
     pub fn with_content_hash(mut self, content_hash: impl Into<String>) -> Self {
         self.content_hash = Some(content_hash.into());
+        self
+    }
+
+    /// Attaches an excerpt of the observation, cut to [`MAX_EXCERPT_CHARS`]
+    /// with [`EXCERPT_TRUNCATION_MARKER`] when it is longer. The caller redacts
+    /// first: this type cannot, and the review queue's redaction on write is a
+    /// second line, not the first. A blank excerpt is no excerpt.
+    #[must_use]
+    pub fn with_excerpt(mut self, excerpt: impl AsRef<str>) -> Self {
+        self.excerpt = bound_excerpt(excerpt.as_ref());
         self
     }
 
@@ -156,6 +187,28 @@ impl EvidenceRef {
         self.canonical_id()
             .is_some_and(|expected| expected == self.id)
     }
+}
+
+/// Trim an excerpt and cut it to [`MAX_EXCERPT_CHARS`], marker included, on a
+/// character boundary. `None` for a blank one.
+///
+/// Public so a store that re-redacts a persisted excerpt can put the result
+/// back under the same bound.
+#[must_use]
+pub fn bound_excerpt(excerpt: &str) -> Option<String> {
+    let excerpt = excerpt.trim();
+    if excerpt.is_empty() {
+        return None;
+    }
+    if excerpt.chars().count() <= MAX_EXCERPT_CHARS {
+        return Some(excerpt.to_string());
+    }
+
+    let keep = MAX_EXCERPT_CHARS - EXCERPT_TRUNCATION_MARKER.chars().count();
+    let mut cut: String = excerpt.chars().take(keep).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push_str(EXCERPT_TRUNCATION_MARKER);
+    Some(cut)
 }
 
 /// The canonical evidence id: SHA-256 over the kind, producing source, locator
@@ -273,9 +326,11 @@ impl EvidenceKind {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::{
         is_canonical_evidence_id, stable_evidence_id, EvidenceKind, EvidenceRef,
-        EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX,
+        EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX, EXCERPT_TRUNCATION_MARKER, MAX_EXCERPT_CHARS,
     };
     use crate::EvidenceId;
 
@@ -447,5 +502,74 @@ mod tests {
         );
         assert_eq!(reference.source(), Some("session:abc"));
         assert_eq!(reference.canonical_id(), Some(reference.id.clone()));
+    }
+
+    #[test]
+    fn the_excerpt_is_not_part_of_identity() {
+        let excerpted = fact().with_excerpt("assertion failed: left == right");
+
+        // The content hash already fingerprints what was read. An excerpt is a
+        // view of it, so cutting it differently must not mint a second fact.
+        assert_eq!(fact().id, excerpted.id);
+        assert!(excerpted.identity_is_intact());
+    }
+
+    #[test]
+    fn a_reference_without_an_excerpt_serializes_as_it_did_before() {
+        let json = serde_json::to_value(fact()).unwrap();
+
+        // Candidate identity hashes the serialized candidate, so a new key on
+        // every old reference would have shifted every stored identity.
+        assert!(json.get("excerpt").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_reference_written_before_the_excerpt_reads_without_one() {
+        let old = r#"{"id":"ev-x","kind":"Transcript","label":"l","uri":null,
+            "redacted":true,"content_hash":null,"metadata":{}}"#;
+        let parsed: EvidenceRef = serde_json::from_str(old).unwrap();
+
+        assert_eq!(parsed.excerpt, None);
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old).unwrap(),
+            "and writes back byte-for-byte the same shape"
+        );
+    }
+
+    #[test]
+    fn an_excerpt_round_trips() {
+        let excerpted = fact().with_excerpt("  exit code 101  ");
+        let json = serde_json::to_string(&excerpted).unwrap();
+        let back: EvidenceRef = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.excerpt.as_deref(), Some("exit code 101"));
+        assert_eq!(back, excerpted);
+    }
+
+    #[test]
+    fn a_long_excerpt_is_cut_on_a_character_boundary_and_says_so() {
+        let long = "é".repeat(MAX_EXCERPT_CHARS * 2);
+        let excerpt = fact().with_excerpt(&long).excerpt.unwrap();
+
+        assert_eq!(excerpt.chars().count(), MAX_EXCERPT_CHARS);
+        assert!(excerpt.ends_with(EXCERPT_TRUNCATION_MARKER));
+
+        let exact = "a".repeat(MAX_EXCERPT_CHARS);
+        let kept = fact().with_excerpt(&exact).excerpt.unwrap();
+        assert_eq!(kept, exact, "an excerpt at the bound is not cut");
+    }
+
+    #[test]
+    fn a_blank_excerpt_is_no_excerpt() {
+        assert_eq!(
+            fact()
+                .with_excerpt(
+                    "  
+ "
+                )
+                .excerpt,
+            None
+        );
     }
 }

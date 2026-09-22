@@ -342,12 +342,37 @@ impl ReviewQueue {
         })
     }
 
+    /// A copy of `candidate` whose evidence excerpts have been through the
+    /// project redactor and back under the excerpt bound.
+    ///
+    /// Excerpts are observed text — tool output, error messages — which is where
+    /// a secret turns up. The producer redacts before it ever shows one to a
+    /// model; this is the second pass, at the point of persistence, so a caller
+    /// that forgot cannot write one to disk. Labels are not re-redacted here:
+    /// they predate this and their callers own them.
+    fn redact_excerpts(&self, candidate: &CandidateLesson) -> CandidateLesson {
+        let mut candidate = candidate.clone();
+        if candidate
+            .evidence()
+            .iter()
+            .all(|evidence| evidence.excerpt.is_none())
+        {
+            return candidate;
+        }
+        let redactor = crate::Redactor::new(self.config.config.learning.excluded_paths.clone());
+        candidate.redact_evidence_excerpts(|excerpt| redactor.redact(excerpt).redacted_text);
+        candidate
+    }
+
     fn enqueue_candidate(
         &self,
         session_id: &SessionId,
         candidate: &CandidateLesson,
         pending: &mut Vec<DedupKey>,
     ) -> Result<EnqueueCandidateOutcome, ReviewQueueError> {
+        // Before identity, so the identity a row carries is the identity of what
+        // is actually stored.
+        let candidate = &self.redact_excerpts(candidate);
         let summary = candidate.summary();
         let hash = crate::dedup::canonical_hash(summary);
         let content_identity = candidate.content_identity();

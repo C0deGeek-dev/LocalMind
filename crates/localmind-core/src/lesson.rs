@@ -160,6 +160,20 @@ impl CandidateLesson {
         &self.evidence
     }
 
+    /// Rewrite each evidence excerpt through `redact`, keeping the result under
+    /// the excerpt bound. For a store redacting at the point of persistence.
+    ///
+    /// Deliberately the only mutable access to evidence: an excerpt is not an
+    /// identity input, so rewriting it cannot turn one fact into another, while
+    /// every field that is stays out of reach.
+    pub fn redact_evidence_excerpts(&mut self, mut redact: impl FnMut(&str) -> String) {
+        for evidence in &mut self.evidence {
+            if let Some(excerpt) = &evidence.excerpt {
+                evidence.excerpt = crate::bound_excerpt(&redact(excerpt));
+            }
+        }
+    }
+
     /// Attach the hindsight draft this candidate came out of.
     #[must_use]
     pub fn with_hindsight(mut self, hindsight: HindsightDraft) -> Self {

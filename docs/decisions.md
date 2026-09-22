@@ -4,6 +4,42 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0051 — A fact may carry a bounded excerpt of what was observed, redacted twice and never promoted
+
+- **Date**: 2026-09-22
+- **Status**: accepted
+
+A fact built from a session event — a failed tool call, a verifier verdict, a
+correction — was a label and a locator. The label names the fact; it cannot hold
+the error message that makes it useful, and a drafting model given only labels
+has nothing to reason from but the label's wording. D-LM-0044 left room for a
+bounded excerpt field on `EvidenceRef` if one proved necessary. Facts captured
+from completed sessions make it necessary.
+
+`EvidenceRef::excerpt` is optional, bounded to `MAX_EXCERPT_CHARS` (500), and cut
+on a character boundary with a visible `[truncated]` marker. It is **not** an
+identity input: `content_hash` already fingerprints the content the excerpt was
+cut from, so a different cut of the same observation is the same fact. It is
+omitted from the serialized form when absent, which matters because candidate
+identity (D-LM-0046) hashes the serialized candidate — a `"excerpt": null` on
+every existing reference would have shifted every stored identity at once.
+
+Excerpts are observed text, which is where secrets turn up. The producer redacts
+before it shows an excerpt to anyone, and the review queue redacts every excerpt
+again on enqueue, before identity is taken, so the identity a row carries is the
+identity of what it stores and an unredacted resubmission reads as a restatement
+rather than a revision. Re-redaction can lengthen text, so the result is bounded
+again. The only mutable access to a candidate's evidence is
+`CandidateLesson::redact_evidence_excerpts`, which can reach excerpts and nothing
+that is an identity input. Labels are not re-redacted: they predate this, and
+their callers own them — `EvidenceRef::redacted()` sets a flag and does not
+itself redact anything.
+
+Excerpts stay review material. The memory Markdown does not write them, so an
+excerpt never becomes searchable accepted memory and never reaches a bundle —
+the same boundary D-LM-0029 draws for a candidate's carried `evidence_text`. A
+promoted fact keeps its id and identity inputs (D-LM-0049) without it.
+
 ## D-LM-0050 — Lab output is removed after 30 days, and only from inside the lab's own root
 
 - **Date**: 2026-09-14

@@ -28,8 +28,9 @@ pub use audit::{AuditEventKind, LearningAuditEvent};
 pub use context::{ContextPack, ContextQuery, ContextSource};
 pub use error::{ContractError, ContractResult};
 pub use evidence::{
-    is_canonical_evidence_id, stable_evidence_id, EvidenceKind, EvidenceRef,
-    EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX, EVIDENCE_SOURCE_KEY,
+    bound_excerpt, is_canonical_evidence_id, stable_evidence_id, EvidenceKind, EvidenceRef,
+    EVIDENCE_ID_DIGEST_HEX, EVIDENCE_ID_PREFIX, EVIDENCE_SOURCE_KEY, EXCERPT_TRUNCATION_MARKER,
+    MAX_EXCERPT_CHARS,
 };
 pub use experiment::{
     ArmRecord, EvidenceTier, ExperimentEvidence, ExperimentInputs, ExperimentProvenance,

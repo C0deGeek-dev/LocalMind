@@ -5,6 +5,13 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **A fact can carry a bounded excerpt of what was observed** (D-LM-0051).
+  `EvidenceRef::with_excerpt` attaches up to 500 characters of the observation,
+  cut visibly when longer. The excerpt is not part of the fact's id, is omitted
+  when absent so existing candidate identities are unchanged, is redacted again
+  by the review queue before it is stored, and is not written into accepted
+  memory. See `docs/on-disk-contract.md`.
+
 - **Evidence references can now carry a verifiable identity** (D-LM-0044).
   `EvidenceRef::identified` derives a content-addressed `ev-` id from the
   evidence kind, producing source, locator and content fingerprint, and
