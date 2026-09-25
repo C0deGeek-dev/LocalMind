@@ -253,6 +253,12 @@ keeps it. Bulky output is referenced by `LogRef` — locator, content hash, size
 bounded summary, capture time — and removable after 30 days from inside the lab's
 own staging root only; an expired log never invalidates its verdict (D-LM-0050).
 
+A `LessonAssignment` may carry `source` (an `AssignmentSource`: `RecordedTrajectory`,
+`FailFixPair`, `RatifiedCheck` or `ControlledMutation`), `preconditions` and
+`counterfactual`, each omitted when empty so an assignment written before them keeps
+its identity. `VerdictReason` codes are written as a bare name, or `{"Other": "…"}`;
+a name a build does not know is read as `Other` carrying it (D-LM-0053).
+
 An older binary reads a record carrying `hindsight`, `revises` or `experiments`,
 because unknown fields are ignored. If it **rewrites** that row — an edit, or
 `replace_candidate` — those fields are dropped. The summary and every field that

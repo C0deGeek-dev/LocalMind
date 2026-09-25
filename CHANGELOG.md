@@ -5,6 +5,14 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **A lab assignment says where it came from and which claim it tests**
+  (D-LM-0053). `LessonAssignment` gains optional `source`, `preconditions` and
+  `counterfactual`, omitted when empty so existing assignment identities are
+  unchanged, and `validate()` checks an assignment is fit to freeze. New reason
+  codes name why a lesson cannot be tested — a preference, someone's intent,
+  style nothing verifies, an unsafe action, no trusted source, an oracle the fix
+  itself changed — and a code an older build does not know now reads as `Other`
+  instead of failing.
 - **Hindsight can be distilled over supplied facts, with one repair and an
   honest fallback** (D-LM-0052). `Distiller` builds the requests and checks every
   reply against the `HindsightDraft` contract without doing any I/O itself, so a

@@ -4,6 +4,33 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0053 — An assignment says where it came from and what it tests, and a reason code never breaks a reader
+
+- **Date**: 2026-09-25
+- **Status**: accepted
+
+D-LM-0048 fixed what an assignment binds — task, oracle, fixture, verifier — but
+not where it came from, what must hold before it starts, or which claim it tests.
+Without those a reviewer cannot tell an assignment built from a project's own
+history from one built from the lesson's wording, and a result cannot say which
+counterfactual it bore on.
+
+`LessonAssignment` gains three optional fields, each omitted from the serialized
+form when empty so every assignment written before them keeps its identity:
+`source` — an `AssignmentSource` naming a recorded trajectory, a fail/fix commit
+pair, a ratified check, or a controlled mutation — `preconditions`, and
+`counterfactual`. Set, they are part of what is tested and so part of identity.
+`LessonAssignment::validate` checks an assignment is fit to freeze — a frozen
+fixture and oracle, an oracle not derived from the lesson, bounded fields — before
+any run; whether the oracle discriminates is a run's to establish.
+
+`VerdictReason` gains named codes for why a lesson cannot be tested or an oracle
+cannot judge it: `Preference`, `HumanIntent`, `UnverifiableStyle`,
+`UnsafeAction`, `NoTrustedSource`, `OracleChangedByFix`. Reading is now tolerant:
+a code a build does not know reads as `Other(name)` instead of failing to parse,
+so a record carrying a code added later still opens in an older build. No
+release has shipped `VerdictReason`, so adding the codes breaks no reader in use.
+
 ## D-LM-0052 — Hindsight is distilled over supplied facts by an I/O-free contract, and abstention is decided without the model
 
 - **Date**: 2026-09-25

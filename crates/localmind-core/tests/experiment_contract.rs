@@ -11,6 +11,7 @@ use localmind_core::{
     ImportedReceipt, InjectionMode, InjectionProof, LabVerdict, LessonAssignment, LessonCategory,
     LessonId, LogRef, OracleOrigin, OracleRef, Sensitivity, SuggestedAction, VerdictReason,
     VerifierRef, EXPERIMENT_EVIDENCE_VERSION, LAB_LOG_RETENTION_DAYS, LESSON_ASSIGNMENT_VERSION,
+    MAX_OBSERVATION_CHARS,
 };
 
 const DAY: i64 = 86_400;
@@ -57,6 +58,9 @@ fn assignment(candidate: &CandidateLesson) -> LessonAssignment {
         },
         cleanup: "remove the temporary worktree".to_string(),
         sensitivity: Sensitivity::Redacted,
+        source: None,
+        preconditions: Vec::new(),
+        counterfactual: None,
     }
 }
 
@@ -485,4 +489,95 @@ fn a_corrupt_result_fails_to_load_instead_of_defaulting() {
             "a corrupt record must be an error, not a default"
         );
     }
+}
+
+#[test]
+fn an_assignment_without_source_preconditions_or_counterfactual_keeps_its_identity() {
+    let candidate = candidate();
+    let plain = assignment(&candidate);
+    let json = serde_json::to_value(&plain).unwrap();
+
+    // Identity hashes the serialized form, so absent fields must stay absent:
+    // an assignment frozen before they existed identifies exactly as it did.
+    for key in ["source", "preconditions", "counterfactual"] {
+        assert!(json.get(key).is_none(), "{key} is written only when set");
+    }
+
+    let mut sourced = plain.clone();
+    sourced.source = Some(localmind_core::AssignmentSource::FailFixPair {
+        base_revision: "9f1c2d".to_string(),
+        fix_revision: "a1b2c3".to_string(),
+    });
+    let mut counterfactual = plain.clone();
+    counterfactual.counterfactual =
+        Some("had the migration been written first, the suite would have passed".to_string());
+    let mut preconditions = plain.clone();
+    preconditions.preconditions = vec!["the database is empty".to_string()];
+
+    for changed in [sourced, counterfactual, preconditions] {
+        assert_ne!(
+            changed.identity(),
+            plain.identity(),
+            "what is tested is identity"
+        );
+    }
+}
+
+#[test]
+fn an_assignment_is_checked_before_it_is_frozen() {
+    let candidate = candidate();
+    assert!(assignment(&candidate).validate().is_ok());
+
+    let mut unsound = assignment(&candidate);
+    unsound.oracle.content_hash = String::new();
+    unsound.fixture.content_hash = " ".to_string();
+    unsound.oracle.origin = OracleOrigin::DerivedFromLesson;
+    unsound.counterfactual = Some("x".repeat(MAX_OBSERVATION_CHARS + 1));
+
+    let violations = unsound.validate().unwrap_err();
+    for expected in [
+        ExperimentViolation::MutableOracle,
+        ExperimentViolation::UnfrozenFixture,
+        ExperimentViolation::OracleNotIndependent,
+    ] {
+        assert!(violations.contains(&expected), "{violations:?}");
+    }
+    assert!(violations.iter().any(|violation| matches!(
+        violation,
+        ExperimentViolation::FieldTooLong {
+            field: "counterfactual",
+            ..
+        }
+    )));
+}
+
+#[test]
+fn reason_codes_round_trip_and_an_unknown_code_still_reads() {
+    for reason in [
+        VerdictReason::Preference,
+        VerdictReason::HumanIntent,
+        VerdictReason::UnverifiableStyle,
+        VerdictReason::UnsafeAction,
+        VerdictReason::NoTrustedSource,
+        VerdictReason::OracleChangedByFix,
+        VerdictReason::OracleNotIndependent,
+        VerdictReason::Other("custom".to_string()),
+    ] {
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(
+            serde_json::from_str::<VerdictReason>(&json).unwrap(),
+            reason,
+            "{json}"
+        );
+    }
+
+    // A code written by a newer build opens in this one rather than failing.
+    assert_eq!(
+        serde_json::from_str::<VerdictReason>("\"SomeFutureCode\"").unwrap(),
+        VerdictReason::Other("SomeFutureCode".to_string())
+    );
+    assert_eq!(
+        serde_json::from_str::<VerdictReason>(r#"{"FutureTagged":"detail"}"#).unwrap(),
+        VerdictReason::Other("FutureTagged: detail".to_string())
+    );
 }

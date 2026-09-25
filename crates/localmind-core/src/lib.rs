@@ -33,11 +33,12 @@ pub use evidence::{
     EVIDENCE_SIGNATURE_KEY, EVIDENCE_SOURCE_KEY, EXCERPT_TRUNCATION_MARKER, MAX_EXCERPT_CHARS,
 };
 pub use experiment::{
-    ArmRecord, EvidenceTier, ExperimentEvidence, ExperimentInputs, ExperimentProvenance,
-    ExperimentViolation, FixtureRef, ImportedReceipt, InjectionMode, InjectionProof, LabVerdict,
-    LessonAssignment, LogRef, OracleOrigin, OracleRef, Sensitivity, VerdictReason, VerifierRef,
-    ASSIGNMENT_IDENTITY_PREFIX, EXPERIMENT_EVIDENCE_VERSION, EXPERIMENT_IDENTITY_PREFIX,
-    LAB_LOG_RETENTION_DAYS, LESSON_ASSIGNMENT_VERSION, MAX_OBSERVATIONS, MAX_OBSERVATION_CHARS,
+    ArmRecord, AssignmentSource, EvidenceTier, ExperimentEvidence, ExperimentInputs,
+    ExperimentProvenance, ExperimentViolation, FixtureRef, ImportedReceipt, InjectionMode,
+    InjectionProof, LabVerdict, LessonAssignment, LogRef, OracleOrigin, OracleRef, Sensitivity,
+    VerdictReason, VerifierRef, ASSIGNMENT_IDENTITY_PREFIX, EXPERIMENT_EVIDENCE_VERSION,
+    EXPERIMENT_IDENTITY_PREFIX, LAB_LOG_RETENTION_DAYS, LESSON_ASSIGNMENT_VERSION,
+    MAX_OBSERVATIONS, MAX_OBSERVATION_CHARS,
 };
 pub use graph::{
     content_fingerprint, stable_edge_id, stable_node_id, EdgeDerivation, EdgeKind, GraphEdge,

@@ -83,6 +83,9 @@ fn result(
         },
         cleanup: "drop the temporary database".to_string(),
         sensitivity: Sensitivity::LocalOnly,
+        source: None,
+        preconditions: Vec::new(),
+        counterfactual: None,
     };
     let uplift = tier == EvidenceTier::Uplift;
     ExperimentEvidence {

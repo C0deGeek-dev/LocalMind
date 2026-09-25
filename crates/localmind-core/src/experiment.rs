@@ -19,7 +19,7 @@
 //! same automatic decision as one carrying none.
 
 use crate::{CandidateLesson, EvidenceId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 /// Contract version of [`LessonAssignment`].
@@ -135,7 +135,11 @@ impl LabVerdict {
 
 /// Why a verdict was reached. Codes, not prose, so a result can be filtered,
 /// counted and rerun on purpose.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Reading is tolerant: a code this build does not know becomes
+/// [`VerdictReason::Other`] carrying its name, so a record written by a newer
+/// build still opens in an older one instead of failing to parse.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum VerdictReason {
     /// The fixture could not be materialised.
     FixtureUnavailable,
@@ -160,8 +164,70 @@ pub enum VerdictReason {
     Cancelled,
     /// The verifier itself failed.
     VerifierFailed,
+    /// The lesson states a preference. Nothing can fail it.
+    Preference,
+    /// The lesson records what someone wants, which only they can confirm.
+    HumanIntent,
+    /// The lesson is about style, and no ratified check can verify it.
+    UnverifiableStyle,
+    /// Testing the lesson would take an action with real-world effect.
+    UnsafeAction,
+    /// No trusted source — a recorded trajectory, a fail/fix pair, a ratified
+    /// check — could supply an independent oracle.
+    NoTrustedSource,
+    /// The change the lesson came from also changed the oracle, so the oracle
+    /// cannot judge it.
+    OracleChangedByFix,
     /// Anything not yet named. Bounded like an observation.
     Other(String),
+}
+
+impl VerdictReason {
+    /// The code's name as written, for a unit code.
+    fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "FixtureUnavailable" => Self::FixtureUnavailable,
+            "OracleMutable" => Self::OracleMutable,
+            "OracleNotIndependent" => Self::OracleNotIndependent,
+            "NoDiscriminatingVerifier" => Self::NoDiscriminatingVerifier,
+            "NotReplayable" => Self::NotReplayable,
+            "InjectionNotObserved" => Self::InjectionNotObserved,
+            "ArmContaminated" => Self::ArmContaminated,
+            "PartialPair" => Self::PartialPair,
+            "BudgetExceeded" => Self::BudgetExceeded,
+            "Cancelled" => Self::Cancelled,
+            "VerifierFailed" => Self::VerifierFailed,
+            "Preference" => Self::Preference,
+            "HumanIntent" => Self::HumanIntent,
+            "UnverifiableStyle" => Self::UnverifiableStyle,
+            "UnsafeAction" => Self::UnsafeAction,
+            "NoTrustedSource" => Self::NoTrustedSource,
+            "OracleChangedByFix" => Self::OracleChangedByFix,
+            _ => return None,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for VerdictReason {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The two shapes a code is written in: a bare name, or a one-key map
+        /// for a code with a payload.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Name(String),
+            Tagged(BTreeMap<String, String>),
+        }
+
+        Ok(match Written::deserialize(deserializer)? {
+            Written::Name(name) => Self::named(&name).unwrap_or(Self::Other(name)),
+            Written::Tagged(map) => match map.into_iter().next() {
+                Some((key, value)) if key == "Other" => Self::Other(value),
+                Some((key, value)) => Self::Other(format!("{key}: {value}")),
+                None => Self::Other(String::new()),
+            },
+        })
+    }
 }
 
 /// How sensitive an assignment's material is, which decides where its content
@@ -216,6 +282,32 @@ pub struct VerifierRef {
     pub version: String,
 }
 
+/// Where an assignment came from. Only trusted sources build assignments: the
+/// run's own record, the project's own history, and the project's own ratified
+/// checks — never text the lesson wrote.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AssignmentSource {
+    /// A recorded trajectory from the run the lesson came out of: an attempt
+    /// that failed, a change, and the same attempt passing. Its observations
+    /// are replayed; nothing is executed.
+    RecordedTrajectory { session: String },
+    /// A step's own commits: the oracle fails at `base_revision` and passes at
+    /// `fix_revision`.
+    FailFixPair {
+        base_revision: String,
+        fix_revision: String,
+    },
+    /// A ratified project check, by name, as the oracle for a lesson whose
+    /// evidence cites it failing.
+    RatifiedCheck { name: String },
+    /// A known repair taken back out of a later revision: `applied_to` with the
+    /// changes of `repair_revision` reverted, so the repair is the expected fix.
+    ControlledMutation {
+        applied_to: String,
+        repair_revision: String,
+    },
+}
+
 /// A runnable test of one lesson, frozen before any compared run.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LessonAssignment {
@@ -245,6 +337,17 @@ pub struct LessonAssignment {
     /// How the run's effects are undone.
     pub cleanup: String,
     pub sensitivity: Sensitivity,
+    /// Where the assignment came from. Absent on assignments written before
+    /// the field existed, which therefore keep their identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AssignmentSource>,
+    /// What must hold before the task starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<String>,
+    /// The claim under test, in the hindsight's own terms: had the lesson's
+    /// change been made, the outcome would have been different in this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterfactual: Option<String>,
 }
 
 impl LessonAssignment {
@@ -252,6 +355,64 @@ impl LessonAssignment {
     #[must_use]
     pub fn identity(&self) -> String {
         content_digest(ASSIGNMENT_IDENTITY_SCHEME, ASSIGNMENT_IDENTITY_PREFIX, self)
+    }
+
+    /// Check that this assignment is fit to freeze: a frozen fixture and
+    /// oracle, an oracle not derived from the lesson, and bounded lists.
+    ///
+    /// Returns every violation. Soundness of the oracle as a *discriminator* —
+    /// that it fails where it should and passes where it should — is a run's to
+    /// establish, not this check's.
+    ///
+    /// # Errors
+    /// [`ExperimentViolation`] values describing each breach.
+    pub fn validate(&self) -> Result<(), Vec<ExperimentViolation>> {
+        let mut violations = Vec::new();
+        if self.version != LESSON_ASSIGNMENT_VERSION {
+            violations.push(ExperimentViolation::UnsupportedAssignmentVersion {
+                version: self.version,
+            });
+        }
+        if self.fixture.content_hash.trim().is_empty() {
+            violations.push(ExperimentViolation::UnfrozenFixture);
+        }
+        if self.oracle.content_hash.trim().is_empty() {
+            violations.push(ExperimentViolation::MutableOracle);
+        }
+        if self.oracle.origin == OracleOrigin::DerivedFromLesson {
+            violations.push(ExperimentViolation::OracleNotIndependent);
+        }
+        for (field, items) in [
+            ("success_observations", &self.success_observations),
+            ("failure_observations", &self.failure_observations),
+            ("preconditions", &self.preconditions),
+        ] {
+            if items.len() > MAX_OBSERVATIONS {
+                violations.push(ExperimentViolation::TooManyItems {
+                    field,
+                    count: items.len(),
+                    limit: MAX_OBSERVATIONS,
+                });
+            }
+            for item in items {
+                check_chars(field, item, &mut violations);
+            }
+        }
+        for (field, text) in [
+            ("task", Some(self.task.as_str())),
+            ("initial_state", Some(self.initial_state.as_str())),
+            ("cleanup", Some(self.cleanup.as_str())),
+            ("counterfactual", self.counterfactual.as_deref()),
+        ] {
+            if let Some(text) = text {
+                check_chars(field, text, &mut violations);
+            }
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
+        }
     }
 }
 
