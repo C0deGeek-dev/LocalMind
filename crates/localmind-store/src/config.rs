@@ -66,6 +66,12 @@ pub struct ReviewConfig {
     /// [`ProjectConfig::semantic_dedup_active`]).
     #[serde(default)]
     pub semantic_dedup: bool,
+    /// Also queue a hindsight record when the analysis of a finished run
+    /// abstains (`UnknownCause` or `NoLesson`), as review-only material that
+    /// cannot be promoted without an edit. Off by default: an abstention is a
+    /// successful outcome, and a queue of non-lessons buries the lessons.
+    #[serde(default)]
+    pub record_abstentions: bool,
 }
 
 impl Default for ReviewConfig {
@@ -74,6 +80,7 @@ impl Default for ReviewConfig {
             mode: ReviewModeConfig::Manual,
             trusted_threshold: default_trusted_threshold(),
             semantic_dedup: false,
+            record_abstentions: false,
         }
     }
 }

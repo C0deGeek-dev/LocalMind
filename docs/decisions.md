@@ -4,6 +4,83 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0052 — Hindsight is distilled over supplied facts by an I/O-free contract, and abstention is decided without the model
+
+- **Date**: 2026-09-25
+- **Status**: accepted
+
+D-LM-0045 fixed what a hindsight draft is and D-LM-0047 what a constraint is
+worth; nothing yet produced a draft. Closeout extraction has a prompt and a
+deterministic fallback but no content-repair pass, and it talks only to
+LocalMind's own `ChatEndpoint`. A host that finishes a piece of work usually
+holds a model already — often an asynchronous one LocalMind cannot call.
+
+**The distiller does no I/O.** `Distiller` hands out `DistillRequest`s — chat
+messages and, when the caller allows it, a flat JSON-schema constraint — and
+takes `DistillReply`s, each with its `ConstraintDisposition`. One contract, any
+transport, synchronous or not.
+
+**Every reply is validated.** A reply is located with `extract_json_payload`,
+parsed, and checked with `HindsightDraft::validate` against the supplied facts,
+whatever was asked of the server. The contract version is filled in when the
+model omits it; a wrong version is still rejected.
+
+**One repair, shared, and only for content.** A reply that arrived and broke the
+contract spends the single `RepairBudget` pass; the repair names every violation.
+A reply the transport marks `RefusedByTransport` spends nothing, and the
+distiller stops asking for a schema. After the repair, a second failure ends the
+distillation.
+
+**Failure keeps the facts and invents nothing.** A model that cannot be reached
+yields `NeedsReview`; a reply still broken after the repair yields `Malformed`.
+Either way the draft holds only the caller's intended and observed outcome — no
+hypothesis, no lesson — and is itself valid. A staged analysis that already
+named validated causes keeps them and is marked incomplete.
+
+**Capability adapts without naming models.** `Strategy::OnePass` fills the
+contract in one request; `Strategy::Staged` asks what happened, then — only if a
+cause was found — what follows from it. `DistillPlan::adaptive` picks staged
+below a declared context of 16 384 tokens. That is a proxy, not a measurement,
+and it is overridable. The fact listing keeps every label and drops excerpts
+from the end once it would pass half the declared context.
+
+**Abstention is a deterministic check.** `decide_outcome` reads the validated
+draft and the facts it cites: no hypothesis is `UnknownCause`; no proposed
+lesson is `NoLesson`; a proposal opening with "retry"/"try again"/"re-run" or
+with "check/verify/make sure" about the environment is `NoLesson`; so is a draft
+whose cited failures each happened once and either went away on an identical
+retry that was the next thing to succeed, or are blamed on the environment by a
+cited correction. The model's `suggested_outcome` is recorded and never
+consulted. The check can only remove a lesson, and only on positive evidence: a
+failure with no signature is never presumed a one-off.
+
+**A lesson needs a whole record where it looks.** A gap may carry an
+`Incompleteness` — the whole run, or one producing source. When a would-be
+lesson cites a fact from an incomplete source, or the run itself is incomplete,
+the outcome becomes `NeedsReview`: the lesson is kept for a person to judge and
+cannot be queued as promotable. A gap that says nothing about completeness, such
+as a call no verifier looked at, does not count. Measured live, a lesson built on
+a damaged log passed every other check.
+
+**The prompt does not talk the model out of a lesson.** One-offs, retries and
+environment checks are the check's to remove, so the prompt asks for a lesson
+whenever a change would have avoided the outcome and would apply to similar work,
+and for one plain sentence that names no fact ids.
+
+**Facts can say what they observed.** Two `metadata` keys, `observation`
+(`failure`/`success`/`correction`) and `signature`, carry what the check needs.
+Neither is an identity input, and neither survives promotion.
+
+**What reaches review on an abstention is the project's choice.**
+`[review].record_abstentions`, off by default, has a host queue a review-only
+record for `UnknownCause`/`NoLesson` results. An abstention is a successful
+outcome; a queue full of non-lessons would bury the lessons.
+
+The fixtures for the check are original cases written from the recorded
+descriptions of the six cases two local models were measured on. The tests
+deliver scripted replies: they prove the contract and control flow, not the
+quality of any model.
+
 ## D-LM-0051 — A fact may carry a bounded excerpt of what was observed, redacted twice and never promoted
 
 - **Date**: 2026-09-22

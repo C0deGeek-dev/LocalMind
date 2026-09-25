@@ -4,6 +4,7 @@
 //! and index state. This crate owns that persistence behavior and establishes
 //! the host → engine dependency direction.
 
+mod abstention;
 mod agent_memory_import;
 mod backfill;
 mod bundle;
@@ -16,6 +17,7 @@ mod eval;
 mod extraction;
 mod freshness;
 mod graph_store;
+mod hindsight_distill;
 mod import;
 mod lab_retention;
 mod language;
@@ -43,6 +45,7 @@ mod status;
 mod sync_bundle;
 mod sync_engine;
 
+pub use abstention::{decide as decide_outcome, OutcomeReason};
 pub use agent_memory_import::{AgentMemoryImportReport, AgentMemoryImporter};
 pub use backfill::{BackfillPlan, BackfillReasons, BackfillReport};
 pub use bundle::{
@@ -73,6 +76,11 @@ pub use freshness::{
     FreshnessFlag, FreshnessReason, FreshnessReport, FreshnessScope, FreshnessThresholds,
 };
 pub use graph_store::{GraphStore, GraphStoreError, GRAPH_FORMAT_VERSION};
+pub use hindsight_distill::{
+    DistillInput, DistillPlan, DistillReply, DistillRequest, DistillStep, DistillTrace,
+    Distillation, Distiller, Incompleteness, InputGap, RequestPurpose, Strategy,
+    STAGED_BELOW_CONTEXT_TOKENS,
+};
 pub use import::{
     ImportError, ImportReport, ImportedSession, TranscriptImportFormat, TranscriptImporter,
 };

@@ -29,6 +29,50 @@ const EVIDENCE_ID_SCHEME: &str = "localmind.evidence.id.v1";
 /// because an id that cannot be recomputed cannot be verified.
 pub const EVIDENCE_SOURCE_KEY: &str = "source";
 
+/// Metadata key naming what kind of observation a fact is. See
+/// [`Observation`].
+pub const EVIDENCE_OBSERVATION_KEY: &str = "observation";
+
+/// Metadata key holding what a fact repeats: two facts with the same signature
+/// record the same attempt, so a producer can say "this failed once" or "the
+/// identical retry succeeded" without anyone reading prose.
+pub const EVIDENCE_SIGNATURE_KEY: &str = "signature";
+
+/// What a fact observed, when its producer knows.
+///
+/// Carried in metadata, so it is not an identity input and does not survive
+/// promotion; it exists for deterministic checks over a fact set at review
+/// time, such as whether a failure happened once and went away on its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Observation {
+    /// Something was attempted and failed.
+    Failure,
+    /// Something was attempted and succeeded.
+    Success,
+    /// Someone outside the work corrected or stopped it.
+    Correction,
+}
+
+impl Observation {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Failure => "failure",
+            Self::Success => "success",
+            Self::Correction => "correction",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "failure" => Some(Self::Failure),
+            "success" => Some(Self::Success),
+            "correction" => Some(Self::Correction),
+            _ => None,
+        }
+    }
+}
+
 /// Character ceiling on [`EvidenceRef::excerpt`]. An excerpt is the observation
 /// a reader or a drafting model needs to recognise the fact, not the output it
 /// was taken from; the full output stays wherever the locator points.
@@ -143,6 +187,43 @@ impl EvidenceRef {
     pub fn with_excerpt(mut self, excerpt: impl AsRef<str>) -> Self {
         self.excerpt = bound_excerpt(excerpt.as_ref());
         self
+    }
+
+    /// Record what kind of observation this fact is.
+    #[must_use]
+    pub fn with_observation(mut self, observation: Observation) -> Self {
+        self.metadata.insert(
+            EVIDENCE_OBSERVATION_KEY.to_string(),
+            observation.as_str().to_string(),
+        );
+        self
+    }
+
+    /// What kind of observation this fact is, when its producer said.
+    #[must_use]
+    pub fn observation(&self) -> Option<Observation> {
+        self.metadata
+            .get(EVIDENCE_OBSERVATION_KEY)
+            .and_then(|value| Observation::parse(value))
+    }
+
+    /// Record what this fact repeats. A blank signature is no signature.
+    #[must_use]
+    pub fn with_signature(mut self, signature: impl AsRef<str>) -> Self {
+        let signature = signature.as_ref().trim();
+        if !signature.is_empty() {
+            self.metadata
+                .insert(EVIDENCE_SIGNATURE_KEY.to_string(), signature.to_string());
+        }
+        self
+    }
+
+    /// What this fact repeats, when its producer said.
+    #[must_use]
+    pub fn signature(&self) -> Option<&str> {
+        self.metadata
+            .get(EVIDENCE_SIGNATURE_KEY)
+            .map(String::as_str)
     }
 
     /// The producing source this reference's id was derived from, when it has
@@ -558,6 +639,24 @@ mod tests {
         let exact = "a".repeat(MAX_EXCERPT_CHARS);
         let kept = fact().with_excerpt(&exact).excerpt.unwrap();
         assert_eq!(kept, exact, "an excerpt at the bound is not cut");
+    }
+
+    #[test]
+    fn observation_and_signature_are_metadata_not_identity() {
+        let marked = fact()
+            .with_observation(super::Observation::Failure)
+            .with_signature("run_shell:9f1c");
+
+        assert_eq!(marked.observation(), Some(super::Observation::Failure));
+        assert_eq!(marked.signature(), Some("run_shell:9f1c"));
+        assert_eq!(
+            marked.id,
+            fact().id,
+            "what a fact observed does not re-mint it"
+        );
+        assert!(marked.identity_is_intact());
+        assert_eq!(fact().observation(), None);
+        assert_eq!(fact().with_signature("  ").signature(), None);
     }
 
     #[test]

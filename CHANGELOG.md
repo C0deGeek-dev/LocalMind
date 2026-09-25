@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Hindsight can be distilled over supplied facts, with one repair and an
+  honest fallback** (D-LM-0052). `Distiller` builds the requests and checks every
+  reply against the `HindsightDraft` contract without doing any I/O itself, so a
+  host drives it with whatever model it holds. It spends at most one repair on a
+  reply that broke the contract, never on a server that refused a schema, and a
+  model that cannot be reached or keeps failing yields the facts and no invented
+  cause. Whether a draft earns a lesson is decided afterwards by
+  `decide_outcome`, not by the model: a failure that happened once and went away
+  on an identical retry, a correction that blames the environment, or a proposal
+  that amounts to "try again" or "check the environment first" is not a lesson.
+  `[review].record_abstentions` (default off) queues a review-only record when an
+  analysis abstains. See `docs/on-disk-contract.md`.
 - **A fact can carry a bounded excerpt of what was observed** (D-LM-0051).
   `EvidenceRef::with_excerpt` attaches up to 500 characters of the observation,
   cut visibly when longer. The excerpt is not part of the fact's id, is omitted

@@ -51,6 +51,7 @@ research = true
 mode = "manual"              # manual, assisted, trusted, or automatic
 trusted_threshold = 0.82     # trusted auto-accept threshold
 semantic_dedup = false       # opt in to embedding-cosine dedup of accepted memory; off = lexical only
+record_abstentions = false   # also queue review-only hindsight records when an analysis abstains
 
 [retrieval]
 rerank = false               # opt in to the embedding rerank stage; off = deterministic blend only
@@ -228,6 +229,18 @@ their candidate — unchanged; older readers ignore it and drop it on rewrite. I
 is not an identity input. The review queue redacts it on enqueue before the row
 is written. The memory Markdown does not carry it, so it never reaches accepted
 memory or a bundle (D-LM-0051).
+
+An `EvidenceRef` may also carry two `metadata` keys a producer sets for
+deterministic checks at review time: `observation` (`failure`, `success` or
+`correction`) and `signature` (what the fact repeats — two facts with the same
+signature record the same attempt). Neither is an identity input, and like the
+rest of `metadata` beyond `source` neither survives promotion (D-LM-0052).
+
+`[review].record_abstentions` (default `false`) governs what a host queues when a
+hindsight analysis abstains. An `UnknownCause` or `NoLesson` result is a
+successful outcome and by default queues nothing; with the key on, it queues a
+review-only record that cannot be promoted without an edit. Older builds ignore
+the key (D-LM-0052).
 
 A `CandidateLesson` also carries an optional `experiments` list (`#[serde(default)]`,
 omitted when empty) of `ExperimentEvidence` records: tier, reproducible
