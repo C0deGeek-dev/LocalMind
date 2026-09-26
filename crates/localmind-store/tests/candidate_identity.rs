@@ -157,9 +157,10 @@ fn identity_ignores_lineage_so_the_same_revision_derived_twice_agrees_with_itsel
     assert_eq!(plain.content_identity(), with_lineage.content_identity());
 }
 
-/// The D020 gate. `ReviewModeProcessor::apply_project` is not modified and must
-/// not become sensitive to lab output: a candidate carrying a full hindsight
-/// draft and one carrying none reach the same decision on the same inputs.
+/// Review mode reads no hindsight (D-LM-0045). `ReviewModeProcessor::apply_project`
+/// is not modified and must not become sensitive to lab output: a candidate
+/// carrying a full hindsight draft and one carrying none reach the same decision
+/// on the same inputs.
 ///
 /// The rejected alternative was to gate every lab-carrying candidate the way a
 /// direct agent proposal is gated. That would mean a candidate which

@@ -199,9 +199,10 @@ fn resubmitting_a_candidate_with_a_new_result_keeps_the_result() {
     assert_eq!(queue.list().unwrap()[0].candidate.experiments.len(), 1);
 }
 
-/// D020, for every verdict a lab can produce. A candidate carrying all of them
-/// — including `Supported` — reaches the same automatic decision as one carrying
-/// none. Evidence informs a reviewer; it never becomes the thing that decides.
+/// Review mode reads no lab result (D-LM-0048), for every verdict a lab can
+/// produce. A candidate carrying all of them — including `Supported` — reaches
+/// the same automatic decision as one carrying none. Evidence informs a
+/// reviewer; it never becomes the thing that decides.
 #[test]
 fn no_verdict_changes_an_automatic_review_decision() {
     let facts = vec![fact("repo@aaa#migrate.log", "sha256:01")];
