@@ -283,8 +283,9 @@ pub struct VerifierRef {
 }
 
 /// Where an assignment came from. Only trusted sources build assignments: the
-/// run's own record, the project's own history, and the project's own ratified
-/// checks — never text the lesson wrote.
+/// run's own record, the project's own history, the project's own ratified
+/// checks, and a task set a person approved — never text the lesson wrote and
+/// nobody reviewed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AssignmentSource {
     /// A recorded trajectory from the run the lesson came out of: an attempt
@@ -305,6 +306,16 @@ pub enum AssignmentSource {
     ControlledMutation {
         applied_to: String,
         repair_revision: String,
+    },
+    /// A task set a person approved for this lesson, for an uplift run. A model
+    /// may draft one from the lesson's hindsight, but a draft tests nothing:
+    /// only the approval makes it an oracle, and the oracle is the approved
+    /// content, by hash. `drafted_by` names the model that drafted it, when one
+    /// did, so a reader can tell a reviewed draft from a hand-written set.
+    ApprovedTaskSet {
+        approved_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drafted_by: Option<String>,
     },
 }
 

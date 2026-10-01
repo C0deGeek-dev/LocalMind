@@ -581,3 +581,38 @@ fn reason_codes_round_trip_and_an_unknown_code_still_reads() {
         VerdictReason::Other("FutureTagged: detail".to_string())
     );
 }
+
+#[test]
+fn an_approved_task_set_is_a_source_that_says_who_approved_and_who_drafted() {
+    use localmind_core::AssignmentSource;
+
+    let drafted = AssignmentSource::ApprovedTaskSet {
+        approved_by: "reviewer".to_string(),
+        drafted_by: Some("local-model".to_string()),
+    };
+    let json = serde_json::to_string(&drafted).unwrap();
+    assert_eq!(
+        json,
+        r#"{"ApprovedTaskSet":{"approved_by":"reviewer","drafted_by":"local-model"}}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<AssignmentSource>(&json).unwrap(),
+        drafted
+    );
+
+    // A hand-written set carries no drafter, and says so by omission.
+    let written = AssignmentSource::ApprovedTaskSet {
+        approved_by: "reviewer".to_string(),
+        drafted_by: None,
+    };
+    let json = serde_json::to_string(&written).unwrap();
+    assert_eq!(json, r#"{"ApprovedTaskSet":{"approved_by":"reviewer"}}"#);
+    assert_eq!(
+        serde_json::from_str::<AssignmentSource>(&json).unwrap(),
+        written
+    );
+    assert_ne!(
+        written, drafted,
+        "who drafted it is part of what was tested"
+    );
+}

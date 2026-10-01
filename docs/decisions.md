@@ -4,6 +4,29 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0054 — A task set a person approved is an assignment source, and says whether a model drafted it
+
+- **Date**: 2026-10-02
+- **Status**: accepted
+
+D-LM-0053 named four sources an assignment may come from, all of them things that
+existed before the lesson: a recorded trajectory, a fail/fix pair, a ratified
+check, a controlled mutation. An uplift run needs a fifth. Its tasks are
+questions a model answers with and without the lesson, and nothing in a run's
+record or a project's history is such a task.
+
+`AssignmentSource` gains `ApprovedTaskSet { approved_by, drafted_by }`. A model
+may draft the tasks from the lesson's hindsight, but a draft is not an oracle and
+no host may run one: the approval is what makes it final, and the assignment's
+oracle is the approved content by hash, with origin `Human`. `drafted_by` is kept
+so the record never presents a reviewed model draft as a hand-written set — the
+reviewer, not the origin label, is what stands between a lesson and a test that
+merely restates it. `drafted_by` is omitted when absent.
+
+An older build cannot read the new variant: an assignment carrying it fails to
+parse there. No release has shipped `AssignmentSource`, and only an uplift
+assignment uses the variant.
+
 ## D-LM-0053 — An assignment says where it came from and what it tests, and a reason code never breaks a reader
 
 - **Date**: 2026-09-25

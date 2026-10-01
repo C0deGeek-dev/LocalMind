@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **A task set a person approved is an assignment source** (D-LM-0054).
+  `AssignmentSource` gains `ApprovedTaskSet { approved_by, drafted_by }` for
+  uplift runs. A model may draft the tasks; only a person's approval makes them
+  an oracle, and the record keeps which model drafted them.
 - **A lab assignment says where it came from and which claim it tests**
   (D-LM-0053). `LessonAssignment` gains optional `source`, `preconditions` and
   `counterfactual`, omitted when empty so existing assignment identities are
