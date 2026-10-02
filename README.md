@@ -1,21 +1,9 @@
-```
-╔═════╗   ╔═════╗		██╗      ██████╗  ██████╗ █████╗ ██╗     ███╗   ███╗██╗███╗   ██╗██████╗
-║ ███ ║═══║ ███ ║		██║     ██╔═══██╗██╔════╝██╔══██╗██║     ████╗ ████║██║████╗  ██║██╔══██╗
-║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ███████║██║     ██╔████╔██║██║██╔██╗ ██║██║  ██║
-║ ███ ║   ║ ███ ║║		██║     ██║   ██║██║     ██╔══██║██║     ██║╚██╔╝██║██║██║╚██╗██║██║  ██║
-╚═════╝   ╚═════╝║		███████╗╚██████╔╝╚██████╗██║  ██║███████╗██║ ╚═╝ ██║██║██║ ╚████║██████╔╝
- ╚═══════════════╝		╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝
-```
+![LocalMind — Keep the lessons. Skip the rediscovery.](docs/assets/readme-banner.svg)
 
 <div align="center">
   <h1>LocalMind</h1>
   <p><strong>Turn reviewed AI sessions into useful project memory. Locally.</strong></p>
-  <p>
-    <a href="docs/wiki/Getting-Started.md">Getting started</a> ·
-    <a href="docs/on-disk-contract.md">On-disk contract</a> ·
-    <a href="vision.md">Vision</a> ·
-    <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
-  </p>
+  <p><a href="#install-localx">Install</a> · <a href="#start-with-the-browser-interface">First use</a> · <a href="#updates-and-troubleshooting">Updates &amp; help</a> · <a href="docs/README.md">All guides</a></p>
   <p>
     <a href="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/C0deGeek-dev/LocalMind/actions/workflows/ci.yml/badge.svg"></a>
     <img alt="LocalX release train 5.0.0" src="https://img.shields.io/badge/release%20train-v5.0.0-69d987?style=flat-square">
@@ -30,12 +18,151 @@ human to review them, and stores accepted knowledge as readable project files.
 | At a glance | |
 |---|---|
 | **Use it when** | Your agent keeps rediscovering the same fixes, decisions, and project conventions |
-| **It remembers** | Only lessons you explicitly accept or edit |
+| **It remembers** | Reviewed lessons; the setup below uses manual approval |
 | **It stores** | Readable Markdown memory plus a local SQLite audit/search index |
 | **You review it in** | The CLI, or a localhost web app (`localmind ui`) |
-| **Agents use it via** | A stdio MCP server (`localmind mcp serve`): query memory/docs/code/skills and propose review-gated lessons |
+| **Agents use it via** | The built-in LocalPilot integration, or MCP tools for other compatible agents |
 | **It connects to** | LocalPilot natively; generic, Claude Code, and OpenAI Codex transcripts through the CLI |
 | **Cloud required** | No |
+
+<a name="quick-start"></a>
+
+## Install LocalX
+
+**No programming tools or compilation required.** The installer downloads ready-to-run
+applications and checks their SHA-256 checksums. You get **LocalBox, LocalPilot,
+LocalMind, and LocalBench**, plus `localx` for managing them and the llama.cpp
+engine for running models. You do not need to clone this repository.
+
+### 1. Run the installer
+
+**Windows 10/11 (64-bit Intel or AMD):** open the Start menu, type **PowerShell**,
+and open it. Paste this command, then press **Enter**:
+
+```powershell
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+**Linux (x86-64 or ARM64) / macOS (Apple Silicon):** open **Terminal**, paste
+this command, then press **Enter**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+```
+
+### 2. Let your terminal find the commands
+
+`PATH` is the list of folders your terminal searches for applications. Add the
+LocalX folder once so commands such as `localx update` work from any directory.
+
+<details>
+<summary><strong>Windows — paste this into the same PowerShell window</strong></summary>
+
+```powershell
+$localxBin = Join-Path $env:LOCALAPPDATA 'localx\bin'
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $localxBin) {
+    [Environment]::SetEnvironmentVariable('Path', "$localxBin;$userPath", 'User')
+}
+$env:Path = "$localxBin;$env:Path"
+```
+
+This enables the commands in this window and saves the setting for future
+terminals. If another open terminal cannot find them, close and reopen it.
+
+</details>
+
+<details>
+<summary><strong>Linux / macOS — add LocalX to your shell's PATH</strong></summary>
+
+Paste this into your terminal:
+
+```sh
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/localx/bin:$PATH"
+```
+
+To keep it for future terminals, add the same line to your shell configuration:
+`~/.bashrc` for Bash or `~/.zshrc` for Zsh. Use the directory printed by the
+installer if it differs.
+
+</details>
+
+### 3. Check the installation
+
+```sh
+localx status
+```
+
+You should see the installed tools and engine. **Installing the tools does not
+download an AI model**; choose one when you start using LocalBox.
+
+Want to read the installer before running it, check platform support, or install
+a specific version? See the [installation guide](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/install.md).
+
+## Start with the browser interface
+
+LocalPilot already embeds LocalMind's learning engine. **You do not need to
+build this repository to use it.** The standalone `localmind` command is useful
+for browsing memory or working with sessions from other agents.
+
+Open a terminal in the project folder you want to use. Create a file named
+**`.localmind.toml`** in that folder with this content to enable local learning
+and keep this project's memory scoped to the project:
+
+```toml
+[learning]
+enabled = true
+local_only = true
+memory_root = ".localmind/memory"
+allowed_scopes = ["project"]
+excluded_paths = ["target/**", ".git/**"]
+
+[review]
+mode = "manual"
+```
+
+Then open the local browser interface:
+
+```sh
+localmind ui --project . --open
+```
+
+You can browse memory, inspect the review queue, and accept or reject lessons.
+A new project starts empty; import a session or use LocalPilot to produce
+candidate lessons. Here, `.` means the current project folder.
+
+<details>
+<summary><strong>Import a transcript and review lessons from the command line</strong></summary>
+
+Replace `./session.txt` with your transcript file:
+
+```sh
+localmind import ./session.txt --project . --source open-ai-codex
+localmind closeout <session-id> --project .
+localmind review list --project .
+localmind review accept <lesson-id> --project . --reviewer <your-name>
+localmind promote <lesson-id> --project .
+localmind search "your topic" --project .
+```
+
+Replace each `<…>` placeholder with the actual value; do not type the brackets.
+Use the session ID reported by import and a lesson ID from the review queue.
+
+</details>
+
+## Updates and troubleshooting
+
+| I want to… | Run |
+|---|---|
+| Update the whole stack and model engine | `localx update` |
+| See installed versions | `localx status` |
+| Diagnose installation problems | `localx doctor` |
+| Retry an incomplete installation | `localx install` |
+
+Ordinary installs use published releases; updates do not require Rust or Git.
+If a command is “not recognized” or “not found”, complete the PATH step above.
+If an older installation is taking precedence, `localx doctor` identifies it;
+review its findings before using `localx doctor --fix` to remove old copies.
 
 ## Privacy by design
 
@@ -52,79 +179,13 @@ LocalMind keeps the knowledge extracted from your work under your control.
   a project's memory project-only. Nothing leaves the machine (`local_only`).
 - **Inference is optional.** Deterministic local behavior works without a cloud
   service; any configured inference or embedding endpoint is an explicit choice.
-- **Nothing becomes memory silently.** Secret redaction and human review happen
-  before durable project knowledge is written.
+- **Manual review is the default.** Candidate lessons are redacted and queued
+  for your decision before they become durable knowledge.
 
 > [!IMPORTANT]
-> LocalMind is opt-in and review-gated. It refuses project memory writes until
-> `.localmind.toml` enables learning, and it never promotes a candidate lesson
-> automatically.
-
-## Quick start
-
-The quickest install is the LocalX one-liner, which installs `localmind`
-alongside the rest of the stack at one version — no Rust toolchain needed:
-
-```sh
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
-```
-
-```powershell
-# Windows
-irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
-```
-
-The tools are cut as a set and only tested together, so they are installed as a
-set; `localpilot update --all` re-runs it. Each release also publishes verified
-per-platform archives if you would rather install `localmind` on its own.
-
-Build the CLI:
-
-```sh
-git clone https://github.com/C0deGeek-dev/LocalMind.git
-cd LocalMind
-cargo build -p localmind-cli
-cargo run -p localmind-cli -- --help
-```
-
-Enable local-only learning in the project you want LocalMind to serve:
-
-```toml
-# .localmind.toml
-[learning]
-enabled = true
-local_only = true
-memory_root = ".localmind/memory"
-allowed_scopes = ["project"]
-excluded_paths = ["target/**", ".git/**"]
-```
-
-Import a transcript, close the session out, and inspect the review queue:
-
-```sh
-localmind import ./session.txt --project . --source open-ai-codex
-localmind closeout <session-id> --project .
-localmind review list --project .
-```
-
-When an agent has already distilled one reusable lesson, it can propose it
-directly without bypassing review:
-
-```sh
-localmind propose "Keep retry loops bounded" --source open-ai-codex --idempotency-key retry-policy-v1
-```
-
-Accept one durable lesson, then promote and find it:
-
-```sh
-localmind review accept <lesson-id> --project . --reviewer <your-name>
-localmind promote <lesson-id> --project .
-localmind search "deterministic fixtures" --project .
-```
-
-If you are running from the checkout instead of an installed binary, prefix a
-command with `cargo run -p localmind-cli --`.
+> LocalMind requires project opt-in. The setup above uses manual review: you
+> decide which lessons become durable memory. Optional trusted/automatic review
+> modes must be configured separately.
 
 ## The learning loop
 
@@ -165,6 +226,9 @@ cloud inference is not the default.
 Promotion writes readable Markdown below `.localmind/memory/project/`, updates
 the local search and relationship index, and records an audit event in
 `.localmind/localmind.sqlite`.
+
+<details>
+<summary><strong>Explore storage, sync, MCP, and code/document indexing</strong></summary>
 
 ## What gets written
 
@@ -288,12 +352,17 @@ endpoint degrades truthfully. `localmind backfill` is the exception because its
 entire job is embedding; with pending rows it exits with the exact repair cue
 `localbox embed-serve` instead of reporting a successful empty sweep.
 
+</details>
+
 ## Evidence so far
 
 In the controlled `localbench-uplift-v1` evaluation, injecting accepted lessons
 lifted a deliberately headroom-rich held-out suite from **0% to 100%**. The
 effect held on a second local model. This is evidence that reviewed memory can
 change outcomes, not a claim that every task becomes solvable.
+
+<details>
+<summary><strong>Architecture and integration reference for host authors</strong></summary>
 
 ## Architecture for host authors
 
@@ -335,6 +404,8 @@ resolved optimistically (D-LM-0034).
 | Full documentation map | [Docs index](docs/README.md) |
 | Release history | [Changelog](CHANGELOG.md) |
 
+</details>
+
 <details>
 <summary><strong>Developing LocalMind</strong></summary>
 
@@ -365,6 +436,22 @@ LocalMind is the learning layer in the
 | [LocalBench](https://github.com/C0deGeek-dev/LocalBench) | Find fast, stable settings |
 | [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) | Code through the agent harness |
 | **LocalMind** | Turn reviewed sessions into reusable project memory |
+
+<details>
+<summary><strong>Build from source (developers only)</strong></summary>
+
+The ready-to-run installation above is sufficient for normal use. Building from
+source requires Rust and the platform build tools. Run these commands from the
+repository checkout unless a clone command is shown:
+
+```sh
+git clone https://github.com/C0deGeek-dev/LocalMind.git
+cd LocalMind
+cargo build -p localmind-cli
+cargo run -p localmind-cli -- --help
+```
+
+</details>
 
 ## License
 
