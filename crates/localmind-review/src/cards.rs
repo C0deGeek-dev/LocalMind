@@ -594,8 +594,15 @@ pub fn review_cards(
     }
 }
 
-fn seconds(wall_ms: u64) -> String {
-    format!("{}.{} s", wall_ms / 1000, (wall_ms % 1000) / 100)
+/// A duration a person can read: milliseconds under a second, so a check that
+/// took 12 ms is not shown as `0.0 s`. `None` for zero, which is what a record
+/// that never measured its time carries — said by saying nothing.
+fn duration(wall_ms: u64) -> Option<String> {
+    match wall_ms {
+        0 => None,
+        1..=999 => Some(format!("{wall_ms} ms")),
+        _ => Some(format!("{}.{} s", wall_ms / 1000, (wall_ms % 1000) / 100)),
+    }
 }
 
 /// Append `text` at `indent`, one output line per input line. Control
@@ -738,13 +745,10 @@ pub fn render_text(cards: &ReviewCards) -> String {
             push(&mut out, 5, &format!("decided by: {oracle}"));
         }
         for arm in &card.arms {
-            let mut line = format!(
-                "arm {}: {} of {} passed, {}",
-                arm.arm,
-                arm.passed,
-                arm.attempts,
-                seconds(arm.wall_ms)
-            );
+            let mut line = format!("arm {}: {} of {} passed", arm.arm, arm.passed, arm.attempts);
+            if let Some(took) = duration(arm.wall_ms) {
+                line.push_str(&format!(", {took}"));
+            }
             if arm.cancelled {
                 line.push_str(", cancelled");
             }
@@ -764,11 +768,10 @@ pub fn render_text(cards: &ReviewCards) -> String {
             run.push_str(&format!(", model {model}"));
         }
         if card.repetitions > 0 {
-            run.push_str(&format!(
-                ", {} attempt(s), {} in total",
-                card.repetitions,
-                seconds(card.wall_ms)
-            ));
+            run.push_str(&format!(", {} attempt(s)", card.repetitions));
+            if let Some(took) = duration(card.wall_ms) {
+                run.push_str(&format!(", {took} in total"));
+            }
         }
         push(&mut out, 5, &run);
         for limitation in &card.limitations {

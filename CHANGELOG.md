@@ -5,6 +5,9 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Review cards no longer show a short check as `0.0 s`.** A duration under a
+  second is shown in milliseconds, and a result that never measured its time
+  shows no time.
 - **Review shows a lesson's hindsight and lab results** (D-LM-0056).
   `review inspect` and the web review now show two cards for every item: the
   hindsight (what was intended and observed, the facts, the cause and its

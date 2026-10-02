@@ -868,3 +868,32 @@ allowed_scopes = [\"project\"]
         );
     }
 }
+
+/// A short check is shown in milliseconds, and a record that never measured
+/// its time shows no time — never `0.0 s`.
+#[test]
+fn a_short_or_unmeasured_duration_is_never_shown_as_zero_seconds() {
+    let dir = project();
+    let base = bare();
+    let mut quick = result(&base, EvidenceTier::Replay, LabVerdict::Valid, None);
+    quick.arms[0].wall_ms = 12;
+    quick.arms[1].wall_ms = 0;
+    let (_, text) = shown(dir.path(), &base.clone().with_experiment(quick));
+
+    assert!(
+        text.contains("arm baseline: 1 of 4 passed, 12 ms"),
+        "{text}"
+    );
+    assert!(text.contains("arm lessons: 3 of 4 passed\n"), "{text}");
+    assert!(text.contains("8 attempt(s), 12 ms in total"), "{text}");
+    assert!(!text.contains("0.0 s"), "{text}");
+
+    let dir = project();
+    let mut unmeasured = result(&base, EvidenceTier::Logic, LabVerdict::Valid, None);
+    for arm in &mut unmeasured.arms {
+        arm.wall_ms = 0;
+    }
+    let (_, text) = shown(dir.path(), &base.clone().with_experiment(unmeasured));
+    assert!(text.contains(", 8 attempt(s)\n"), "{text}");
+    assert!(!text.contains("in total"), "{text}");
+}

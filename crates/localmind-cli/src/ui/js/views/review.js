@@ -183,17 +183,20 @@ function hindsightHtml(h, missing) {
   </section>`;
 }
 
-function secs(ms) {
-  return (ms / 1000).toFixed(1) + ' s';
+// Milliseconds under a second, and nothing at all for an unmeasured zero — the
+// same rule the text cards use.
+function took(ms) {
+  if (!ms) return '';
+  return ms < 1000 ? `${ms} ms` : (ms / 1000).toFixed(1) + ' s';
 }
 
 function experimentHtml(e, n) {
   const tags = (e.stale ? '<span class="ctag warn">stale: about an earlier version — does not count until rerun</span>' : '')
     + (e.harmful ? '<span class="ctag bad">harmful result: held for a person</span>' : '');
   const arms = e.arms.map(a => row('arm ' + a.arm,
-    `${a.passed} of ${a.attempts} passed, ${secs(a.wall_ms)}${a.cancelled ? ', cancelled' : ''}${a.truncated ? ', output truncated' : ''}${a.observations.length ? ' — ' + a.observations.join('; ') : ''}`)).join('');
+    `${a.passed} of ${a.attempts} passed${took(a.wall_ms) ? ', ' + took(a.wall_ms) : ''}${a.cancelled ? ', cancelled' : ''}${a.truncated ? ', output truncated' : ''}${a.observations.length ? ' — ' + a.observations.join('; ') : ''}`)).join('');
   const state = { available: 'available', no_longer_retained: 'no longer retained; the result itself still stands', not_checked: 'not checked from here' };
-  const run = `revision ${e.source_revision.slice(0, 11)}${e.model ? ', model ' + e.model : ''}${e.repetitions ? `, ${e.repetitions} attempt(s), ${secs(e.wall_ms)} in total` : ''}`;
+  const run = `revision ${e.source_revision.slice(0, 11)}${e.model ? ', model ' + e.model : ''}${e.repetitions ? `, ${e.repetitions} attempt(s)${took(e.wall_ms) ? ', ' + took(e.wall_ms) + ' in total' : ''}` : ''}`;
   return `<section class="card">
     <h4>${n}. ${esc(e.tier)} — ${esc(e.verdict)} ${tags}</h4>
     <p class="cmeaning"><b>${esc(e.verdict)}</b> — ${esc(e.meaning)}</p>
