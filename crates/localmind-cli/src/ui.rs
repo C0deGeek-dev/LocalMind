@@ -948,6 +948,13 @@ fn decide(
         evidence: Vec::new(),
     })?;
     persistence.record_review_item_audit(&item)?;
+    // An edit returns the rewritten item; the original it closed is a decision
+    // of its own and is audited as one.
+    if &item.id != item_id {
+        if let Some(original) = queue.get(item_id)? {
+            persistence.record_review_item_audit(&original)?;
+        }
+    }
     Ok(format!("{:?}", item.state))
 }
 
@@ -1306,5 +1313,55 @@ mod tests {
             };
             assert!(!s.is_empty(), "{name} should be non-empty");
         }
+    }
+
+    /// The web review's edit goes through the same rewrite as the CLI's: the
+    /// original stays as history, the rewrite is a new item, and promoting from
+    /// the id the page still holds writes the rewritten text.
+    #[test]
+    fn an_edit_from_the_web_review_is_a_rewrite_with_lineage() {
+        let (dir, id) = project_with_pending();
+        let project = dir.path();
+        let body =
+            json!({ "reviewer": "ada", "replacement": "Promote accepted items on purpose." })
+                .to_string();
+
+        super::api_review_action(project, &id, "edit", &body).expect("edit");
+
+        let queue = ReviewQueue::open_project(project).expect("queue");
+        let original = queue
+            .get(&localmind_core::ReviewItemId::new(id.as_str()))
+            .expect("get")
+            .expect("original");
+        assert_eq!(original.state, localmind_core::ReviewState::Merged);
+        assert_eq!(
+            original.candidate.summary(),
+            "Prefer promoting accepted items deliberately."
+        );
+        assert_eq!(original.descendants.len(), 1);
+        let revised = queue
+            .get(&original.descendants[0])
+            .expect("get")
+            .expect("revised");
+        assert_eq!(revised.reviewer.as_deref(), Some("ada"));
+        assert_eq!(
+            revised.candidate.revises.as_deref(),
+            Some(original.candidate.content_identity().as_str())
+        );
+
+        super::api_review_action(project, &id, "promote", &body).expect("promote");
+        let persistence = localmind_store::MemoryPersistence::open_project(project).expect("store");
+        let memory = persistence.list_memory().expect("memory");
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory[0].body, "Promote accepted items on purpose.");
+        let decisions: Vec<String> = persistence
+            .audit_records()
+            .expect("audit")
+            .into_iter()
+            .filter(|record| record.kind == "ReviewDecisionRecorded")
+            .map(|record| record.subject)
+            .collect();
+        assert!(decisions.contains(&id), "the original's closing is audited");
+        assert!(decisions.contains(&original.descendants[0].to_string()));
     }
 }

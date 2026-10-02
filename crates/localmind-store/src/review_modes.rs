@@ -241,6 +241,12 @@ impl ReviewModeProcessor {
             if let Some(note) = quality.review_note() {
                 notes = format!("{notes} {note}");
             }
+            if item.candidate.has_harmful_result() {
+                notes = format!(
+                    "{notes} A lab run found this lesson made results worse; it is held for a \
+                     person in every review mode."
+                );
+            }
             item.candidate.review_annotation = Some(ReviewAnnotation {
                 score: Confidence::new(confidence)?,
                 duplicate_of: duplicate_of.clone(),
@@ -267,6 +273,11 @@ impl ReviewModeProcessor {
                 }
                 ReviewModeConfig::Trusted => {
                     queue.replace_candidate(&item.id, &item.candidate)?;
+                    // A lab result that found this lesson harmful holds it for
+                    // a person. This is the only thing automation reads out of
+                    // a candidate's lab results, and it can only withhold an
+                    // acceptance: no result of any kind makes one happen.
+                    let held = item.candidate.has_harmful_result();
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
                     // Precedence, checked in order: a contradiction with a
                     // clear target retires that memory; else a confident
@@ -282,7 +293,7 @@ impl ReviewModeProcessor {
                     // conflict with no clear target, a borderline duplicate,
                     // low confidence) stays human-gated.
                     let mut outcome = None;
-                    if above_threshold && conflict && quality.is_general() {
+                    if !held && above_threshold && conflict && quality.is_general() {
                         if let Some(target) = related_target.clone() {
                             // Auto-superseding an accepted memory is the
                             // strongest automated action; gate it on the same
@@ -318,6 +329,7 @@ impl ReviewModeProcessor {
                         outcome = Some(AutoOutcome::Skipped);
                     }
                     if outcome.is_none()
+                        && !held
                         && above_threshold
                         && duplicate_of.is_none()
                         && quality.is_general()
@@ -355,9 +367,14 @@ impl ReviewModeProcessor {
                     // candidate auto-accepts as before, with no confidence
                     // gate (matching this mode's existing, more permissive
                     // accept posture).
+                    // A lab result that found this lesson harmful holds it for
+                    // a person. This is the only thing automation reads out of
+                    // a candidate's lab results, and it can only withhold an
+                    // acceptance: no result of any kind makes one happen.
+                    let held = item.candidate.has_harmful_result();
                     let above_threshold = confidence >= config.config.review.trusted_threshold;
                     let mut outcome = None;
-                    if above_threshold && conflict && quality.is_general() {
+                    if !held && above_threshold && conflict && quality.is_general() {
                         // Same D-LM-0024 quality gate as the accept arm: a
                         // non-`General` candidate never auto-retires a memory.
                         if let Some(target) = related_target.clone() {
@@ -390,6 +407,7 @@ impl ReviewModeProcessor {
                         outcome = Some(AutoOutcome::Skipped);
                     }
                     if outcome.is_none()
+                        && !held
                         && duplicate_of.is_none()
                         && quality.is_general()
                         && auto_decide(

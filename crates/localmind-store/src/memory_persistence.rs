@@ -356,6 +356,14 @@ impl MemoryPersistence {
                 .ok_or_else(|| MemoryPersistenceError::MissingReviewItem {
                     item_id: item_id.clone(),
                 })?;
+        // A rewritten item is history; the lesson to promote is the one it was
+        // revised into. Following the link keeps a caller that still holds the
+        // original id working, and it can never promote the original's text.
+        if item.reviewer_action.as_deref() == Some("revised_into") {
+            if let [revised] = item.descendants.as_slice() {
+                return self.promote_review_item(revised);
+            }
+        }
         if !matches!(item.state, ReviewState::Accepted | ReviewState::Edited) {
             return Err(MemoryPersistenceError::ReviewItemNotAccepted {
                 item_id: item_id.clone(),
@@ -397,6 +405,13 @@ impl MemoryPersistence {
             MemoryScope::Project
         };
         let connection = self.connection_for(&scope)?;
+        // A rewrite of a lesson that was already memory retires that memory the
+        // way a supersede does — visibly, audited, reversible — and never edits
+        // it in place.
+        let target = match target {
+            Some(target) => Some(target),
+            None => Self::rewritten_memory(&queue, &item, connection)?,
+        };
         let mut entry = MemoryEntry {
             id: MemoryEntryId::new(item.candidate.id.as_str()),
             scope,
@@ -464,6 +479,26 @@ impl MemoryPersistence {
         tx.commit().map_err(MemoryPersistenceError::Sqlite)?;
         self.embed_memory_if_configured(connection, &entry)?;
         Ok(entry)
+    }
+
+    /// The memory a rewritten item's original left behind, when the original
+    /// had already been promoted into this store.
+    fn rewritten_memory(
+        queue: &ReviewQueue,
+        item: &crate::ReviewQueueItem,
+        connection: &Connection,
+    ) -> Result<Option<MemoryEntryId>, MemoryPersistenceError> {
+        if item.candidate.revises.is_none() {
+            return Ok(None);
+        }
+        let Some(parent) = queue.parent_of(&item.id)? else {
+            return Ok(None);
+        };
+        if parent.reviewer_action.as_deref() != Some("revised_into") {
+            return Ok(None);
+        }
+        let memory = MemoryEntryId::new(parent.candidate.id.as_str());
+        Ok(Self::memory_body_in(connection, &memory)?.map(|_| memory))
     }
 
     /// Flips a memory's index status to `Superseded` so retrieval (which filters
@@ -569,6 +604,13 @@ impl MemoryPersistence {
                 // audit write happens before the CLI's separate delete_memory()
                 // call, so it survives even if that later call never runs.
                 "delete_existing_target": item.delete_existing_target.as_ref().map(MemoryEntryId::as_str),
+                // Lineage, in both directions: what a rewritten or split item
+                // became, and what a revised item replaced. With the reviewer
+                // and the replacement text this is the record of who changed
+                // what into what.
+                "descendants": item.descendants.iter().map(ReviewItemId::as_str).collect::<Vec<_>>(),
+                "revises": item.candidate.revises.as_deref(),
+                "replacement": item.replacement_summary.as_deref(),
             }),
         )
     }

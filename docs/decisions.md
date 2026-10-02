@@ -4,6 +4,74 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0055 — A rewrite or a split makes new review items, and only a harmful result may hold a lesson back
+
+- **Date**: 2026-10-02
+- **Status**: accepted. Amends D-LM-0048 on one point, stated below.
+
+An `Edit` decision used to mean "accept, with this text instead": the stored
+candidate stayed as it was and promotion wrote the replacement. A lab result is
+bound to the candidate's identity, so the result stayed attached and read as
+current while the lesson that reached memory was text nobody had tested.
+
+**A rewrite never edits an item.** `ReviewQueue::rewrite` closes the original as
+history — its text, hindsight and lab results untouched — and inserts a revised
+item, accepted in the same step under the reviewer's name. The revised candidate
+names the original's content identity in `revises` and carries no results.
+`CandidateLesson::revised` applies a `LessonRevision`: the lesson sentence, and
+optionally the hindsight's leading cause, its applicability and its
+intervention. Correcting the cause keeps the facts it cites; a reviewer changes
+the reading of the evidence, not the evidence. A revision that changes nothing
+is refused.
+
+**A split is the same with several descendants.** `ReviewQueue::split` inserts
+each part as its own **pending** item that revises the original, and closes the
+original. Nothing is accepted by splitting.
+
+**Two bookkeeping actions record it.** `ReviewAction::RevisedInto(item)` and
+`SplitInto(items)` close the original `Merged`, like `MergeInto`: never promoted,
+never mutated. The descendants are durable on the closed row in a new nullable
+`review_items.descendants` column (schema v15, a JSON array of item ids), so
+lineage reads forward from the original as well as back through `revises`. The
+`ReviewDecisionRecorded` audit row carries `descendants`, `revises` and the
+replacement text.
+
+**Every existing caller gets this.** `ReviewQueue::decide` turns an `Edit`
+decision into a rewrite and returns the revised item, so the CLI, the web review
+and embedding hosts cannot take the old path. `promote_review_item` follows a
+rewritten original to its revision, so a caller still holding the original id
+promotes the rewritten text and can never promote the original's.
+
+**A decided item is history.** Rejected, merged, edited and rewritten items
+refuse a rewrite or a split, and `replace_candidate` refuses to give a decided
+row different content. Annotating a decided row or recording a result on it
+leaves its identity alone and is still allowed. An *accepted* item can be
+rewritten — accepting an excerpt and then distilling it is an ordinary order of
+work — and if its text had already been promoted, promoting the rewrite retires
+that memory the way a supersede does: audited, reversible, never edited in
+place.
+
+**The amendment.** D-LM-0048 has every lab result invisible to review
+automation: a candidate carrying any verdict reaches the same trusted and
+automatic decision as one carrying none. That still holds for every verdict but
+one. A candidate with a current `Contradicted` result
+(`CandidateLesson::has_harmful_result`) is not auto-accepted or auto-superseded
+in any mode; it waits for a person, and its annotation says why. A result can
+therefore withhold an automatic acceptance and can never cause one — the
+direction D-LM-0048 exists to protect is unchanged. A `Contradicted` result
+bound to an earlier version of the lesson is stale and holds nothing.
+
+Rejected: keeping `Edit` in place and marking old results stale. It leaves one
+row meaning two lessons, and "which text was tested" answerable only by reading
+timestamps.
+
+Rejected: a `rerun` review action. Asking for a rerun is a host concern and
+must not let a review decision reach a runner; it stays out of `ReviewAction`.
+
+An older build cannot read a `revised_into` / `split_into` row's meaning: it
+loads the row as `Merged` with no merge target, which is the correct
+"closed, not promotable" reading. It ignores the `descendants` column.
+
 ## D-LM-0054 — A task set a person approved is an assignment source, and says whether a model drafted it
 
 - **Date**: 2026-10-02

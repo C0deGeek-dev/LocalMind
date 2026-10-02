@@ -217,7 +217,8 @@ cloud inference is not the default.
 | `localmind propose "…"` | Add a bounded, source-labelled pending candidate; never auto-accept |
 | `localmind review inspect <id>` | Read the evidence before deciding |
 | `localmind review accept <id>` | Mark the lesson as durable enough to keep |
-| `localmind review edit <id> "…"` | Correct the lesson before accepting it |
+| `localmind review edit <id> "…"` | Rewrite the lesson and accept the rewrite. The original is kept as history; the rewrite is a new item with no lab results |
+| `localmind review split <id> --part "…" --part "…"` | Split it into narrower pending lessons; the original is kept as history |
 | `localmind review reject <id>` | Reject it, optionally with a note |
 | `localmind review defer <id>` | Leave it for later |
 | `localmind promote <id>` | Write an accepted lesson to project memory |

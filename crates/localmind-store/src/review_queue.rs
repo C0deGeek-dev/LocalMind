@@ -1,7 +1,7 @@
 use crate::{ProjectConfig, StoreConfigError};
 use localmind_core::{
-    CandidateDestination, CandidateLesson, Confidence, LessonId, MemoryEntryId, ReviewAction,
-    ReviewDecision, ReviewItemId, ReviewState, SessionId,
+    CandidateDestination, CandidateLesson, Confidence, LessonId, LessonRevision, MemoryEntryId,
+    ReviewAction, ReviewDecision, ReviewItemId, ReviewState, SessionId,
 };
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use std::fs;
@@ -66,6 +66,27 @@ pub struct ReviewQueueItem {
     /// every other decision and for historic `delete_existing` rows that
     /// predate this field.
     pub delete_existing_target: Option<MemoryEntryId>,
+    /// The items that replaced this one when a reviewer rewrote it (one) or
+    /// split it (several). Empty for every other row and for rows written
+    /// before the column existed. Each descendant names this item's content
+    /// identity as what it `revises`.
+    pub descendants: Vec<ReviewItemId>,
+}
+
+/// What [`ReviewQueue::rewrite`] did: the original, closed as history with its
+/// text and lab results untouched, and the revised lesson that replaced it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RewriteOutcome {
+    pub original: ReviewQueueItem,
+    pub revised: ReviewQueueItem,
+}
+
+/// What [`ReviewQueue::split`] did: the original, closed as history, and the
+/// pending parts that replaced it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitOutcome {
+    pub original: ReviewQueueItem,
+    pub parts: Vec<ReviewQueueItem>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,7 +611,7 @@ impl ReviewQueue {
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
                        seen_count, supersede_target, merge_target, merge_memory_target,
-                       delete_existing_target
+                       delete_existing_target, descendants
                 FROM review_items
                 ORDER BY created_at, id
                 "#,
@@ -613,7 +634,7 @@ impl ReviewQueue {
                 SELECT id, session_id, candidate_json, state, reviewer_action,
                        reviewer, note, replacement_summary, created_at, updated_at,
                        seen_count, supersede_target, merge_target, merge_memory_target,
-                       delete_existing_target
+                       delete_existing_target, descendants
                 FROM review_items
                 WHERE id = ?1
                 "#,
@@ -629,6 +650,19 @@ impl ReviewQueue {
         item_id: &ReviewItemId,
         candidate: &CandidateLesson,
     ) -> Result<(), ReviewQueueError> {
+        // A decided row is history. Annotating it or attaching a result to it
+        // leaves its identity alone and is allowed; giving it different content
+        // would change what a reviewer decided on after they decided.
+        if let Some(stored) = self.get(item_id)? {
+            if !is_open(&stored.state)
+                && stored.candidate.content_identity() != candidate.content_identity()
+            {
+                return Err(ReviewQueueError::NotOpen {
+                    item_id: item_id.clone(),
+                    state: state_name(&stored.state),
+                });
+            }
+        }
         let candidate_json =
             serde_json::to_string(candidate).map_err(ReviewQueueError::SerializeCandidate)?;
         let changed = self
@@ -646,20 +680,55 @@ impl ReviewQueue {
         Ok(())
     }
 
+    /// Record a review decision and return the item it leaves the reviewer
+    /// holding.
+    ///
+    /// An `Edit` is a rewrite: it never changes the decided item's text in
+    /// place. The original closes as history and the item returned is the
+    /// revised lesson, accepted with the reviewer's text — see
+    /// [`ReviewQueue::rewrite`].
     pub fn decide(&self, decision: ReviewDecision) -> Result<ReviewQueueItem, ReviewQueueError> {
-        let state = localmind_review::state_after_decision(&decision);
-        if matches!(decision.action, ReviewAction::Edit)
-            && decision
+        if matches!(decision.action, ReviewAction::Edit) {
+            let replacement = decision
                 .replacement_summary
                 .as_deref()
                 .map(str::trim)
                 .unwrap_or_default()
-                .is_empty()
-        {
-            return Err(ReviewQueueError::InvalidEdit {
-                item_id: decision.item_id,
-            });
+                .to_string();
+            if replacement.is_empty() {
+                return Err(ReviewQueueError::InvalidEdit {
+                    item_id: decision.item_id,
+                });
+            }
+            return self
+                .rewrite(
+                    &decision.item_id,
+                    &LessonRevision::of_summary(replacement),
+                    &decision.reviewer,
+                    decision.note,
+                )
+                .map(|outcome| outcome.revised);
         }
+        let state = localmind_review::state_after_decision(&decision);
+        let descendants = match &decision.action {
+            ReviewAction::RevisedInto(target) => Some(vec![target.clone()]),
+            ReviewAction::SplitInto(targets) => Some(targets.clone()),
+            _ => None,
+        };
+        if let Some(descendants) = &descendants {
+            for target in descendants {
+                if target == &decision.item_id || self.get(target)?.is_none() {
+                    return Err(ReviewQueueError::MissingMergeTarget {
+                        item_id: decision.item_id,
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+        let descendants_json = descendants.map(|ids| {
+            serde_json::Value::from(ids.iter().map(ReviewItemId::to_string).collect::<Vec<_>>())
+                .to_string()
+        });
         // `Supersede`'s target is not validated here — this queue only ever
         // opens the *project* database, while a target can legitimately
         // live in the separate machine-wide global store, so an existence
@@ -722,7 +791,8 @@ impl ReviewQueue {
                     supersede_target = ?8,
                     merge_target = ?9,
                     merge_memory_target = ?10,
-                    delete_existing_target = ?11
+                    delete_existing_target = ?11,
+                    descendants = ?12
                 WHERE id = ?1
                 "#,
                 params![
@@ -737,6 +807,7 @@ impl ReviewQueue {
                     merge_target,
                     merge_memory_target,
                     delete_existing_target,
+                    descendants_json,
                 ],
             )
             .map_err(ReviewQueueError::Sqlite)?;
@@ -751,6 +822,233 @@ impl ReviewQueue {
             .ok_or(ReviewQueueError::MissingItem {
                 item_id: decision.item_id,
             })
+    }
+
+    /// Rewrite an open item as a reviewer.
+    ///
+    /// The original is never edited. It closes as history — its text, its
+    /// hindsight and its lab results exactly as they were — and a revised
+    /// lesson takes its place, accepted in the same step under the reviewer's
+    /// name. The revised lesson names the original as what it `revises` and
+    /// carries no lab results: a result is about the text it was run against.
+    /// Both rows record the reviewer and note; the original also records the
+    /// replacement sentence, so what changed is readable from either side.
+    ///
+    /// # Errors
+    /// [`ReviewQueueError::NotOpen`] when the item was already decided,
+    /// [`ReviewQueueError::Revision`] when the change is empty or changes
+    /// nothing.
+    pub fn rewrite(
+        &self,
+        item_id: &ReviewItemId,
+        revision: &LessonRevision,
+        reviewer: &str,
+        note: Option<String>,
+    ) -> Result<RewriteOutcome, ReviewQueueError> {
+        let original = self.item_in(item_id, is_rewritable)?;
+        let revised_id = self.descendant_id(item_id, "r")?;
+        let candidate = original
+            .candidate
+            .revised(LessonId::new(revised_id.as_str()), revision)
+            .map_err(|source| ReviewQueueError::Revision {
+                item_id: item_id.clone(),
+                source,
+            })?;
+
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(ReviewQueueError::Sqlite)?;
+        self.insert_descendant(&original, &revised_id, &candidate, &ReviewState::Edited)?;
+        self.connection
+            .execute(
+                "UPDATE review_items SET reviewer_action = ?2, reviewer = ?3, note = ?4 WHERE id = ?1",
+                params![
+                    revised_id.as_str(),
+                    action_name(&ReviewAction::Edit),
+                    reviewer,
+                    note
+                ],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        let closed = self.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::RevisedInto(revised_id.clone()),
+            reviewer: reviewer.to_string(),
+            decided_at: None,
+            note,
+            replacement_summary: Some(candidate.summary().to_string()),
+            evidence: Vec::new(),
+        })?;
+        tx.commit().map_err(ReviewQueueError::Sqlite)?;
+
+        let revised = self
+            .get(&revised_id)?
+            .ok_or(ReviewQueueError::MissingItem {
+                item_id: revised_id,
+            })?;
+        Ok(RewriteOutcome {
+            original: closed,
+            revised,
+        })
+    }
+
+    /// Split an open item into narrower lessons as a reviewer.
+    ///
+    /// Each part becomes its own **pending** item that names the original as
+    /// what it `revises` and carries no lab results; each is reviewed, tested
+    /// and decided on its own. The original closes as history, untouched.
+    ///
+    /// # Errors
+    /// [`ReviewQueueError::NotOpen`] when the item was already decided,
+    /// [`ReviewQueueError::InvalidSplit`] for fewer than two parts, a part with
+    /// no lesson sentence, or two parts saying the same thing, and
+    /// [`ReviewQueueError::Revision`] when a part changes nothing.
+    pub fn split(
+        &self,
+        item_id: &ReviewItemId,
+        parts: &[LessonRevision],
+        reviewer: &str,
+        note: Option<String>,
+    ) -> Result<SplitOutcome, ReviewQueueError> {
+        let original = self.item_in(item_id, is_open)?;
+        let invalid = |reason: &'static str| ReviewQueueError::InvalidSplit {
+            item_id: item_id.clone(),
+            reason,
+        };
+        if parts.len() < 2 {
+            return Err(invalid("a split needs at least two parts"));
+        }
+        let mut hashes = Vec::new();
+        for part in parts {
+            let summary = part.summary.as_deref().map(str::trim).unwrap_or_default();
+            if summary.is_empty() {
+                return Err(invalid("every part needs its own lesson sentence"));
+            }
+            let hash = crate::dedup::canonical_hash(summary);
+            if hashes.contains(&hash) {
+                return Err(invalid("two parts say the same thing"));
+            }
+            hashes.push(hash);
+        }
+
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(ReviewQueueError::Sqlite)?;
+        let mut ids = Vec::new();
+        for part in parts {
+            let part_id = self.descendant_id(item_id, "s")?;
+            let candidate = original
+                .candidate
+                .revised(LessonId::new(part_id.as_str()), part)
+                .map_err(|source| ReviewQueueError::Revision {
+                    item_id: item_id.clone(),
+                    source,
+                })?;
+            self.insert_descendant(&original, &part_id, &candidate, &ReviewState::Pending)?;
+            ids.push(part_id);
+        }
+        let closed = self.decide(ReviewDecision {
+            item_id: item_id.clone(),
+            action: ReviewAction::SplitInto(ids.clone()),
+            reviewer: reviewer.to_string(),
+            decided_at: None,
+            note,
+            replacement_summary: None,
+            evidence: Vec::new(),
+        })?;
+        tx.commit().map_err(ReviewQueueError::Sqlite)?;
+
+        let mut items = Vec::new();
+        for id in ids {
+            items.push(
+                self.get(&id)?
+                    .ok_or(ReviewQueueError::MissingItem { item_id: id })?,
+            );
+        }
+        Ok(SplitOutcome {
+            original: closed,
+            parts: items,
+        })
+    }
+
+    /// The item a rewritten or split-off item replaced, when there is one.
+    pub fn parent_of(
+        &self,
+        item_id: &ReviewItemId,
+    ) -> Result<Option<ReviewQueueItem>, ReviewQueueError> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|item| item.descendants.contains(item_id)))
+    }
+
+    /// The item, when its state still allows the change being asked for.
+    fn item_in(
+        &self,
+        item_id: &ReviewItemId,
+        allowed: fn(&ReviewState) -> bool,
+    ) -> Result<ReviewQueueItem, ReviewQueueError> {
+        let item = self.get(item_id)?.ok_or(ReviewQueueError::MissingItem {
+            item_id: item_id.clone(),
+        })?;
+        if !allowed(&item.state) {
+            return Err(ReviewQueueError::NotOpen {
+                item_id: item_id.clone(),
+                state: state_name(&item.state),
+            });
+        }
+        Ok(item)
+    }
+
+    /// The first free id for a descendant of `item_id`: `<id>-r1`, `<id>-s2`.
+    fn descendant_id(
+        &self,
+        item_id: &ReviewItemId,
+        kind: &str,
+    ) -> Result<ReviewItemId, ReviewQueueError> {
+        let mut number = 1_u32;
+        loop {
+            let id = ReviewItemId::new(format!("{item_id}-{kind}{number}"));
+            if self.get(&id)?.is_none() {
+                return Ok(id);
+            }
+            number += 1;
+        }
+    }
+
+    /// Insert a descendant row directly. The enqueue dedup ladder is skipped on
+    /// purpose: it would merge a rewrite back into the pending row it replaces.
+    fn insert_descendant(
+        &self,
+        original: &ReviewQueueItem,
+        id: &ReviewItemId,
+        candidate: &CandidateLesson,
+        state: &ReviewState,
+    ) -> Result<(), ReviewQueueError> {
+        let candidate_json =
+            serde_json::to_string(candidate).map_err(ReviewQueueError::SerializeCandidate)?;
+        let now = now_string();
+        self.connection
+            .execute(
+                r#"
+                INSERT INTO review_items
+                (id, session_id, candidate_json, state, created_at, updated_at,
+                 canonical_hash, seen_count)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, 1)
+                "#,
+                params![
+                    id.as_str(),
+                    original.session_id.as_str(),
+                    candidate_json,
+                    state_name(state),
+                    now,
+                    crate::dedup::canonical_hash(candidate.summary()),
+                ],
+            )
+            .map_err(ReviewQueueError::Sqlite)?;
+        Ok(())
     }
 
     pub fn summary(&self) -> Result<ReviewQueueSummary, ReviewQueueError> {
@@ -804,6 +1102,15 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewQueueItem> {
         merge_target: row.get::<_, Option<String>>(12)?.map(ReviewItemId::new),
         merge_memory_target: row.get::<_, Option<String>>(13)?.map(MemoryEntryId::new),
         delete_existing_target: row.get::<_, Option<String>>(14)?.map(MemoryEntryId::new),
+        // An unreadable list loads as none rather than failing the row: the
+        // descendants still name this item in their own `revises`.
+        descendants: row
+            .get::<_, Option<String>>(15)?
+            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(ReviewItemId::new)
+            .collect(),
     })
 }
 
@@ -836,6 +1143,19 @@ fn find_duplicate<'a>(pending: &'a [DedupKey], hash: &str, summary: &str) -> Opt
     pending.iter().find(|key| {
         key.canonical_hash == hash || crate::dedup::is_near_duplicate(&key.summary, summary)
     })
+}
+
+/// Whether an item is still waiting for its decision.
+fn is_open(state: &ReviewState) -> bool {
+    matches!(state, ReviewState::Pending | ReviewState::Deferred)
+}
+
+/// Whether a reviewer can still rewrite an item in this state. An accepted
+/// item can be: accepting an excerpt and then distilling it is an ordinary
+/// order of work. Rewriting it still never edits it — it closes as history
+/// like any other rewritten item.
+fn is_rewritable(state: &ReviewState) -> bool {
+    is_open(state) || matches!(state, ReviewState::Accepted)
 }
 
 fn parse_state(value: &str) -> ReviewState {
@@ -872,6 +1192,8 @@ fn action_name(action: &ReviewAction) -> &'static str {
         ReviewAction::Supersede(_) => "supersede",
         ReviewAction::MergeIntoMemory(_) => "merge_into_memory",
         ReviewAction::DeleteExisting(_) => "delete_existing",
+        ReviewAction::RevisedInto(_) => "revised_into",
+        ReviewAction::SplitInto(_) => "split_into",
     }
 }
 
@@ -1145,6 +1467,23 @@ pub enum ReviewQueueError {
     MissingItem { item_id: ReviewItemId },
     #[error("edit decision for {item_id} requires non-empty replacement text")]
     InvalidEdit { item_id: ReviewItemId },
+    #[error(
+        "review item {item_id} is already {state}; it is history and cannot be changed this way"
+    )]
+    NotOpen {
+        item_id: ReviewItemId,
+        state: &'static str,
+    },
+    #[error("review item {item_id} cannot be revised: {source}")]
+    Revision {
+        item_id: ReviewItemId,
+        source: localmind_core::RevisionError,
+    },
+    #[error("review item {item_id} cannot be split: {reason}")]
+    InvalidSplit {
+        item_id: ReviewItemId,
+        reason: &'static str,
+    },
     #[error("review item {item_id} cannot be merged into itself ({target})")]
     InvalidMergeTarget {
         item_id: ReviewItemId,

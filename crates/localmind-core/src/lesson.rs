@@ -74,8 +74,9 @@ pub struct CandidateLesson {
     /// Evidence *about* the candidate, not part of it: excluded from
     /// [`CandidateLesson::content_identity`]. Were it included, attaching a
     /// result would change the identity that result is bound to, and every
-    /// result would be stale the moment it was recorded. Nothing in review mode
-    /// reads it.
+    /// result would be stale the moment it was recorded. Review automation
+    /// reads one thing out of it — [`CandidateLesson::has_harmful_result`] —
+    /// and only to hold a candidate back for a person.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub experiments: Vec<ExperimentEvidence>,
 }
@@ -216,6 +217,90 @@ impl CandidateLesson {
         self
     }
 
+    /// The candidate a reviewer's changes turn this one into.
+    ///
+    /// A new candidate under `id`, never this one edited in place: it names
+    /// this candidate as what it `revises`, and it carries **no** lab results.
+    /// A result describes the candidate it was run against; a rewritten lesson
+    /// is a different claim, so it starts untested however similar the wording.
+    /// The annotation review wrote about the old text is dropped for the same
+    /// reason, and a reviewer's rewrite is the edit
+    /// `requires_edit_before_promotion` was waiting for.
+    ///
+    /// # Errors
+    /// [`RevisionError`] when the change is empty, changes nothing, or corrects
+    /// analysis this candidate does not carry.
+    pub fn revised(
+        &self,
+        id: LessonId,
+        revision: &LessonRevision,
+    ) -> Result<CandidateLesson, RevisionError> {
+        let mut revised = self.clone();
+        revised.id = id;
+        if let Some(summary) = revision.summary.as_deref() {
+            let summary = summary.trim();
+            if summary.is_empty() {
+                return Err(RevisionError::Empty { field: "summary" });
+            }
+            revised.summary = summary.to_string();
+            if let Some(hindsight) = revised.hindsight.as_mut() {
+                if hindsight.proposed_lesson.is_some() {
+                    hindsight.proposed_lesson = Some(summary.to_string());
+                }
+            }
+        }
+        for (field, value) in [
+            ("cause", revision.cause.as_deref()),
+            ("applicability", revision.applicability.as_deref()),
+            ("intervention", revision.intervention.as_deref()),
+        ] {
+            let Some(value) = value else { continue };
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(RevisionError::Empty { field });
+            }
+            let Some(hindsight) = revised.hindsight.as_mut() else {
+                return Err(RevisionError::NoHindsight { field });
+            };
+            match field {
+                // The reviewer corrects the leading claim; the facts it cites
+                // stay, because a reviewer changes the reading of the evidence,
+                // not the evidence.
+                "cause" => match hindsight.hypotheses.first_mut() {
+                    Some(hypothesis) => hypothesis.claim = value.to_string(),
+                    None => return Err(RevisionError::NoHypothesis),
+                },
+                "applicability" => hindsight.applicability = Some(value.to_string()),
+                _ => hindsight.intervention = Some(value.to_string()),
+            }
+        }
+        let prior = self.content_identity();
+        revised.revises = Some(prior.clone());
+        revised.experiments = Vec::new();
+        revised.review_annotation = None;
+        // Compared under the original's id: a new id alone is not a change.
+        let mut probe = revised.clone();
+        probe.id = self.id.clone();
+        if probe.content_identity() == prior {
+            return Err(RevisionError::Unchanged);
+        }
+        revised.requires_edit_before_promotion = false;
+        Ok(revised)
+    }
+
+    /// Whether a lab result that still describes this candidate found the
+    /// lesson harmful.
+    ///
+    /// The one thing review automation reads out of `experiments`, and only to
+    /// hold a candidate back for a person. Nothing reads a favourable result:
+    /// evidence can stop an automatic acceptance, never cause one.
+    #[must_use]
+    pub fn has_harmful_result(&self) -> bool {
+        self.experiments.iter().any(|experiment| {
+            experiment.verdict == crate::LabVerdict::Contradicted && !experiment.is_stale_for(self)
+        })
+    }
+
     /// This candidate's identity, over its content rather than its wording.
     ///
     /// Two candidates share an identity when they say the same thing *and* rest
@@ -255,6 +340,44 @@ impl CandidateLesson {
 
         format!("{CANDIDATE_IDENTITY_PREFIX}{digest}")
     }
+}
+
+/// What a reviewer changes when rewriting a candidate. Every field is optional;
+/// at least one must differ from the candidate it is applied to.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct LessonRevision {
+    /// The lesson sentence.
+    pub summary: Option<String>,
+    /// The leading causal claim of the hindsight.
+    pub cause: Option<String>,
+    /// Where the lesson applies.
+    pub applicability: Option<String>,
+    /// The change that would have avoided the observed outcome.
+    pub intervention: Option<String>,
+}
+
+impl LessonRevision {
+    /// A revision of the lesson sentence alone.
+    #[must_use]
+    pub fn of_summary(summary: impl Into<String>) -> Self {
+        Self {
+            summary: Some(summary.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// Why a [`LessonRevision`] could not be applied.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RevisionError {
+    #[error("the revised {field} is empty")]
+    Empty { field: &'static str },
+    #[error("the revision changes nothing")]
+    Unchanged,
+    #[error("this lesson carries no hindsight, so its {field} cannot be corrected")]
+    NoHindsight { field: &'static str },
+    #[error("this lesson's hindsight names no cause to correct")]
+    NoHypothesis,
 }
 
 /// Prefix on a candidate content identity.

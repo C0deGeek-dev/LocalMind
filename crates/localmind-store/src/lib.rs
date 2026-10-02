@@ -116,10 +116,10 @@ pub use revalidation::{
 pub use review_modes::{ReviewModeError, ReviewModeProcessor, ReviewModeReport};
 pub use review_queue::{
     ProposeOutcome, ProposeScope, ProposedLesson, ReviewQueue, ReviewQueueError, ReviewQueueItem,
-    ReviewQueueSummary, PROPOSAL_BODY_MAX_CHARS, PROPOSAL_CATEGORY_MAX_CHARS,
-    PROPOSAL_EVIDENCE_MAX_CHARS, PROPOSAL_KEY_MAX_CHARS, PROPOSAL_MAX_RELATED_FILES,
-    PROPOSAL_MAX_TAGS, PROPOSAL_RELATED_FILE_MAX_CHARS, PROPOSAL_TAG_MAX_CHARS,
-    PROPOSAL_TITLE_MAX_CHARS, REVIEW_DB_FILE_NAME,
+    ReviewQueueSummary, RewriteOutcome, SplitOutcome, PROPOSAL_BODY_MAX_CHARS,
+    PROPOSAL_CATEGORY_MAX_CHARS, PROPOSAL_EVIDENCE_MAX_CHARS, PROPOSAL_KEY_MAX_CHARS,
+    PROPOSAL_MAX_RELATED_FILES, PROPOSAL_MAX_TAGS, PROPOSAL_RELATED_FILE_MAX_CHARS,
+    PROPOSAL_TAG_MAX_CHARS, PROPOSAL_TITLE_MAX_CHARS, REVIEW_DB_FILE_NAME,
 };
 pub use schema::SchemaError;
 pub use sessions::{plan_retention, scan_sessions, RetentionPlan, RetentionPolicy, SessionEntry};

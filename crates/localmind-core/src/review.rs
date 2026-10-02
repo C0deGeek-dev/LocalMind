@@ -66,4 +66,12 @@ pub enum ReviewAction {
     /// promoted as its replacement: if the candidate were worth keeping, the
     /// reviewer would supersede instead.
     DeleteExisting(MemoryEntryId),
+    /// This item was rewritten by a reviewer: the revised lesson is the new
+    /// item named here, and this one closes as history. Bookkeeping only, like
+    /// [`Self::MergeInto`] — the item closes `Merged`, is never promoted, and
+    /// keeps its original text and lab results exactly as they were.
+    RevisedInto(ReviewItemId),
+    /// This item was split by a reviewer into the items named here, each a
+    /// narrower lesson that revises it. Closes `Merged`, as `RevisedInto` does.
+    SplitInto(Vec<ReviewItemId>),
 }

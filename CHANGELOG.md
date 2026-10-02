@@ -5,6 +5,19 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **A rewrite or a split makes new review items** (D-LM-0055).
+  `review edit` no longer changes an item in place: the original closes as
+  history with its lab results, and the rewritten lesson is a new accepted item
+  that names what it revises and starts untested. `review edit` also takes
+  `--cause`, `--applicability` and `--intervention` to correct the hindsight
+  under the lesson. New `review split <id> --part … --part …` makes each part
+  its own pending item. A decided item can no longer be rewritten, split, or
+  given different content. Schema v15 adds `review_items.descendants`
+  (`docs/on-disk-contract.md`). Promoting from the original's id promotes the
+  rewrite.
+- **A lesson a lab run found harmful waits for a person** (D-LM-0055). A
+  candidate with a current `Contradicted` result is not auto-accepted in
+  trusted or automatic review mode. No result of any kind causes an acceptance.
 - **A task set a person approved is an assignment source** (D-LM-0054).
   `AssignmentSource` gains `ApprovedTaskSet { approved_by, drafted_by }` for
   uplift runs. A model may draft the tasks; only a person's approval makes them

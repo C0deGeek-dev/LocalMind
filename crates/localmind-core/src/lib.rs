@@ -52,9 +52,9 @@ pub use hindsight::{
 pub use inference::{InferenceFeatureSettings, InferenceSettings};
 pub use lesson::{
     promote_tool_use, stale_tool_use_lessons, CandidateDestination, CandidateLesson, Confidence,
-    FailureRecovery, InvalidationRule, LessonCategory, LessonScope, ReviewAnnotation,
-    SuggestedAction, ToolUseLesson, ToolUseTrajectory, ValidationStatus, CANDIDATE_IDENTITY_PREFIX,
-    TOOL_USE_SOURCE_WEIGHT,
+    FailureRecovery, InvalidationRule, LessonCategory, LessonRevision, LessonScope,
+    ReviewAnnotation, RevisionError, SuggestedAction, ToolUseLesson, ToolUseTrajectory,
+    ValidationStatus, CANDIDATE_IDENTITY_PREFIX, TOOL_USE_SOURCE_WEIGHT,
 };
 pub use memory::{EpistemicStatus, MemoryEntry, MemoryScope, MemoryStatus};
 pub use review::{ReviewAction, ReviewDecision, ReviewItem, ReviewState};

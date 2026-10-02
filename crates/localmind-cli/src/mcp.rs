@@ -843,4 +843,66 @@ mod tests {
         );
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
     }
+
+    /// The MCP surface can propose a lesson and read memory. It has no tool
+    /// that decides a review item, rewrites or splits one, or promotes one —
+    /// so no agent on this surface, and no lab result it relays, can turn a
+    /// candidate into memory.
+    #[test]
+    fn no_tool_decides_rewrites_or_promotes_a_review_item() {
+        let tools = serde_json::to_value(catalog()).expect("catalog");
+        let names: Vec<String> = tools
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name").to_string())
+            .collect();
+        assert!(names.iter().any(|name| name == TOOL_MEMORY_PROPOSE));
+        for name in &names {
+            for verb in [
+                "accept",
+                "promote",
+                "decide",
+                "review",
+                "edit",
+                "rewrite",
+                "split",
+                "supersede",
+                "reject",
+                "merge",
+            ] {
+                assert!(
+                    !name.contains(verb),
+                    "`{name}` looks like a review decision tool"
+                );
+            }
+        }
+
+        let dir = seeded_project(1);
+        let states = |dir: &std::path::Path| -> Vec<localmind_core::ReviewState> {
+            ReviewQueue::open_project(dir)
+                .expect("queue")
+                .list()
+                .expect("list")
+                .into_iter()
+                .map(|item| item.state)
+                .collect()
+        };
+        let before = states(dir.path());
+        let mut state = McpSessionState::default();
+        for name in [
+            "review_accept",
+            "memory_promote",
+            "review_edit",
+            "review_split",
+        ] {
+            let outcome = call_tool(
+                dir.path(),
+                &json!({ "name": name, "arguments": { "item_id": "x" } }),
+                &mut state,
+            );
+            assert!(outcome.is_err(), "`{name}` must not be callable");
+        }
+        assert_eq!(states(dir.path()), before);
+    }
 }

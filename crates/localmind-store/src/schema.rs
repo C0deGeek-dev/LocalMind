@@ -18,7 +18,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use thiserror::Error;
 
 /// Highest schema version this build understands.
-pub(crate) const DB_SCHEMA_VERSION: i32 = 14;
+pub(crate) const DB_SCHEMA_VERSION: i32 = 15;
 
 /// How long a connection waits on a locked database before failing.
 ///
@@ -112,6 +112,9 @@ pub(crate) fn migrate(connection: &Connection) -> Result<(), SchemaError> {
     }
     if current < 14 {
         apply_v14(&tx)?;
+    }
+    if current < 15 {
+        apply_v15(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {DB_SCHEMA_VERSION}"))
         .map_err(SchemaError::Sqlite)?;
@@ -418,6 +421,18 @@ fn apply_v13(connection: &Connection) -> Result<(), SchemaError> {
 fn apply_v14(connection: &Connection) -> Result<(), SchemaError> {
     connection
         .execute_batch("ALTER TABLE review_items ADD COLUMN delete_existing_target TEXT;")
+        .map_err(SchemaError::Sqlite)
+}
+
+/// A rewritten or split review item closes as history and names the items
+/// that replaced it (`ReviewAction::RevisedInto` / `SplitInto`). The list is a
+/// JSON array of review-item ids, durable on the closed row so lineage can be
+/// read from the original forward as well as from each descendant's `revises`
+/// back. Nullable: every other row, and every row written before this column,
+/// loads with no descendants.
+fn apply_v15(connection: &Connection) -> Result<(), SchemaError> {
+    connection
+        .execute_batch("ALTER TABLE review_items ADD COLUMN descendants TEXT;")
         .map_err(SchemaError::Sqlite)
 }
 
@@ -736,6 +751,36 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(target.as_deref(), Some("mem-1"));
+        assert_eq!(historic, None);
+        Ok(())
+    }
+
+    #[test]
+    fn v15_adds_nullable_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        connection.execute(
+            "INSERT INTO review_items(
+                id, session_id, candidate_json, state, created_at, descendants
+             ) VALUES('source', 'session', '{}', 'merged', 'now', '[\"a\",\"b\"]')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO review_items(id, session_id, candidate_json, state, created_at)
+             VALUES('historic', 'session', '{}', 'merged', 'now')",
+            [],
+        )?;
+        let stored: Option<String> = connection.query_row(
+            "SELECT descendants FROM review_items WHERE id = 'source'",
+            [],
+            |row| row.get(0),
+        )?;
+        let historic: Option<String> = connection.query_row(
+            "SELECT descendants FROM review_items WHERE id = 'historic'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored.as_deref(), Some("[\"a\",\"b\"]"));
         assert_eq!(historic, None);
         Ok(())
     }

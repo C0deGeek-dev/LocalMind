@@ -362,10 +362,39 @@ enum ReviewCommand {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Edit one review queue item before accepting it.
+    /// Rewrite one open review item and accept the rewrite. The original is
+    /// kept as history with its lab results; the rewritten lesson is a new item
+    /// that starts untested.
     Edit {
         item_id: String,
+        /// The rewritten lesson sentence.
         replacement: String,
+        /// Correct the cause the lesson's hindsight names.
+        #[arg(long)]
+        cause: Option<String>,
+        /// Correct where the lesson applies.
+        #[arg(long)]
+        applicability: Option<String>,
+        /// Correct the change that would have avoided the outcome.
+        #[arg(long)]
+        intervention: Option<String>,
+        /// Project root containing .localmind.toml.
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Reviewer identifier to record.
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+        /// Optional review note.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Split one open review item into narrower lessons. Each part becomes its
+    /// own pending item that starts untested; the original is kept as history.
+    Split {
+        item_id: String,
+        /// One part's lesson sentence. Give at least two.
+        #[arg(long = "part", required = true)]
+        parts: Vec<String>,
         /// Project root containing .localmind.toml.
         #[arg(long, default_value = ".")]
         project: PathBuf,
@@ -1182,23 +1211,66 @@ fn main() -> Result<()> {
             ReviewCommand::Edit {
                 item_id,
                 replacement,
+                cause,
+                applicability,
+                intervention,
                 project,
                 reviewer,
                 note,
             } => {
                 let persistence = MemoryPersistence::open_project(&project)?;
                 let queue = ReviewQueue::open_project(project)?;
-                let item = queue.decide(ReviewDecision {
-                    item_id: ReviewItemId::new(item_id),
-                    action: ReviewAction::Edit,
-                    reviewer,
-                    decided_at: None,
+                let outcome = queue.rewrite(
+                    &ReviewItemId::new(item_id),
+                    &localmind_core::LessonRevision {
+                        summary: Some(replacement),
+                        cause,
+                        applicability,
+                        intervention,
+                    },
+                    &reviewer,
                     note,
-                    replacement_summary: Some(replacement),
-                    evidence: Vec::new(),
-                })?;
-                persistence.record_review_item_audit(&item)?;
-                println!("{} -> {:?}", item.id, item.state);
+                )?;
+                persistence.record_review_item_audit(&outcome.original)?;
+                persistence.record_review_item_audit(&outcome.revised)?;
+                println!(
+                    "{} -> {:?} (rewritten as {})",
+                    outcome.original.id, outcome.original.state, outcome.revised.id
+                );
+                println!(
+                    "{} -> {:?} (untested; lab results stay with {})",
+                    outcome.revised.id, outcome.revised.state, outcome.original.id
+                );
+            }
+            ReviewCommand::Split {
+                item_id,
+                parts,
+                project,
+                reviewer,
+                note,
+            } => {
+                let persistence = MemoryPersistence::open_project(&project)?;
+                let queue = ReviewQueue::open_project(project)?;
+                let parts: Vec<_> = parts
+                    .into_iter()
+                    .map(localmind_core::LessonRevision::of_summary)
+                    .collect();
+                let outcome = queue.split(&ReviewItemId::new(item_id), &parts, &reviewer, note)?;
+                persistence.record_review_item_audit(&outcome.original)?;
+                println!(
+                    "{} -> {:?} (split into {} pending items)",
+                    outcome.original.id,
+                    outcome.original.state,
+                    outcome.parts.len()
+                );
+                for part in &outcome.parts {
+                    println!(
+                        "{} -> {:?}: {}",
+                        part.id,
+                        part.state,
+                        part.candidate.summary()
+                    );
+                }
             }
             ReviewCommand::Supersede {
                 item_id,

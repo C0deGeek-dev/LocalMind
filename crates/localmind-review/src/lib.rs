@@ -23,6 +23,8 @@ pub fn decision_closes_item(action: &ReviewAction) -> bool {
             | ReviewAction::IgnoreSimilar
             | ReviewAction::MergeIntoMemory(_)
             | ReviewAction::DeleteExisting(_)
+            | ReviewAction::RevisedInto(_)
+            | ReviewAction::SplitInto(_)
     )
 }
 
@@ -38,6 +40,9 @@ pub fn state_after_decision(decision: &ReviewDecision) -> ReviewState {
         // (never promoted, never mutates the target), not like Supersede
         // (which promotes this candidate as the target's replacement).
         ReviewAction::MergeInto(_) | ReviewAction::MergeIntoMemory(_) => ReviewState::Merged,
+        // A rewritten or split item closes as history: its descendants are the
+        // lessons now, and it is never promoted itself.
+        ReviewAction::RevisedInto(_) | ReviewAction::SplitInto(_) => ReviewState::Merged,
         ReviewAction::MarkTemporary => ReviewState::Deferred,
         ReviewAction::ConvertToSkill => ReviewState::Accepted,
         ReviewAction::Supersede(_) => ReviewState::Accepted,
