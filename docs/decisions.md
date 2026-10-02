@@ -4,6 +4,55 @@ Durable, engine-internal architecture decisions for LocalMind. Host-side
 decisions live with the host; this file records choices that hold regardless
 of which host embeds the engine.
 
+## D-LM-0056 — One renderer shows a candidate's hindsight and lab results, in words that do not overclaim
+
+- **Date**: 2026-10-02
+- **Status**: accepted
+
+A candidate could carry a hindsight draft, lab results, rewrite lineage and a
+harmful-result hold, and no review surface showed any of it. Each surface
+printing its own version would also let the wording drift, and wording is where
+a result gets overclaimed.
+
+**One renderer.** `localmind-review::review_cards` builds a `ReviewCards` value
+from a candidate and its review state; `render_text` is its plain-text form.
+`ReviewQueueItem::cards` and `render_review_cards` are re-exported from the
+store, so the CLI, the web review and an embedding host show the same data in
+the same words. The text is complete on its own: every status is a word, and
+colour or layout only repeats it. Control characters in text that came from a
+model, a log or a tool are replaced, so it cannot recolour a terminal or forge a
+line of the card.
+
+**The wording rules.**
+- A verdict is shown by its stored name, then explained in one sentence.
+- `Supported` is narrow: these tasks, this model, this revision.
+- Logic and Replay are described as checks of reasoning and reproducibility.
+  Neither is worded as a measure of whether a lesson helps.
+- `UnknownCause` and `NoLesson` are safe outcomes. An untested lesson and a
+  lesson with no hindsight are stated as ordinary.
+- A stale result, a harmful result, a history item and a retained detail that is
+  no longer on disk are each said in words.
+- The closing line lists what the reviewer can do. It never preselects.
+
+**How a hindsight was produced is recorded.** `CandidateLesson` gains optional
+`hindsight_provenance` (`HindsightProvenance`: the outcome the deterministic
+check decided, its reasons, model calls, whether a repair was spent, whether the
+draft is the no-model fallback, excerpts dropped). It is omitted when absent, so
+existing candidates keep their identity. It is an account for the reader:
+review automation does not read it, and a test holds that a candidate with and
+without it reaches the same trusted and automatic decision. The fallback is
+worded as the designed path, not as a judgement of a model.
+
+**A barer copy of the same sentence is a repeat.** The enqueue ladder treats
+identical wording over different content as a revision and replaces the pending
+row. When the incoming candidate differs only by having no hindsight where the
+stored one has it, it is now counted as a repeat: the row keeps its analysis and
+its results. Otherwise plain extraction of a sentence that a hindsight pipeline
+already offered would discard the analysis and strand the results as stale.
+
+Rejected: letting each surface format the candidate itself. Three renderers are
+three places for "Supported" to quietly become "proven".
+
 ## D-LM-0055 — A rewrite or a split makes new review items, and only a harmful result may hold a lesson back
 
 - **Date**: 2026-10-02

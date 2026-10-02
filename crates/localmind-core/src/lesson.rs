@@ -1,6 +1,6 @@
 use crate::{
     ContractError, ContractResult, EvidenceRef, ExperimentEvidence, HindsightDraft,
-    HindsightViolation, LessonId,
+    HindsightProvenance, HindsightViolation, LessonId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,13 @@ pub struct CandidateLesson {
     /// that promotes a lesson.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hindsight: Option<HindsightDraft>,
+    /// How the hindsight was produced and what the deterministic check made of
+    /// it: the decided outcome, and whether a model or the no-model fallback
+    /// wrote the draft. For the reviewer only. Absent from the serialized form
+    /// when not recorded, so every candidate written before it existed keeps
+    /// its identity. Nothing in review mode reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hindsight_provenance: Option<HindsightProvenance>,
     /// The [`CandidateLesson::content_identity`] this candidate revises, when
     /// it supersedes an earlier one. `None` for an original.
     ///
@@ -108,6 +115,7 @@ impl CandidateLesson {
             requires_edit_before_promotion: false,
             source: None,
             hindsight: None,
+            hindsight_provenance: None,
             revises: None,
             experiments: Vec::new(),
         }
@@ -200,6 +208,13 @@ impl CandidateLesson {
             Some(hindsight) => hindsight.validate(&self.evidence),
             None => Ok(()),
         }
+    }
+
+    /// Record how the hindsight was produced.
+    #[must_use]
+    pub fn with_hindsight_provenance(mut self, provenance: HindsightProvenance) -> Self {
+        self.hindsight_provenance = Some(provenance);
+        self
     }
 
     /// Attach a lab result about this candidate.

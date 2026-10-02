@@ -810,6 +810,7 @@ name = "localmind-review"
 version = "5.0.0"
 dependencies = [
  "localmind-core",
+ "serde",
 ]
 
 [[package]]

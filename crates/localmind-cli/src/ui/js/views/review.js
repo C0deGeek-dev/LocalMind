@@ -148,6 +148,82 @@ function drawReview() {
   document.querySelector('#selN').textContent = rvChecks.size;
 }
 
+// The hindsight and experiment cards. The server builds them — the same data
+// and the same wording the command line prints — and this only lays them out.
+// Every signal is a word: a status label is text first, and its colour only
+// repeats what the text already says.
+function row(label, value) {
+  return value ? `<div class="crow"><span class="clabel">${esc(label)}</span><span>${esc(value)}</span></div>` : '';
+}
+
+function causeHtml(label, c) {
+  const cites = c.cites.length ? `cites ${c.cites.join(', ')}` : 'cites no fact';
+  return row(label, `${c.claim} (confidence ${(+c.confidence).toFixed(2)}; ${cites})`);
+}
+
+function hindsightHtml(h, missing) {
+  if (!h) return `<section class="card"><h4>Hindsight</h4><p class="cnote">${esc(missing || '')}</p></section>`;
+  const facts = h.facts.map(f => `<li><span class="cid">${esc(f.id)}</span> ${esc(f.kind)}: ${esc(f.label)}${f.redacted ? ' <span class="ctag">redacted</span>' : ''}
+      ${f.excerpt ? `<pre class="cexcerpt">${esc(f.excerpt)}</pre>` : ''}</li>`).join('');
+  return `<section class="card">
+    <h4>Hindsight${h.safe_abstention ? ' <span class="ctag ok">safe outcome: nothing proposed for memory</span>' : ''}</h4>
+    ${row('intended', h.intended)}
+    ${row('observed', h.observed)}
+    ${row('outcome', h.outcome)}
+    ${row('analysis', h.analysis)}
+    <div class="crow"><span class="clabel">facts</span><span>${h.facts.length} recorded by the run, not editable<ul class="cfacts">${facts}</ul></span></div>
+    ${h.cause ? causeHtml('cause', h.cause) : row('cause', 'none established')}
+    ${h.alternatives.map(a => causeHtml('alternative', a)).join('')}
+    ${h.missed_signals.map(s => row('missed signal', s)).join('')}
+    ${row('intervention', h.intervention)}
+    ${row('had it been applied', h.counterfactual)}
+    ${row('applies', h.applicability)}
+    ${h.preconditions.map(p => row('needs', p)).join('')}
+    ${row('stops being true when', h.invalidation)}
+  </section>`;
+}
+
+function secs(ms) {
+  return (ms / 1000).toFixed(1) + ' s';
+}
+
+function experimentHtml(e, n) {
+  const tags = (e.stale ? '<span class="ctag warn">stale: about an earlier version — does not count until rerun</span>' : '')
+    + (e.harmful ? '<span class="ctag bad">harmful result: held for a person</span>' : '');
+  const arms = e.arms.map(a => row('arm ' + a.arm,
+    `${a.passed} of ${a.attempts} passed, ${secs(a.wall_ms)}${a.cancelled ? ', cancelled' : ''}${a.truncated ? ', output truncated' : ''}${a.observations.length ? ' — ' + a.observations.join('; ') : ''}`)).join('');
+  const state = { available: 'available', no_longer_retained: 'no longer retained; the result itself still stands', not_checked: 'not checked from here' };
+  const run = `revision ${e.source_revision.slice(0, 11)}${e.model ? ', model ' + e.model : ''}${e.repetitions ? `, ${e.repetitions} attempt(s), ${secs(e.wall_ms)} in total` : ''}`;
+  return `<section class="card">
+    <h4>${n}. ${esc(e.tier)} — ${esc(e.verdict)} ${tags}</h4>
+    <p class="cmeaning"><b>${esc(e.verdict)}</b> — ${esc(e.meaning)}</p>
+    <p class="cnote">${esc(e.tier)} ${esc(e.tier_meaning)}.</p>
+    ${e.reasons.map(r => row('reason', r)).join('')}
+    ${row('tested', e.task)}
+    ${row('from', e.assignment_source)}
+    ${row('decided by', e.oracle)}
+    ${arms}
+    ${row('injection', e.injection)}
+    ${row('run', run)}
+    ${e.limitations.map(l => row('limit', l)).join('')}
+    ${e.details.map(d => row('details', `${d.locator} (${d.summary}) — ${state[d.state] || d.state}`)).join('')}
+  </section>`;
+}
+
+function cardsHtml(c) {
+  if (!c) return '';
+  const lineage = c.lineage.length
+    ? `<section class="card"><h4>Lineage</h4>${c.lineage.map(l => `<p class="cnote">${esc(l)}</p>`).join('')}</section>` : '';
+  const hold = c.hold ? `<div class="chold">${esc(c.hold)}</div>` : '';
+  const untested = c.untested ? `<section class="card"><h4>Experiments</h4><p class="cnote">${esc(c.untested)}</p></section>` : '';
+  return `<div class="cards">
+    ${lineage}${hold}
+    ${hindsightHtml(c.hindsight, c.no_hindsight)}
+    ${untested}${c.experiments.map((e, i) => experimentHtml(e, i + 1)).join('')}
+    <div class="cnext"><b>Next.</b> ${esc(c.next)}</div>
+  </div>`;
+}
+
 function selReview(id) {
   rvSel = id;
   drawReview();
@@ -184,6 +260,7 @@ function selReview(id) {
     ${it.rationale ? `<div class="meta">⚠ ${esc(it.rationale)}</div>` : ''}
     ${editNeeded}
     <textarea class="edit" id="rvBody">${esc(it.replacement || it.summary)}</textarea>
+    ${cardsHtml(it.cards)}
     ${evidence}
     <div class="actions">${actions}</div>`;
 

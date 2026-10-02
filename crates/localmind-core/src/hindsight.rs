@@ -107,6 +107,33 @@ impl HindsightOutcome {
     }
 }
 
+/// How a hindsight draft came to be, for the person reading it.
+///
+/// Recorded by whoever ran the drafting pass, after the deterministic check
+/// decided the outcome. It is an account, not an input: nothing downstream
+/// decides anything from it, and review automation does not read it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HindsightProvenance {
+    /// The outcome the deterministic check decided — not the drafter's own
+    /// suggestion.
+    pub outcome: HindsightOutcome,
+    /// Why, in the checker's words.
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    /// Model replies received, repairs included. Zero when no model was used.
+    pub model_calls: u32,
+    /// One repair request was spent.
+    #[serde(default)]
+    pub repaired: bool,
+    /// The draft is the no-model fallback: it holds only what was intended and
+    /// what was observed.
+    #[serde(default)]
+    pub fallback: bool,
+    /// Fact excerpts left out to fit the context.
+    #[serde(default)]
+    pub excerpts_dropped: u32,
+}
+
 /// A versioned, bounded, evidence-linked hindsight record.
 ///
 /// The concise `proposed_lesson` is deliberately separate from the analysis

@@ -95,6 +95,35 @@ fn edit_rewrites_into_a_new_item_and_names_both() -> Result<(), Box<dyn std::err
             .any(|record| record.kind == "ReviewDecisionRecorded" && record.subject == subject));
     }
 
+    // `review inspect` shows the cards for both sides of the rewrite.
+    let inspect = |id: &str| -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::cargo_bin("localmind")?
+            .args(["review", "inspect", id, "--project"])
+            .arg(project.path())
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    let shown = inspect("lesson-a")?;
+    assert!(shown.contains("Reviewer: ada"), "{shown}");
+    assert!(
+        shown.contains("History: a reviewer rewrote this lesson as lesson-a-r1."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Nothing to decide: this item is history."),
+        "{shown}"
+    );
+    let shown = inspect("lesson-a-r1")?;
+    assert!(
+        shown.contains("This lesson replaces an earlier version"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Not tested. Most lessons are not"),
+        "{shown}"
+    );
+
     // Decided once: a second edit of the original is refused.
     let again = review(
         project.path(),

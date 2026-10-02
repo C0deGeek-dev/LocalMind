@@ -5,6 +5,18 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+- **Review shows a lesson's hindsight and lab results** (D-LM-0056).
+  `review inspect` and the web review now show two cards for every item: the
+  hindsight (what was intended and observed, the facts, the cause and its
+  alternatives, where it applies) and each lab result (what was run, by what it
+  was decided, the arms, the verdict in plain words, its limits, and whether it
+  is stale). Rewrite lineage and a harmful-result hold are shown too. Every
+  surface uses one renderer, so the wording is the same everywhere. A candidate
+  may now record how its hindsight was produced (`hindsight_provenance`,
+  `docs/on-disk-contract.md`).
+- **A plain copy of a sentence no longer replaces a lesson that carries
+  hindsight** (D-LM-0056). Re-extracting the same sentence from a transcript
+  counts as a repeat, so the analysis and its results stay.
 - **A rewrite or a split makes new review items** (D-LM-0055).
   `review edit` no longer changes an item in place: the original closes as
   history with its lab results, and the rewritten lesson is a new accepted item

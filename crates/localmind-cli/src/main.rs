@@ -1107,7 +1107,7 @@ fn main() -> Result<()> {
                 }
             }
             ReviewCommand::Inspect { item_id, project } => {
-                let queue = ReviewQueue::open_project(project)?;
+                let queue = ReviewQueue::open_project(&project)?;
                 if let Some(item) = queue.get(&ReviewItemId::new(item_id))? {
                     println!("ID: {}", item.id);
                     println!("State: {:?}", item.state);
@@ -1119,12 +1119,19 @@ fn main() -> Result<()> {
                     );
                     println!("Category: {:?}", item.candidate.category);
                     println!("Confidence: {:.3}", item.candidate.confidence.value());
-                    if let Some(replacement) = item.replacement_summary {
+                    if let Some(replacement) = &item.replacement_summary {
                         println!("Replacement: {replacement}");
                     }
-                    if let Some(note) = item.note {
+                    if let Some(note) = &item.note {
                         println!("Note: {note}");
                     }
+                    if let Some(reviewer) = &item.reviewer {
+                        println!("Reviewer: {reviewer}");
+                    }
+                    print!(
+                        "{}",
+                        localmind_store::render_review_cards(&item.cards(&project))
+                    );
                 } else {
                     println!("Review item not found");
                 }

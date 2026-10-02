@@ -73,6 +73,47 @@ pub struct ReviewQueueItem {
     pub descendants: Vec<ReviewItemId>,
 }
 
+impl ReviewQueueItem {
+    /// The hindsight and experiment cards for this item, as every review
+    /// surface shows them. `project_root` is used only to say whether a
+    /// retained detail can still be opened.
+    #[must_use]
+    pub fn cards(&self, project_root: &Path) -> localmind_review::ReviewCards {
+        localmind_review::review_cards(
+            &localmind_review::CardContext {
+                candidate: &self.candidate,
+                state: &self.state,
+                closed_as: self.reviewer_action.as_deref(),
+                descendants: &self.descendants,
+            },
+            &|locator| retained_detail_state(project_root, locator),
+        )
+    }
+}
+
+/// Whether a retained detail named by a project-relative locator is still on
+/// disk. Only existence is checked, and only for a plain relative path: a
+/// locator that is absolute, climbs out of the project, or is not a path at all
+/// is reported as not checked rather than probed.
+#[must_use]
+pub fn retained_detail_state(project_root: &Path, locator: &str) -> localmind_review::DetailState {
+    use localmind_review::DetailState;
+    let path = Path::new(locator);
+    let plain = !locator.contains("://")
+        && path.is_relative()
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+    if !plain {
+        return DetailState::NotChecked;
+    }
+    if project_root.join(path).exists() {
+        DetailState::Available
+    } else {
+        DetailState::NoLongerRetained
+    }
+}
+
 /// What [`ReviewQueue::rewrite`] did: the original, closed as history with its
 /// text and lab results untouched, and the revised lesson that replaced it.
 #[derive(Clone, Debug, PartialEq)]
@@ -413,6 +454,22 @@ impl ReviewQueue {
             // names what it replaced.
             let item_id = ReviewItemId::new(survivor_id.as_str());
             let stored = self.get(&item_id)?.map(|item| item.candidate);
+            // Two routes can produce the same sentence: a host's hindsight
+            // pipeline, and plain extraction from the same session's transcript.
+            // The extraction carries no analysis. Letting it "revise" the row
+            // would throw away the hindsight and strand its results as stale,
+            // so a copy that only lacks the analysis counts as a repeat.
+            let barer = candidate.hindsight.is_none()
+                && stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.hindsight.is_some());
+            if barer {
+                return Ok(EnqueueCandidateOutcome {
+                    item_id: survivor_id,
+                    created: false,
+                    changed: true,
+                });
+            }
             if !restatement {
                 let mut revised = candidate
                     .clone()

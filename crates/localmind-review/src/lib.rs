@@ -1,5 +1,13 @@
 //! Review queue workflow boundary.
 
+mod cards;
+
+pub use cards::{
+    outcome_meaning, reason_meaning, render_text, review_cards, tier_meaning, verdict_meaning,
+    ArmLine, CardContext, CauseLine, DetailLine, DetailState, ExperimentCard, FactLine,
+    HindsightCard, ReviewCards,
+};
+
 use localmind_core::{ReviewAction, ReviewDecision, ReviewState};
 
 /// Whether a review decision's action *closes* (terminates) its queue item.

@@ -259,6 +259,11 @@ A `LessonAssignment` may carry `source` (an `AssignmentSource`: `RecordedTraject
 its identity. `VerdictReason` codes are written as a bare name, or `{"Other": "…"}`;
 a name a build does not know is read as `Other` carrying it (D-LM-0053).
 
+A candidate may carry `hindsight_provenance` — how its hindsight was produced: the
+decided `outcome`, `reasons`, `model_calls`, `repaired`, `fallback` and
+`excerpts_dropped`. It is omitted when absent, so a candidate written before it keeps
+its identity, and nothing in review mode reads it (D-LM-0056).
+
 An older binary reads a record carrying `hindsight`, `revises` or `experiments`,
 because unknown fields are ignored. If it **rewrites** that row — an edit, or
 `replace_candidate` — those fields are dropped. The summary and every field that

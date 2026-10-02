@@ -45,9 +45,10 @@ pub use graph::{
     GraphEndpoint, GraphNode, NodeKind, SourceLocation, TypeShape,
 };
 pub use hindsight::{
-    CausalHypothesis, HindsightDraft, HindsightOutcome, HindsightViolation, HINDSIGHT_DRAFT_SCHEMA,
-    HINDSIGHT_DRAFT_VERSION, MAX_EVIDENCE_IDS_PER_HYPOTHESIS, MAX_HYPOTHESES, MAX_LESSON_CHARS,
-    MAX_LIST_ITEMS, MAX_TEXT_CHARS, SINGLE_FACT_CONFIDENCE_CEILING,
+    CausalHypothesis, HindsightDraft, HindsightOutcome, HindsightProvenance, HindsightViolation,
+    HINDSIGHT_DRAFT_SCHEMA, HINDSIGHT_DRAFT_VERSION, MAX_EVIDENCE_IDS_PER_HYPOTHESIS,
+    MAX_HYPOTHESES, MAX_LESSON_CHARS, MAX_LIST_ITEMS, MAX_TEXT_CHARS,
+    SINGLE_FACT_CONFIDENCE_CEILING,
 };
 pub use inference::{InferenceFeatureSettings, InferenceSettings};
 pub use lesson::{

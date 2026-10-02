@@ -585,6 +585,33 @@ tr.audit:hover { background: rgba(0, 240, 255, 0.03); }
 
 #identForm input { flex: 1; }
 
+/* ── Review cards (hindsight + experiments) ── */
+.cards { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.card {
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  padding: 10px 12px;
+}
+.card h4 { margin: 0 0 8px; font-size: 13px; color: var(--cyan); letter-spacing: 0.04em; }
+.crow { display: grid; grid-template-columns: 11em 1fr; gap: 8px; font-size: 13px; padding: 2px 0; }
+.clabel { color: var(--muted); }
+.cnote { color: var(--muted); font-size: 12.5px; margin: 2px 0 6px; }
+.cmeaning { font-size: 13px; margin: 0 0 4px; }
+.cfacts { margin: 4px 0 0; padding-left: 18px; }
+.cid { font-family: var(--font-mono); color: var(--violet); font-size: 12px; }
+.cexcerpt { white-space: pre-wrap; max-height: 8em; overflow: auto; font-size: 12px; margin: 4px 0; }
+.ctag {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--line-bright); color: var(--muted); font-size: 11.5px; font-weight: 400;
+}
+.ctag.ok { color: var(--green); border-color: var(--green); }
+.ctag.warn { color: var(--amber); border-color: var(--amber); }
+.ctag.bad { color: var(--red); border-color: var(--red); }
+.chold { border: 1px solid var(--red); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.cnext { border-top: 1px solid var(--line-bright); padding-top: 8px; font-size: 13px; }
+@media (max-width: 760px) { .crow { grid-template-columns: 1fr; gap: 0; } }
+
 /* ── Graph canvas ── */
 #graphHost { flex: 1; min-height: 0; position: relative; }
 

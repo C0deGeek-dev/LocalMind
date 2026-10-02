@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 localmind-core = { path = "../localmind-core" }
+serde = { workspace = true }

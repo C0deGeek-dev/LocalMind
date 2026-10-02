@@ -191,7 +191,7 @@ fn api_review_list(project: &Path, query: &str) -> Result<Value> {
             Some(state) => format!("{:?}", item.state).eq_ignore_ascii_case(state),
             None => true,
         })
-        .map(|item| review_item_json(&item, &promoted))
+        .map(|item| review_item_json(project, &item, &promoted))
         .collect();
     Ok(json!({ "items": items }))
 }
@@ -201,7 +201,7 @@ fn api_review_get(project: &Path, id: &str) -> Result<Value> {
     let persistence = MemoryPersistence::open_project(project)?;
     let promoted = promoted_ids(&persistence)?;
     match queue.get(&ReviewItemId::new(id))? {
-        Some(item) => Ok(review_item_json(&item, &promoted)),
+        Some(item) => Ok(review_item_json(project, &item, &promoted)),
         None => Err(anyhow!("review item not found: {id}")),
     }
 }
@@ -958,8 +958,18 @@ fn decide(
     Ok(format!("{:?}", item.state))
 }
 
-fn review_item_json(item: &localmind_store::ReviewQueueItem, promoted: &HashSet<String>) -> Value {
+fn review_item_json(
+    project: &Path,
+    item: &localmind_store::ReviewQueueItem,
+    promoted: &HashSet<String>,
+) -> Value {
+    // The same cards every surface shows, as data for the page to lay out and
+    // as the plain text the command line prints.
+    let cards = item.cards(project);
     json!({
+        "cards_text": localmind_store::render_review_cards(&cards),
+        "cards": serde_json::to_value(&cards).unwrap_or(Value::Null),
+        "reviewer": item.reviewer.clone(),
         "id": item.id.to_string(),
         "state": format!("{:?}", item.state),
         "session": item.session_id.to_string(),
@@ -1363,5 +1373,60 @@ mod tests {
             .collect();
         assert!(decisions.contains(&id), "the original's closing is audited");
         assert!(decisions.contains(&original.descendants[0].to_string()));
+    }
+
+    /// The web review gets the same cards the command line prints: as data to
+    /// lay out, and as the identical plain text. The page's layout carries
+    /// every status as words.
+    #[test]
+    fn the_web_review_item_carries_the_cards_as_data_and_as_the_same_text() {
+        let (dir, id) = project_with_pending();
+        let item = super::api_review_get(dir.path(), &id).expect("item");
+
+        let text = item["cards_text"].as_str().expect("text");
+        assert!(
+            text.contains("Hindsight\n  No hindsight was drafted"),
+            "{text}"
+        );
+        assert!(text.contains("Not tested. Most lessons are not"), "{text}");
+        assert_eq!(
+            item["cards"]["untested"],
+            item["cards"]["untested"].as_str().expect("untested")
+        );
+        assert!(item["cards"]["experiments"]
+            .as_array()
+            .expect("experiments")
+            .is_empty());
+        assert_eq!(
+            item["cards"]["next"],
+            "You can accept, rewrite, split, reject or defer."
+        );
+
+        let queue = ReviewQueue::open_project(dir.path()).expect("queue");
+        let stored = queue
+            .get(&localmind_core::ReviewItemId::new(id.as_str()))
+            .expect("get")
+            .expect("stored");
+        assert_eq!(
+            text,
+            localmind_store::render_review_cards(&stored.cards(dir.path())),
+            "one renderer, one wording"
+        );
+
+        // The layout names each status in text; colour only repeats it.
+        for words in [
+            "stale: about an earlier version",
+            "harmful result: held for a person",
+            "safe outcome: nothing proposed for memory",
+            "no longer retained; the result itself still stands",
+            "class=\"chold\"",
+            "cardsHtml(it.cards)",
+        ] {
+            assert!(
+                super::JS_REVIEW.contains(words),
+                "review.js lacks `{words}`"
+            );
+        }
+        assert!(super::CSS_LOCALMIND.contains(".card {"));
     }
 }
