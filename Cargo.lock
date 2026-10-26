@@ -722,7 +722,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-cli"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-codegraph"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "fs2",
  "idna_adapter",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-review"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
  "serde",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-search"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-codegraph",
  "localmind-core",
@@ -829,14 +829,14 @@ dependencies = [
 
 [[package]]
 name = "localmind-skills"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "localmind-core",
 ]
 
 [[package]]
 name = "localmind-store"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "crypto_box",
  "ed25519-dalek",

@@ -5,6 +5,10 @@ Notable changes, newest first. Contract-relevant entries reference
 
 ## Unreleased
 
+## v6.0.0 - 2026-10-26
+
+Coordinated LocalX release.
+
 - **Review cards no longer show a short check as `0.0 s`.** A duration under a
   second is shown in milliseconds, and a result that never measured its time
   shows no time.
